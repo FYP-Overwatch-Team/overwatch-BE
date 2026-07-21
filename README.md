@@ -1,4 +1,4 @@
-# Overwatch Backend (Eval 1)
+# Overwatch Backend 
 
 FastAPI backend for Overwatch: GitHub/Jira connectors, AST-based architecture graph (tree-sitter → Neo4j), Jira ticket viewer, and Gemini-grounded diagram Q&A.
 
@@ -23,7 +23,7 @@ uv run pytest -m regression      # regression snapshot suite only
 
 See `overwatch-eval1-backend-plan.md` for the full build plan and phase breakdown.
 
-## Deployment (eval 1)
+## Deployment 
 
 **Services (all free-tier):**
 - **API** — Railway or Render, Docker deploy using the included `Dockerfile`
