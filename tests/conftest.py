@@ -15,6 +15,8 @@ def test_env(monkeypatch):
     monkeypatch.setenv("FERNET_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("GITHUB_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("GITHUB_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("JIRA_CLIENT_ID", "test-jira-client-id")
+    monkeypatch.setenv("JIRA_CLIENT_SECRET", "test-jira-client-secret")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
