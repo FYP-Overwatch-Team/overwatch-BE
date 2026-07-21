@@ -32,6 +32,17 @@ uv run pytest -m regression      # regression snapshot suite only
 
 See `overwatch-eval1-backend-plan.md` for the full build plan and phase breakdown.
 
+## Git hooks
+
+Enable the tracked pre-push hook once after cloning:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+Every push runs the full backend test suite and is blocked if any test fails.
+Use `git push --no-verify` only for exceptional, intentional bypasses.
+
 ## Deployment 
 
 **Services (all free-tier):**
