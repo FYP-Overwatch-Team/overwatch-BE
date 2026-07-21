@@ -76,6 +76,39 @@ class GitHubClient:
         resp = await self.api_get(token, "/user")
         return resp.json()
 
+    async def list_repos(self, token: str) -> list[dict]:
+        """All repos the token can access; GitHub caps at 100/page so we walk pages."""
+        repos: list[dict] = []
+        page = 1
+        while True:
+            resp = await self.api_get(token, "/user/repos", per_page=100, page=page, sort="updated")
+            batch = resp.json()
+            repos.extend(batch)
+            if len(batch) < 100:
+                return repos
+            page += 1
+
+    async def get_repo(self, token: str, repo_full_name: str) -> dict:
+        resp = await self.api_get(token, f"/repos/{repo_full_name}")
+        if resp.status_code == 404:
+            raise ExternalServiceError("repository not found", error_code="repo_not_found", status_code=404)
+        return resp.json()
+
+    async def create_push_webhook(self, token: str, repo_full_name: str, callback_url: str, secret: str) -> int:
+        resp = await self.api_post(
+            token,
+            f"/repos/{repo_full_name}/hooks",
+            json={
+                "name": "web",
+                "active": True,
+                "events": ["push"],
+                "config": {"url": callback_url, "content_type": "json", "secret": secret},
+            },
+        )
+        if resp.status_code != 201:
+            raise ExternalServiceError("webhook creation failed", error_code="webhook_create_failed")
+        return resp.json()["id"]
+
     @staticmethod
     def _auth_headers(token: str) -> dict:
         return {

@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 
 from app.api.deps import get_current_user
-from app.api.routes import auth
+from app.api.routes import auth, github
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import RequestContextMiddleware, configure_logging
@@ -27,6 +27,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     register_exception_handlers(app)
 
     app.include_router(auth.router)
+    app.include_router(github.router)
 
     @app.get("/health")
     async def health() -> dict:

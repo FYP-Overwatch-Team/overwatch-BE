@@ -28,6 +28,8 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
 
+    repos_dir: str = "./repos"
+
 
 @lru_cache
 def get_settings() -> Settings:
