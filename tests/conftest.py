@@ -6,6 +6,8 @@ from mongomock_motor import AsyncMongoMockClient
 from app.core.config import get_settings
 from app.db import mongo
 from app.main import create_app
+from app.services import graph_service
+from app.services.graph_service import InMemoryGraphRepository
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +30,14 @@ def mock_mongo():
     mongo.use_db(client["overwatch_test"])
     yield
     mongo.use_db(None)
+
+
+@pytest.fixture(autouse=True)
+def graph_repo():
+    repo = InMemoryGraphRepository()
+    graph_service.use_graph_repository(repo)
+    yield repo
+    graph_service.use_graph_repository(None)
 
 
 @pytest.fixture

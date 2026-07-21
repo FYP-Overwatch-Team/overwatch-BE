@@ -1,0 +1,138 @@
+{
+  "files": [
+    {
+      "definitions": [
+        {
+          "kind": "class",
+          "name": "ApiHandler"
+        },
+        {
+          "kind": "function",
+          "name": "handle_request"
+        }
+      ],
+      "imports": [
+        "os",
+        "services.users",
+        "utils.helpers"
+      ],
+      "language": "python",
+      "path": "api/handlers.py"
+    },
+    {
+      "definitions": [
+        {
+          "kind": "function",
+          "name": "run"
+        }
+      ],
+      "imports": [
+        "api.handlers"
+      ],
+      "language": "python",
+      "path": "main.py"
+    },
+    {
+      "definitions": [
+        {
+          "kind": "function",
+          "name": "get_user"
+        }
+      ],
+      "imports": [
+        "json",
+        "utils.helpers"
+      ],
+      "language": "python",
+      "path": "services/users.py"
+    },
+    {
+      "definitions": [
+        {
+          "kind": "function",
+          "name": "fmt"
+        }
+      ],
+      "imports": [],
+      "language": "python",
+      "path": "utils/helpers.py"
+    }
+  ],
+  "graph": {
+    "edges": [
+      {
+        "source": "fixture/py:api",
+        "target": "fixture/py:__external__",
+        "type": "EXTERNAL_DEPENDENCY",
+        "weight": 1
+      },
+      {
+        "source": "fixture/py:api",
+        "target": "fixture/py:services",
+        "type": "DEPENDS_ON",
+        "weight": 1
+      },
+      {
+        "source": "fixture/py:api",
+        "target": "fixture/py:utils",
+        "type": "DEPENDS_ON",
+        "weight": 1
+      },
+      {
+        "source": "fixture/py:root",
+        "target": "fixture/py:api",
+        "type": "DEPENDS_ON",
+        "weight": 1
+      },
+      {
+        "source": "fixture/py:services",
+        "target": "fixture/py:__external__",
+        "type": "EXTERNAL_DEPENDENCY",
+        "weight": 1
+      },
+      {
+        "source": "fixture/py:services",
+        "target": "fixture/py:utils",
+        "type": "DEPENDS_ON",
+        "weight": 1
+      }
+    ],
+    "nodes": [
+      {
+        "definition_count": 2,
+        "file_count": 1,
+        "id": "fixture/py:api",
+        "kind": "module",
+        "name": "api"
+      },
+      {
+        "definition_count": 1,
+        "file_count": 1,
+        "id": "fixture/py:root",
+        "kind": "module",
+        "name": "root"
+      },
+      {
+        "definition_count": 1,
+        "file_count": 1,
+        "id": "fixture/py:services",
+        "kind": "module",
+        "name": "services"
+      },
+      {
+        "definition_count": 1,
+        "file_count": 1,
+        "id": "fixture/py:utils",
+        "kind": "module",
+        "name": "utils"
+      },
+      {
+        "definition_count": 0,
+        "file_count": 0,
+        "id": "fixture/py:__external__",
+        "kind": "external",
+        "name": "external dependencies"
+      }
+    ]
+  }
+}
