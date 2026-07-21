@@ -1,0 +1,34 @@
+{
+  "issues": [
+    {
+      "key": "OVR-1",
+      "fields": {
+        "summary": "Set up CI pipeline",
+        "status": {"name": "Done"},
+        "assignee": {"displayName": "Alex Doe"},
+        "priority": {"name": "High"},
+        "updated": "2026-07-10T12:00:00.000+0000"
+      }
+    },
+    {
+      "key": "OVR-2",
+      "fields": {
+        "summary": "Fix login redirect loop",
+        "status": {"name": "In Progress"},
+        "assignee": {"displayName": "Sam Lee"},
+        "priority": {"name": "Highest"},
+        "updated": "2026-07-15T09:30:00.000+0000"
+      }
+    },
+    {
+      "key": "OVR-3",
+      "fields": {
+        "summary": "Add graph tooltip",
+        "status": {"name": "To Do"},
+        "assignee": null,
+        "priority": {"name": "Low"},
+        "updated": "2026-07-18T16:45:00.000+0000"
+      }
+    }
+  ]
+}

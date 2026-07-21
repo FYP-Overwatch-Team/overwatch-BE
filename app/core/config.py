@@ -30,6 +30,8 @@ class Settings(BaseSettings):
 
     repos_dir: str = "./repos"
 
+    ticket_sync_interval_seconds: int = 300
+
 
 @lru_cache
 def get_settings() -> Settings:

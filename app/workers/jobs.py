@@ -147,8 +147,50 @@ def enqueue_initial_parse(background_tasks, user_id: str, repo_full_name: str) -
 
 
 async def run_ticket_sync(user_id: str, project_key: str) -> None:
-    """Placeholder until Phase 7 wires in the Jira ticket sync."""
-    logger.info("ticket_sync_requested", project=project_key)
+    """Full ticket pull for one project; sync_status acts as the overlap lock."""
+    from app.services import ticket_service  # local import to avoid a cycle
+
+    claimed = await mongo.jira_projects().find_one_and_update(
+        {
+            "user_id": user_id,
+            "project_key": project_key,
+            "sync_status": {"$ne": "in_progress"},
+        },
+        {"$set": {"sync_status": "in_progress", "updated_at": datetime.now(timezone.utc)}},
+    )
+    if claimed is None:
+        logger.info("ticket_sync_skipped_already_running", project=project_key)
+        return
+
+    try:
+        count = await ticket_service.sync_project(user_id, project_key)
+        await mongo.jira_projects().update_one(
+            {"user_id": user_id, "project_key": project_key},
+            {"$set": {
+                "sync_status": "done",
+                "sync_error": None,
+                "last_synced_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+        )
+        logger.info("ticket_sync_done", project=project_key, tickets=count)
+    except Exception as exc:
+        logger.exception("ticket_sync_failed", project=project_key)
+        await mongo.jira_projects().update_one(
+            {"user_id": user_id, "project_key": project_key},
+            {"$set": {
+                "sync_status": "failed",
+                "sync_error": str(exc),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+        )
+
+
+async def resync_all_projects() -> None:
+    """One polling pass over every connected project (eval-1 choice: polling
+    instead of Jira webhooks — say so if asked why tickets aren't real-time)."""
+    async for project in mongo.jira_projects().find({}):
+        await run_ticket_sync(project["user_id"], project["project_key"])
 
 
 def enqueue_ticket_sync(background_tasks, user_id: str, project_key: str) -> None:
