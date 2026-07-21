@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.deps import get_current_user
 from app.api.routes import auth, github, graph, jira, onboarding, query, tickets, webhooks
@@ -40,6 +41,15 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app = FastAPI(title="Overwatch Backend", version="0.1.0", lifespan=lifespan if manage_db else None)
     app.state.settings = settings
     app.add_middleware(RequestContextMiddleware)
+    # Locked to the configured frontend origin, never "*" — GitHub/Jira tokens
+    # flow through this API, so an open CORS policy is a real risk, not a lint warning.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[settings.frontend_origin],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     register_exception_handlers(app)
 
     app.include_router(auth.router)
