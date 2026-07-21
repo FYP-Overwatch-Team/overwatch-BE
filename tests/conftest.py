@@ -6,8 +6,10 @@ from mongomock_motor import AsyncMongoMockClient
 from app.core.config import get_settings
 from app.db import mongo
 from app.main import create_app
+from app.integrations import gemini_client
 from app.services import graph_service
 from app.services.graph_service import InMemoryGraphRepository
+from tests.fakes import FakeGeminiClient
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +40,14 @@ def graph_repo():
     graph_service.use_graph_repository(repo)
     yield repo
     graph_service.use_graph_repository(None)
+
+
+@pytest.fixture
+def fake_gemini():
+    fake = FakeGeminiClient()
+    gemini_client.use_gemini_client(fake)
+    yield fake
+    gemini_client.use_gemini_client(None)
 
 
 @pytest.fixture

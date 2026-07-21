@@ -15,6 +15,7 @@ dependencies = [
     "tree-sitter>=0.26.0",
     "tree-sitter-language-pack>=1.13.2",
     "pathspec>=1.1.1",
+    "google-genai>=2.12.1",
 ]
 
 [dependency-groups]

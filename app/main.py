@@ -5,7 +5,7 @@ import structlog
 from fastapi import Depends, FastAPI
 
 from app.api.deps import get_current_user
-from app.api.routes import auth, github, graph, jira, onboarding, tickets, webhooks
+from app.api.routes import auth, github, graph, jira, onboarding, query, tickets, webhooks
 from app.workers import jobs
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -49,6 +49,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(graph.router)
     app.include_router(webhooks.router)
     app.include_router(tickets.router)
+    app.include_router(query.router)
 
     @app.get("/health")
     async def health() -> dict:
