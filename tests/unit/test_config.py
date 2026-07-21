@@ -1,7 +1,9 @@
 from app.core.config import Settings
 
 
-def test_defaults_load_without_env_file():
+def test_defaults_load_without_env_file(monkeypatch):
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("MONGO_DB_NAME", raising=False)
     settings = Settings(_env_file=None)
     assert settings.app_env == "dev"
     assert settings.mongo_db_name == "overwatch"
