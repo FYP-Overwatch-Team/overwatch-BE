@@ -47,6 +47,22 @@ async def clone_repo(repo_full_name: str, token: str) -> Path:
     return dest
 
 
+async def update_workdir(repo_full_name: str, token: str) -> Path:
+    """Bring the shallow checkout up to date; falls back to a fresh clone."""
+    dest = repo_workdir(repo_full_name)
+    if not (dest / ".git").exists():
+        return await clone_repo(repo_full_name, token)
+    for args in (["fetch", "--depth", "1", "origin"], ["reset", "--hard", "FETCH_HEAD"]):
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(dest), *args,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        if proc.returncode != 0:
+            return await clone_repo(repo_full_name, token)
+    return dest
+
+
 def _rmtree(path: Path) -> None:
     import shutil
     import stat

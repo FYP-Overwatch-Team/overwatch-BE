@@ -61,3 +61,7 @@ def tickets():
 
 def webhook_deliveries():
     return get_db()["webhook_deliveries"]
+
+
+def file_parses():
+    return get_db()["file_parses"]

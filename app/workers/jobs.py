@@ -35,28 +35,110 @@ async def run_initial_parse(user_id: str, repo_full_name: str) -> None:
     try:
         workdir = repo_service.repo_workdir(repo_full_name)
         parses = ast_service.parse_repo(workdir)
-        graph = graph_builder.build_graph(repo_full_name, parses)
-        await get_graph_repository().upsert_graph(repo_full_name, graph)
-        await mongo.repos().update_one(
-            {"user_id": user_id, "repo_full_name": repo_full_name},
-            {"$set": {
-                "parse_status": "done",
-                "parse_error": None,
-                "updated_at": datetime.now(timezone.utc),
-            }},
-        )
-        logger.info("parse_done", repo=repo_full_name,
-                    nodes=len(graph["nodes"]), edges=len(graph["edges"]))
+        # replace the per-file parse cache wholesale; incremental re-parse patches it
+        await mongo.file_parses().delete_many({"repo_full_name": repo_full_name})
+        if parses:
+            await mongo.file_parses().insert_many([
+                {
+                    "repo_full_name": repo_full_name,
+                    "path": p.path,
+                    "language": p.language,
+                    "imports": p.imports,
+                    "definitions": p.definitions,
+                }
+                for p in parses
+            ])
+        await _rebuild_and_store_graph(repo_full_name)
+        await _set_parse_status(user_id, repo_full_name, "done")
+        logger.info("parse_done", repo=repo_full_name, files=len(parses))
     except Exception as exc:
         logger.exception("parse_failed", repo=repo_full_name)
-        await mongo.repos().update_one(
-            {"user_id": user_id, "repo_full_name": repo_full_name},
-            {"$set": {
-                "parse_status": "failed",
-                "parse_error": str(exc),
-                "updated_at": datetime.now(timezone.utc),
-            }},
+        await _set_parse_status(user_id, repo_full_name, "failed", error=str(exc))
+
+
+async def run_incremental_reparse(
+    user_id: str, repo_full_name: str, changed_files: list[str], removed_files: list[str],
+) -> None:
+    """Webhook-driven partial update: parse only the touched files, then rebuild
+    the (directory-level) graph from the per-file cache."""
+    claimed = await mongo.repos().find_one_and_update(
+        {
+            "user_id": user_id,
+            "repo_full_name": repo_full_name,
+            "parse_status": {"$ne": "in_progress"},
+        },
+        {"$set": {"parse_status": "in_progress", "updated_at": datetime.now(timezone.utc)}},
+    )
+    if claimed is None:
+        logger.info("reparse_skipped_already_running", repo=repo_full_name)
+        return
+
+    try:
+        token = await repo_service.get_github_token(user_id)
+        workdir = await repo_service.update_workdir(repo_full_name, token)
+
+        for rel_path in removed_files:
+            await mongo.file_parses().delete_one({"repo_full_name": repo_full_name, "path": rel_path})
+
+        for rel_path in changed_files:
+            abs_path = workdir / rel_path
+            if abs_path.suffix not in ast_service.LANGUAGE_BY_EXT:
+                continue
+            if not abs_path.is_file():
+                await mongo.file_parses().delete_one({"repo_full_name": repo_full_name, "path": rel_path})
+                continue
+            parse = ast_service.parse_file(workdir, abs_path)
+            await mongo.file_parses().update_one(
+                {"repo_full_name": repo_full_name, "path": parse.path},
+                {"$set": {
+                    "language": parse.language,
+                    "imports": parse.imports,
+                    "definitions": parse.definitions,
+                }},
+                upsert=True,
+            )
+
+        await _rebuild_and_store_graph(repo_full_name)
+        await _set_parse_status(user_id, repo_full_name, "done")
+        logger.info("incremental_reparse_done", repo=repo_full_name,
+                    changed=len(changed_files), removed=len(removed_files))
+    except Exception as exc:
+        logger.exception("incremental_reparse_failed", repo=repo_full_name)
+        await _set_parse_status(user_id, repo_full_name, "failed", error=str(exc))
+
+
+def enqueue_incremental_reparse(
+    background_tasks, user_id: str, repo_full_name: str,
+    changed_files: list[str], removed_files: list[str],
+) -> None:
+    enqueued_jobs.append({
+        "job": "incremental_reparse", "user_id": user_id, "repo": repo_full_name,
+        "changed": changed_files, "removed": removed_files,
+    })
+    background_tasks.add_task(run_incremental_reparse, user_id, repo_full_name, changed_files, removed_files)
+
+
+async def _rebuild_and_store_graph(repo_full_name: str) -> None:
+    parses = [
+        ast_service.FileParse(
+            path=doc["path"], language=doc["language"],
+            imports=doc["imports"], definitions=doc["definitions"],
         )
+        async for doc in mongo.file_parses().find({"repo_full_name": repo_full_name})
+    ]
+    graph = graph_builder.build_graph(repo_full_name, parses)
+    await get_graph_repository().upsert_graph(repo_full_name, graph)
+
+
+async def _set_parse_status(user_id: str, repo_full_name: str, status: str, error: str | None = None) -> None:
+    await mongo.repos().update_one(
+        {"user_id": user_id, "repo_full_name": repo_full_name},
+        {"$set": {
+            "parse_status": status,
+            "parse_error": error,
+            "updated_at": datetime.now(timezone.utc),
+        }},
+    )
 
 
 def enqueue_initial_parse(background_tasks, user_id: str, repo_full_name: str) -> None:
