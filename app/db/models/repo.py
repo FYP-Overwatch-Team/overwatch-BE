@@ -17,6 +17,7 @@ class Repo(BaseModel):
     webhook_id: int | None = None
     webhook_secret_encrypted: str | None = None
     webhook_status: str = "pending"  # pending | created | failed
+    webhook_error: str | None = None
     parse_status: str = "pending"  # pending | in_progress | done | failed
     parse_error: str | None = None
     connected_at: datetime

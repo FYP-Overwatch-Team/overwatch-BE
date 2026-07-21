@@ -7,7 +7,7 @@ import structlog
 
 from app.core import security
 from app.core.config import get_settings
-from app.core.exceptions import ConflictError, ForbiddenError, UnauthorizedError
+from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, UnauthorizedError
 from app.db import mongo
 from app.integrations.github_client import get_github_client
 
@@ -74,6 +74,39 @@ def _rmtree(path: Path) -> None:
     shutil.rmtree(path, onexc=_on_error)
 
 
+async def register_push_webhook(user_id: str, repo_full_name: str) -> dict:
+    repo = await mongo.repos().find_one({"user_id": user_id, "repo_full_name": repo_full_name})
+    if repo is None:
+        raise NotFoundError("repository is not connected", error_code="repo_not_connected")
+    if repo.get("webhook_status") == "created" and repo.get("webhook_id"):
+        return repo
+
+    token = await get_github_token(user_id)
+    settings = get_settings()
+    public_base_url = settings.public_webhook_base_url or settings.app_base_url
+    callback_url = f"{public_base_url.rstrip('/')}/webhooks/github"
+    webhook_secret = secrets.token_hex(32)
+
+    try:
+        webhook_id = await get_github_client().create_push_webhook(
+            token, repo_full_name, callback_url, webhook_secret,
+        )
+    except Exception as exc:
+        await _update_repo(user_id, repo_full_name, {
+            "webhook_status": "failed",
+            "webhook_error": str(exc),
+        })
+        raise
+
+    await _update_repo(user_id, repo_full_name, {
+        "webhook_id": webhook_id,
+        "webhook_secret_encrypted": security.encrypt_secret(webhook_secret),
+        "webhook_status": "created",
+        "webhook_error": None,
+    })
+    return await mongo.repos().find_one({"user_id": user_id, "repo_full_name": repo_full_name})
+
+
 async def connect_repo(user_id: str, repo_full_name: str) -> dict:
     """Register webhook + clone + enqueue parse for a repo. Statuses tracked independently."""
     existing = await mongo.repos().find_one({"user_id": user_id, "repo_full_name": repo_full_name})
@@ -97,6 +130,7 @@ async def connect_repo(user_id: str, repo_full_name: str) -> dict:
         "webhook_id": None,
         "webhook_secret_encrypted": None,
         "webhook_status": "pending",
+        "webhook_error": None,
         "parse_status": "pending",
         "parse_error": None,
         "connected_at": now,
@@ -104,22 +138,10 @@ async def connect_repo(user_id: str, repo_full_name: str) -> dict:
     }
     await mongo.repos().insert_one(doc)
 
-    webhook_secret = secrets.token_hex(32)
     try:
-        webhook_id = await client.create_push_webhook(
-            token,
-            repo_full_name,
-            f"{get_settings().app_base_url}/webhooks/github",
-            webhook_secret,
-        )
-        await _update_repo(user_id, repo_full_name, {
-            "webhook_id": webhook_id,
-            "webhook_secret_encrypted": security.encrypt_secret(webhook_secret),
-            "webhook_status": "created",
-        })
-    except Exception:
-        logger.exception("webhook_registration_failed", repo=repo_full_name)
-        await _update_repo(user_id, repo_full_name, {"webhook_status": "failed"})
+        await register_push_webhook(user_id, repo_full_name)
+    except Exception as exc:
+        logger.exception("webhook_registration_failed", repo=repo_full_name, error=str(exc))
 
     try:
         await clone_repo(repo_full_name, token)

@@ -41,7 +41,7 @@ async def store_tokens(user_id: str, token_response: dict, cloud_id: str | None 
 async def get_access_token(user_id: str) -> tuple[str, str]:
     """Return (access_token, cloud_id), refreshing proactively near expiry."""
     doc = await mongo.oauth_tokens().find_one({"user_id": user_id, "provider": "jira"})
-    if doc is None or doc.get("status") == "needs_reauth":
+    if doc is None or doc.get("status") != "active":
         raise UnauthorizedError("Jira connection needs re-authorization", error_code="jira_needs_reauth")
 
     expires_at = doc["expires_at"]
@@ -88,21 +88,47 @@ async def list_projects(user_id: str) -> list[dict]:
     ]
 
 
-async def connect_project(user_id: str, cloud_id: str, project_key: str) -> dict:
-    existing = await mongo.jira_projects().find_one({"user_id": user_id, "project_key": project_key})
+async def connect_project(user_id: str, project_key: str) -> dict:
+    existing = await mongo.jira_projects().find_one({
+        "user_id": user_id,
+        "project_key": project_key,
+        "status": {"$ne": "disconnected"},
+    })
     if existing:
         raise ConflictError("project already connected", error_code="project_already_connected")
+
+    _, cloud_id = await get_access_token(user_id)
+    if not cloud_id:
+        raise UnauthorizedError("Jira connection has no selected site", error_code="jira_needs_reauth")
+
     now = _now()
-    doc = {
-        "user_id": user_id,
+    fields = {
         "cloud_id": cloud_id,
-        "project_key": project_key,
         "project_name": None,
+        "status": "active",
         "sync_status": "pending",
         "sync_error": None,
         "last_synced_at": None,
+        "disconnected_at": None,
         "connected_at": now,
         "updated_at": now,
     }
-    await mongo.jira_projects().insert_one(doc)
-    return doc
+    await mongo.jira_projects().update_one(
+        {"user_id": user_id, "project_key": project_key},
+        {"$set": fields, "$setOnInsert": {"user_id": user_id, "project_key": project_key}},
+        upsert=True,
+    )
+    return await mongo.jira_projects().find_one({"user_id": user_id, "project_key": project_key})
+
+
+async def disconnect(user_id: str) -> None:
+    """Soft-disconnect Jira while retaining imported project and ticket history."""
+    now = _now()
+    await mongo.oauth_tokens().update_one(
+        {"user_id": user_id, "provider": "jira"},
+        {"$set": {"status": "disconnected", "updated_at": now}},
+    )
+    await mongo.jira_projects().update_many(
+        {"user_id": user_id, "status": {"$ne": "disconnected"}},
+        {"$set": {"status": "disconnected", "disconnected_at": now, "updated_at": now}},
+    )

@@ -154,6 +154,7 @@ async def run_ticket_sync(user_id: str, project_key: str) -> None:
         {
             "user_id": user_id,
             "project_key": project_key,
+            "status": {"$ne": "disconnected"},
             "sync_status": {"$ne": "in_progress"},
         },
         {"$set": {"sync_status": "in_progress", "updated_at": datetime.now(timezone.utc)}},
@@ -189,7 +190,7 @@ async def run_ticket_sync(user_id: str, project_key: str) -> None:
 async def resync_all_projects() -> None:
     """One polling pass over every connected project (eval-1 choice: polling
     instead of Jira webhooks — say so if asked why tickets aren't real-time)."""
-    async for project in mongo.jira_projects().find({}):
+    async for project in mongo.jira_projects().find({"status": {"$ne": "disconnected"}}):
         await run_ticket_sync(project["user_id"], project["project_key"])
 
 

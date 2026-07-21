@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     app_base_url: str = "http://localhost:8000"
     frontend_origin: str = "http://localhost:3000"
+    public_webhook_base_url: str = ""
 
     jwt_secret_key: str = "dev-only-secret"
     fernet_key: str = ""

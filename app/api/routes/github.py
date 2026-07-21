@@ -45,7 +45,21 @@ async def connect_repo(
         "repo_full_name": doc["repo_full_name"],
         "default_branch": doc["default_branch"],
         "webhook_status": doc["webhook_status"],
+        "webhook_error": doc.get("webhook_error"),
         "parse_status": doc["parse_status"],
+    }
+
+
+@router.post("/repos/webhook/retry")
+async def retry_webhook(
+    body: ConnectRepoRequest,
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    doc = await repo_service.register_push_webhook(user_id, body.repo_full_name)
+    return {
+        "repo_full_name": doc["repo_full_name"],
+        "webhook_status": doc["webhook_status"],
+        "webhook_error": doc.get("webhook_error"),
     }
 
 
@@ -58,6 +72,7 @@ async def connected_repos(user_id: str = Depends(get_current_user_id)) -> dict:
                 "repo_full_name": d["repo_full_name"],
                 "default_branch": d["default_branch"],
                 "webhook_status": d["webhook_status"],
+                "webhook_error": d.get("webhook_error"),
                 "parse_status": d["parse_status"],
                 "parse_error": d.get("parse_error"),
             }

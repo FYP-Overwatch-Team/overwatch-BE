@@ -18,6 +18,7 @@ async def test_github_only_partial_setup(client):
     body = resp.json()
     assert body["github"]["connected"] is True
     assert body["github"]["repo_connected"] is False
+    assert body["github"]["repo_full_name"] is None
     assert body["github"]["parse_status"] is None
     assert body["jira"]["connected"] is False
     assert body["jira"]["sync_status"] is None
@@ -41,7 +42,8 @@ async def test_full_setup_reports_both_statuses(client):
     body = resp.json()
     assert body["github"] == {
         "connected": True, "needs_reauth": False, "repo_connected": True,
-        "parse_status": "in_progress", "webhook_status": "created",
+        "repo_full_name": "octocat/hello-world", "parse_status": "in_progress",
+        "webhook_status": "created", "webhook_error": None,
     }
     assert body["jira"] == {
         "connected": True, "needs_reauth": False, "project_connected": True, "sync_status": "done",

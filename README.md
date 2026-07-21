@@ -14,6 +14,15 @@ cp .env.example .env    # then fill in secrets
 uv run uvicorn app.main:app --reload
 ```
 
+GitHub cannot deliver webhooks to `localhost`. For local webhook testing, expose
+port 8000 with ngrok and set its HTTPS URL before starting the API:
+
+```sh
+ngrok http 8000
+# .env
+PUBLIC_WEBHOOK_BASE_URL=https://<your-ngrok-domain>
+```
+
 ## Tests
 
 ```sh
@@ -42,7 +51,8 @@ See `overwatch-eval1-backend-plan.md` for the full build plan and phase breakdow
    - `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`
    - `JIRA_CLIENT_ID`, `JIRA_CLIENT_SECRET`
    - `GEMINI_API_KEY`
-   - `APP_BASE_URL` (your deployed API URL — used to build OAuth callback/webhook URLs)
+   - `APP_BASE_URL` (your deployed API URL — used to build OAuth callbacks)
+   - `PUBLIC_WEBHOOK_BASE_URL` (public API URL GitHub can reach; usually the same as `APP_BASE_URL` in production)
    - `FRONTEND_ORIGIN` (your deployed frontend URL — CORS is locked to exactly this origin)
 5. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
 

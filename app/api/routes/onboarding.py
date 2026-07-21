@@ -21,7 +21,10 @@ async def onboarding_status(user_id: str = Depends(get_current_user_id)) -> dict
         latest_repo = doc
 
     latest_project = None
-    async for doc in mongo.jira_projects().find({"user_id": user_id}).sort("connected_at", -1).limit(1):
+    async for doc in mongo.jira_projects().find({
+        "user_id": user_id,
+        "status": {"$ne": "disconnected"},
+    }).sort("connected_at", -1).limit(1):
         latest_project = doc
 
     return {
@@ -29,8 +32,10 @@ async def onboarding_status(user_id: str = Depends(get_current_user_id)) -> dict
             "connected": bool(github_token) and github_token.get("status") == "active",
             "needs_reauth": bool(github_token) and github_token.get("status") == "needs_reauth",
             "repo_connected": latest_repo is not None,
+            "repo_full_name": latest_repo["repo_full_name"] if latest_repo else None,
             "parse_status": latest_repo["parse_status"] if latest_repo else None,
             "webhook_status": latest_repo["webhook_status"] if latest_repo else None,
+            "webhook_error": latest_repo.get("webhook_error") if latest_repo else None,
         },
         "jira": {
             "connected": bool(jira_token) and jira_token.get("status") == "active",

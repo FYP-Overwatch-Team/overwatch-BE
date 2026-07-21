@@ -106,7 +106,14 @@ class GitHubClient:
             },
         )
         if resp.status_code != 201:
-            raise ExternalServiceError("webhook creation failed", error_code="webhook_create_failed")
+            try:
+                detail = resp.json().get("message")
+            except (ValueError, AttributeError):
+                detail = None
+            message = "webhook creation failed"
+            if detail:
+                message = f"{message}: {detail}"
+            raise ExternalServiceError(message, error_code="webhook_create_failed")
         return resp.json()["id"]
 
     @staticmethod

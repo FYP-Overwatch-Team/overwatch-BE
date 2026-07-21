@@ -11,7 +11,12 @@ from app.workers import jobs
 from tests.integration.test_auth_flow import login
 
 FIXTURES = Path(__file__).parent.parent / "regression" / "fixtures"
-SEARCH_URL = "https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/search"
+SEARCH_URL = "https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/search/jql"
+SEARCH_PARAMS = {
+    "jql": "project = OVR",
+    "maxResults": 100,
+    "fields": "summary,status,assignee,priority,updated",
+}
 USER = "user-1"
 
 ISSUES = json.loads((FIXTURES / "sample_jira_tickets.json").read_text(encoding="utf-8"))["issues"]
@@ -30,18 +35,31 @@ async def jira_connected():
     })
 
 
-def search_response(issues: list, total: int) -> Response:
-    return Response(200, json={"total": total, "issues": issues})
+def search_response(issues: list, next_page_token: str | None = None) -> Response:
+    body = {"issues": issues}
+    if next_page_token:
+        body["nextPageToken"] = next_page_token
+    return Response(200, json=body)
 
 
 async def test_sync_paginates_and_stores_tickets(jira_connected):
+    def paginated_response(request):
+        if request.url.params.get("nextPageToken") == "page-2":
+            return search_response(ISSUES[2:])
+        return search_response(ISSUES[:2], next_page_token="page-2")
+
     with respx.mock as router:
-        router.get(SEARCH_URL, params={"startAt": 0}).mock(
-            return_value=search_response(ISSUES[:2], total=3))
-        router.get(SEARCH_URL, params={"startAt": 2}).mock(
-            return_value=search_response(ISSUES[2:], total=3))
+        search = router.get(SEARCH_URL).mock(side_effect=paginated_response)
         await jobs.run_ticket_sync(USER, "OVR")
 
+    assert len(search.calls) == 2
+    first_page = search.calls[0].request.url.params
+    second_page = search.calls[1].request.url.params
+    assert first_page["jql"] == SEARCH_PARAMS["jql"]
+    assert first_page["maxResults"] == str(SEARCH_PARAMS["maxResults"])
+    assert first_page["fields"] == SEARCH_PARAMS["fields"]
+    assert first_page.get("nextPageToken") is None
+    assert second_page["nextPageToken"] == "page-2"
     assert await mongo.tickets().count_documents({}) == 3
     doc = await mongo.tickets().find_one({"ticket_key": "OVR-2"})
     assert doc["summary"] == "Fix login redirect loop"
@@ -56,13 +74,13 @@ async def test_sync_paginates_and_stores_tickets(jira_connected):
 
 async def test_resync_updates_and_removes_deleted_tickets(jira_connected):
     with respx.mock as router:
-        router.get(SEARCH_URL).mock(return_value=search_response(ISSUES, total=3))
+        router.get(SEARCH_URL).mock(return_value=search_response(ISSUES))
         await jobs.run_ticket_sync(USER, "OVR")
 
     changed = json.loads(json.dumps(ISSUES[0]))
     changed["fields"]["status"] = {"name": "Reopened"}
     with respx.mock as router:
-        router.get(SEARCH_URL).mock(return_value=search_response([changed, ISSUES[1]], total=2))
+        router.get(SEARCH_URL).mock(return_value=search_response([changed, ISSUES[1]]))
         await mongo.jira_projects().update_one(
             {"project_key": "OVR"}, {"$set": {"sync_status": "done"}})
         await jobs.run_ticket_sync(USER, "OVR")
@@ -91,6 +109,13 @@ async def test_sync_lock_prevents_overlap(jira_connected):
 
 
 async def seed_tickets_for(user_id: str) -> None:
+    await mongo.jira_projects().insert_one({
+        "user_id": user_id,
+        "project_key": "OVR",
+        "status": "active",
+        "sync_status": "done",
+        "connected_at": 1,
+    })
     for issue in ISSUES:
         from app.services.ticket_service import _to_doc
         await mongo.tickets().insert_one(_to_doc(user_id, "OVR", issue))
@@ -141,7 +166,7 @@ async def test_resync_all_projects_covers_every_connection(jira_connected):
         cloud_id="cloud-1",
     )
     with respx.mock as router:
-        router.get(SEARCH_URL).mock(return_value=search_response([], total=0))
+        router.get(SEARCH_URL).mock(return_value=search_response([]))
         await jobs.resync_all_projects()
 
     for key in ("OVR", "OTHER"):

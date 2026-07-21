@@ -9,7 +9,8 @@ from app.services import jira_service
 
 logger = structlog.get_logger("app.tickets")
 
-PAGE_SIZE = 100  # Jira caps search results at 100/page
+PAGE_SIZE = 100
+TICKET_FIELDS = "summary,status,assignee,priority,updated"
 
 
 def _now() -> datetime:
@@ -20,23 +21,49 @@ async def fetch_all_tickets(user_id: str, project_key: str) -> list[dict]:
     access_token, cloud_id = await jira_service.get_access_token(user_id)
     client = get_jira_client()
     issues: list[dict] = []
-    start_at = 0
+    next_page_token: str | None = None
+    seen_tokens: set[str] = set()
+
     while True:
+        params = {
+            "jql": f"project = {project_key}",
+            "maxResults": PAGE_SIZE,
+            "fields": TICKET_FIELDS,
+        }
+        if next_page_token:
+            params["nextPageToken"] = next_page_token
+
         resp = await client.api_get(
-            access_token, cloud_id, "/rest/api/3/search",
-            jql=f"project = {project_key}",
-            startAt=start_at,
-            maxResults=PAGE_SIZE,
-            fields="summary,status,assignee,priority,updated",
+            access_token, cloud_id, "/rest/api/3/search/jql", **params,
         )
         if resp.status_code != 200:
-            raise ExternalServiceError("Jira ticket search failed", error_code="jira_search_failed")
+            try:
+                error_body = resp.json()
+                detail = error_body.get("message") or "; ".join(error_body.get("errorMessages", []))
+            except (ValueError, AttributeError, TypeError):
+                detail = None
+            logger.error(
+                "jira_ticket_search_failed",
+                project=project_key,
+                status=resp.status_code,
+                detail=detail,
+            )
+            message = "Jira ticket search failed"
+            if detail:
+                message = f"{message}: {detail}"
+            raise ExternalServiceError(message, error_code="jira_search_failed")
+
         body = resp.json()
-        batch = body.get("issues", [])
-        issues.extend(batch)
-        start_at += len(batch)
-        if start_at >= body.get("total", 0) or not batch:
+        issues.extend(body.get("issues", []))
+        next_page_token = body.get("nextPageToken")
+        if not next_page_token:
             return issues
+        if next_page_token in seen_tokens:
+            raise ExternalServiceError(
+                "Jira ticket search returned a repeated page token",
+                error_code="jira_search_failed",
+            )
+        seen_tokens.add(next_page_token)
 
 
 def _to_doc(user_id: str, project_key: str, issue: dict) -> dict:
@@ -81,9 +108,20 @@ async def list_tickets(
     page: int = 1,
     page_size: int = 25,
 ) -> dict:
-    query: dict = {"user_id": user_id}
-    if project_key:
-        query["project_key"] = project_key
+    active_project_keys = [
+        project["project_key"]
+        async for project in mongo.jira_projects().find({
+            "user_id": user_id,
+            "status": {"$ne": "disconnected"},
+        })
+    ]
+    if not active_project_keys or (project_key and project_key not in active_project_keys):
+        return {"tickets": [], "total": 0, "page": page, "page_size": page_size}
+
+    query: dict = {
+        "user_id": user_id,
+        "project_key": project_key if project_key else {"$in": active_project_keys},
+    }
     if status:
         query["status"] = status
     if assignee:

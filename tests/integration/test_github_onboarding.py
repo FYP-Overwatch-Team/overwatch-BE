@@ -1,9 +1,11 @@
+import json
 from pathlib import Path
 
 import pytest
 import respx
 from httpx import Response
 
+from app.core.config import get_settings
 from app.db import mongo
 from app.services import repo_service
 from app.workers import jobs
@@ -88,7 +90,7 @@ async def test_connect_without_admin_fails_clearly(client, fake_clone):
     assert jobs.enqueued_jobs == []
 
 
-async def test_webhook_failure_is_independent_of_clone(client, fake_clone):
+async def test_webhook_failure_is_independent_of_clone(client, fake_clone, monkeypatch):
     headers = await authed(client)
     with respx.mock as router:
         router.get(f"{API}/repos/{REPO}").mock(return_value=Response(200, json=repo_payload()))
@@ -98,8 +100,26 @@ async def test_webhook_failure_is_independent_of_clone(client, fake_clone):
     assert resp.status_code == 201
     body = resp.json()
     assert body["webhook_status"] == "failed"
+    assert body["webhook_error"] == "webhook creation failed: nope"
     assert body["parse_status"] == "pending"  # clone still succeeded; parse job enqueued
     assert len(jobs.enqueued_jobs) == 1
+
+    monkeypatch.setenv("PUBLIC_WEBHOOK_BASE_URL", "https://overwatch.ngrok.app")
+    get_settings.cache_clear()
+    with respx.mock as router:
+        hook = router.post(f"{API}/repos/{REPO}/hooks").mock(
+            return_value=Response(201, json={"id": 781})
+        )
+        retry = await client.post(
+            "/github/repos/webhook/retry",
+            json={"repo_full_name": REPO},
+            headers=headers,
+        )
+
+    assert retry.status_code == 200
+    assert retry.json()["webhook_status"] == "created"
+    payload = json.loads(hook.calls.last.request.content)
+    assert payload["config"]["url"] == "https://overwatch.ngrok.app/webhooks/github"
 
 
 async def test_clone_failure_marks_parse_failed_but_webhook_ok(client, monkeypatch):
