@@ -43,30 +43,56 @@ git config core.hooksPath .githooks
 Every push runs the full backend test suite and is blocked if any test fails.
 Use `git push --no-verify` only for exceptional, intentional bypasses.
 
-## Deployment 
+## EC2 deployment
 
-**Services (all free-tier):**
-- **API** — Railway or Render, Docker deploy using the included `Dockerfile`
-- **MongoDB** — [MongoDB Atlas](https://www.mongodb.com/atlas) free tier (M0)
-- **Neo4j** — [Neo4j AuraDB](https://neo4j.com/cloud/aura-free/) free tier
+The production stack runs the API and Caddy on EC2. MongoDB Atlas and Neo4j
+Aura remain external. Pushes to `main` are tested, published to GHCR, deployed
+to EC2, health checked, and rolled back on failure by `.github/workflows/ci.yml`.
 
-**Steps:**
-1. Provision Atlas (get `MONGO_URI`) and AuraDB (get `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`).
-2. Register GitHub and Atlassian (Jira) OAuth apps; set their callback URLs to
-   `https://<your-api-domain>/auth/github/callback` and `https://<your-api-domain>/jira/callback`.
-3. Get a Gemini API key.
-4. On Railway/Render, set the build to use the repo's `Dockerfile` and configure
-   these secrets via the platform's secret manager (never commit them):
-   - `JWT_SECRET_KEY`, `FERNET_KEY` (generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
-   - `MONGO_URI`, `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`
-   - `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`
-   - `JIRA_CLIENT_ID`, `JIRA_CLIENT_SECRET`
-   - `GEMINI_API_KEY`
-   - `APP_BASE_URL` (your deployed API URL — used to build OAuth callbacks)
-   - `PUBLIC_WEBHOOK_BASE_URL` (public API URL GitHub can reach; usually the same as `APP_BASE_URL` in production)
-   - `FRONTEND_ORIGIN` (your deployed frontend URL — CORS is locked to exactly this origin)
-5. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
+### One-time server setup
 
-**Note on ticket freshness:** Jira tickets sync on a polling loop
-(`ticket_sync_interval_seconds`, default 5 min) rather than via Jira webhooks —
-real-time sync would need more Atlassian app configuration than eval 1 warrants.
+Install Docker, create `/opt/overwatch`, and save the production environment at
+`/opt/overwatch/.env` with mode `600`. In addition to the application settings
+shown in `.env.example`, it must contain Compose deployment values:
+
+```env
+API_DOMAIN=overwatch-api.duckdns.org
+BACKEND_IMAGE=ghcr.io/rizwan521/overwatch-be
+```
+
+Use the public API URL for both `APP_BASE_URL` and `PUBLIC_WEBHOOK_BASE_URL`.
+Set `FRONTEND_ORIGIN` to the exact deployed frontend origin. Keep Atlas, Aura,
+OAuth, Gemini, JWT, and Fernet credentials only in this server-side file.
+
+The EC2 security group must allow ports 80 and 443 publicly and port 22 only
+from trusted addresses. Port 8000 is internal to the Compose network.
+
+### GitHub production environment
+
+Create a GitHub environment named `production` with these secrets:
+
+- `EC2_SSH_PRIVATE_KEY` — a dedicated deployment private key
+- `EC2_SSH_KNOWN_HOSTS` — output from `ssh-keyscan -H <api-domain>`
+
+Add these environment variables:
+
+```text
+EC2_HOST=overwatch-api.duckdns.org
+EC2_USER=ubuntu
+EC2_APP_DIR=/opt/overwatch
+HEALTH_URL=https://overwatch-api.duckdns.org/health
+```
+
+The workflow copies `compose.prod.yml`, `Caddyfile`, and `scripts/deploy.sh` to
+the server. Caddy obtains and renews HTTPS certificates automatically. The
+application `.env` is never copied from GitHub.
+
+GitHub and Jira callback URLs must be:
+
+```text
+https://<api-domain>/auth/github/callback
+https://<api-domain>/jira/callback
+```
+
+Jira tickets sync on a polling loop (`ticket_sync_interval_seconds`, default
+five minutes) rather than through Jira webhooks.
