@@ -3,6 +3,7 @@ import secrets
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import RedirectResponse
 
+from app.api.cookies import cookie_samesite, cookie_secure
 from app.core.config import get_settings
 from app.core.exceptions import UnauthorizedError
 from app.integrations.github_client import get_github_client
@@ -14,17 +15,13 @@ REFRESH_COOKIE = "overwatch_refresh"
 STATE_COOKIE = "overwatch_oauth_state"
 
 
-def _cookie_secure() -> bool:
-    return get_settings().app_env != "dev"
-
-
 def _set_refresh_cookie(response: Response, raw_refresh: str) -> None:
     response.set_cookie(
         REFRESH_COOKIE,
         raw_refresh,
         httponly=True,
-        secure=_cookie_secure(),
-        samesite="lax",
+        secure=cookie_secure(),
+        samesite=cookie_samesite(),
         path="/auth",
         max_age=int(auth_service.REFRESH_TOKEN_TTL.total_seconds()),
     )
@@ -35,8 +32,8 @@ async def github_login() -> RedirectResponse:
     state = secrets.token_urlsafe(24)
     response = RedirectResponse(get_github_client().authorize_url(state))
     response.set_cookie(
-        STATE_COOKIE, state, httponly=True, secure=_cookie_secure(), samesite="lax",
-        path="/auth", max_age=600,
+        STATE_COOKIE, state, httponly=True, secure=cookie_secure(),
+        samesite=cookie_samesite(), path="/auth", max_age=600,
     )
     return response
 

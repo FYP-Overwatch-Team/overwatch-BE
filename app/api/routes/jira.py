@@ -4,6 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from app.api.cookies import cookie_samesite, cookie_secure
 from app.api.deps import get_current_user_id
 from app.core.config import get_settings
 from app.core.exceptions import UnauthorizedError
@@ -30,7 +31,7 @@ async def jira_login(
     state = f"{user_id}.{secrets.token_urlsafe(24)}"
     response.set_cookie(
         STATE_COOKIE, state, httponly=True,
-        secure=get_settings().app_env != "dev", samesite="lax", path="/jira", max_age=600,
+        secure=cookie_secure(), samesite=cookie_samesite(), path="/jira", max_age=600,
     )
     return {"authorization_url": get_jira_client().authorize_url(state)}
 
