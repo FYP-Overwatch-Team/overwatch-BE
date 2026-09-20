@@ -7,8 +7,11 @@ from app.core.config import get_settings
 from app.db import mongo
 from app.main import create_app
 from app.integrations import gemini_client
-from app.services import graph_service
-from app.services.graph_service import InMemoryGraphRepository
+from app.services.facts_repository import InMemoryFactsStore, use_facts_store
+from app.services.knowledge_graph_store import (
+    InMemoryKnowledgeGraphStore,
+    use_knowledge_graph_store,
+)
 from tests.fakes import FakeGeminiClient
 
 
@@ -35,11 +38,14 @@ def mock_mongo():
 
 
 @pytest.fixture(autouse=True)
-def graph_repo():
-    repo = InMemoryGraphRepository()
-    graph_service.use_graph_repository(repo)
-    yield repo
-    graph_service.use_graph_repository(None)
+def graph_store():
+    """Every test gets an empty knowledge graph and facts cache."""
+    store = InMemoryKnowledgeGraphStore()
+    use_knowledge_graph_store(store)
+    use_facts_store(InMemoryFactsStore())
+    yield store
+    use_knowledge_graph_store(None)
+    use_facts_store(None)
 
 
 @pytest.fixture
