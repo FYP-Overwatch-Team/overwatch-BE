@@ -34,6 +34,7 @@ from app.knowledge_graph.build.model import (
 )
 from app.knowledge_graph.view.model import (
     CONTAINMENT_EDGE_TYPES,
+    VIEWABLE_EDGE_TYPES,
     RollupEdge,
     ViewNode,
 )
@@ -81,14 +82,25 @@ def _traversal_pattern(direction: str, depth: int) -> str:
     return f"-{hops}-"
 
 
-def _containment_pattern() -> str:
-    """`CONTAINS|DEFINES|HAS_MEMBER`, built from the enum, for a match pattern.
+def _type_pattern(edge_types) -> str:
+    """Relationship types as a match pattern, built from the enum.
 
-    Relationship types cannot be parameterised, so this is concatenated into
-    the query — which is safe precisely because every part of it comes from
-    `EdgeType` and is checked by `_safe_type`.
+    Types cannot be parameterised, so this is concatenated into the query —
+    which is safe precisely because every part of it comes from `EdgeType` and
+    is checked by `_safe_type`. Sorted so the query text is stable and the
+    database can reuse its plan.
     """
-    return "|".join(_safe_type(edge_type) for edge_type in CONTAINMENT_EDGE_TYPES)
+    return "|".join(sorted(_safe_type(edge_type) for edge_type in edge_types))
+
+
+def _containment_pattern() -> str:
+    """`CONTAINS|DEFINES|HAS_MEMBER`: the edges that build the hierarchy."""
+    return _type_pattern(CONTAINMENT_EDGE_TYPES)
+
+
+def _viewable_pattern() -> str:
+    """The edges a view can draw, which is what makes a node worth drawing."""
+    return _type_pattern(VIEWABLE_EDGE_TYPES)
 
 
 def _validated_edge_types(edge_types: Sequence[str] | None) -> list[str] | None:
@@ -166,6 +178,7 @@ def _view_node(row: dict) -> ViewNode | None:
         definition_count=row.get("definition_count") or 0,
         child_count=row.get("child_count") or 0,
         language=row.get("language"),
+        degree=row.get("degree") or 0,
     )
 
 
@@ -411,22 +424,28 @@ class Neo4jKnowledgeGraphStore:
             return {}
 
         containment = _containment_pattern()
+        viewable = _viewable_pattern()
         rows = await self._store.run(
             f"""
             MATCH (p:{BASE_LABEL} {{repo: $repo}})-[:{containment}]->(c:{BASE_LABEL})
             WHERE p.id IN $parents AND c.repo = $repo
-            WITH p.id AS parent, c ORDER BY c.id
-            WITH parent, collect(c)[..$per_parent] AS children
-            UNWIND children AS c
+            WITH p.id AS parent, c,
+                 size([(c)-[:{viewable}]-(y:{BASE_LABEL}) | y]) AS degree
+            // Most connected first, so a cap keeps what is worth drawing
+            // rather than whatever sorts earliest.
+            ORDER BY degree DESC, c.id
+            WITH parent, collect({{node: c, degree: degree}})[..$per_parent] AS children
+            UNWIND children AS child
+            WITH parent, child.node AS c, child.degree AS degree
             RETURN parent,
                    c.id AS id, c.name AS name, c.kind AS kind, c.path AS path,
                    [label IN labels(c) WHERE label <> $base][0] AS label,
                    coalesce(c.depth, 0) AS depth,
                    coalesce(c.file_count, 0) AS file_count,
                    coalesce(c.definition_count, 0) AS definition_count,
-                   c.language AS language,
+                   c.language AS language, degree,
                    size([(c)-[:{containment}]->(x:{BASE_LABEL}) | x]) AS child_count
-            ORDER BY parent, id
+            ORDER BY parent, degree DESC, id
             """,
             repo=repo_full_name,
             parents=parents,
@@ -750,11 +769,14 @@ class InMemoryKnowledgeGraphStore:
             node = _view_node({
                 **child,
                 "label": child["label"],
-                "child_count": self._child_count(repo_full_name, child["id"]),
+                "child_count": self._degree(repo_full_name, child["id"], CONTAINMENT_EDGE_TYPES, outgoing=True),
+                "degree": self._degree(repo_full_name, child["id"], VIEWABLE_EDGE_TYPES),
             })
             if node is not None:
                 siblings.append(node)
 
+        for siblings in grouped.values():
+            siblings.sort(key=lambda node: (-node.degree, node.id))
         return grouped
 
     async def rollup_edges(
@@ -795,13 +817,17 @@ class InMemoryKnowledgeGraphStore:
         ][:min(limit, VIEW_EDGE_LIMIT)]
         return _rollup_edges_from_rows(rows)
 
-    def _child_count(self, repo_full_name: str, node_id: str) -> int:
-        wanted = {str(edge_type) for edge_type in CONTAINMENT_EDGE_TYPES}
+    def _degree(
+        self, repo_full_name: str, node_id: str, edge_types, *, outgoing: bool = False,
+    ) -> int:
+        """How many edges of these types touch a node, in one or both directions."""
+        wanted = {str(edge_type) for edge_type in edge_types}
+        ends = ("source",) if outgoing else ("source", "target")
         return sum(
             1 for edge in self.edges.values()
             if edge["repo"] == repo_full_name
-            and edge["source"] == node_id
             and edge["type"] in wanted
+            and any(edge[end] == node_id for end in ends)
         )
 
     @staticmethod

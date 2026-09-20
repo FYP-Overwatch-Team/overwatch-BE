@@ -21,6 +21,13 @@ from tests.integration.test_auth_flow import login
 
 REPO = "octocat/hello-world"
 OTHER_REPO = "someone-else/private"
+#: More than one page of children, so the endpoint has to gather some.
+WIDE_COUNT = 20
+PAGE = 12
+#: Widget `i` is imported `i + 1` times.
+WIDE_TOTAL = WIDE_COUNT * (WIDE_COUNT + 1) // 2
+#: What the eight that do not fit are worth between them.
+WIDE_HIDDEN = WIDE_TOTAL - PAGE * (PAGE + 1) // 2
 
 
 @pytest.fixture
@@ -51,6 +58,10 @@ def seed_delta(repo: str = REPO) -> GraphDelta:
             "name": path.rpartition("/")[2], "path": path, "language": "python",
         })
 
+    # A third folder wide enough that drawing all of it would be unkind.
+    widgets = module_id(repo, "widgets")
+    wide = [f"{repo}:widgets/w{index:02d}.tsx" for index in range(WIDE_COUNT)]
+
     return GraphDelta(
         repo_full_name=repo,
         version="sha-1",
@@ -60,20 +71,30 @@ def seed_delta(repo: str = REPO) -> GraphDelta:
             module(routes, "api/routes", 2, 1),
             module(services, "api/services", 2, 1),
             module(web, "web", 1, 1),
+            module(widgets, "widgets", 1, WIDE_COUNT),
             source(users, "api/routes/users.py"),
             source(store_file, "api/services/store.py"),
             source(page, "web/page.tsx"),
+            *(source(node_id, f"widgets/w{index:02d}.tsx")
+              for index, node_id in enumerate(wide)),
         ),
         upserted_edges=(
             GraphEdge(repo, api, EdgeType.CONTAINS),
             GraphEdge(repo, web, EdgeType.CONTAINS),
+            GraphEdge(repo, widgets, EdgeType.CONTAINS),
             GraphEdge(api, routes, EdgeType.CONTAINS),
             GraphEdge(api, services, EdgeType.CONTAINS),
             GraphEdge(routes, users, EdgeType.CONTAINS),
             GraphEdge(services, store_file, EdgeType.CONTAINS),
             GraphEdge(web, page, EdgeType.CONTAINS),
+            *(GraphEdge(widgets, node_id, EdgeType.CONTAINS) for node_id in wide),
             GraphEdge(page, users, EdgeType.IMPORTS, {"count": 3}),
             GraphEdge(users, store_file, EdgeType.IMPORTS, {"count": 5}),
+            # Every widget is imported, so they are equally worth drawing and
+            # the page boundary falls on the tie-break — which is what puts
+            # connected children behind the marker, where they can be counted.
+            *(GraphEdge(page, node_id, EdgeType.IMPORTS, {"count": index + 1})
+              for index, node_id in enumerate(wide)),
         ),
     )
 
@@ -108,7 +129,9 @@ def ids(body) -> list[str]:
 async def test_the_default_view_is_the_outermost_folders(client, ready):
     body = await view(client, ready)
 
-    assert ids(body) == [module_id(REPO, "api"), module_id(REPO, "web")]
+    assert ids(body) == [
+        module_id(REPO, "api"), module_id(REPO, "web"), module_id(REPO, "widgets"),
+    ]
     assert body["expanded"] == []
     assert body["truncated"] is False
     # The repository is the frame the view is drawn in, never a box inside it.
@@ -118,10 +141,11 @@ async def test_the_default_view_is_the_outermost_folders(client, ready):
 async def test_a_collapsed_folder_carries_the_edges_of_everything_inside_it(client, ready):
     body = await view(client, ready)
 
-    assert body["edges"] == [{
-        "source": module_id(REPO, "web"), "target": module_id(REPO, "api"),
-        "type": "IMPORTS", "weight": 3, "collapsed": True,
-    }]
+    assert {(edge["source"], edge["target"], edge["weight"]) for edge in body["edges"]} == {
+        (module_id(REPO, "web"), module_id(REPO, "api"), 3),
+        # Every import of every widget, collapsed onto the one folder.
+        (module_id(REPO, "web"), module_id(REPO, "widgets"), WIDE_TOTAL),
+    }
 
 
 async def test_opening_a_folder_swaps_it_for_what_is_inside(client, ready):
@@ -179,7 +203,9 @@ async def test_filtering_relationship_types_leaves_the_nodes_alone(client, ready
     body = await view(client, ready, edge_types=["CALLS"])
 
     assert body["edges"] == []
-    assert ids(body) == [module_id(REPO, "api"), module_id(REPO, "web")]
+    assert ids(body) == [
+        module_id(REPO, "api"), module_id(REPO, "web"), module_id(REPO, "widgets"),
+    ]
 
 
 async def test_filtering_node_labels_keeps_only_those_nodes(client, ready):
@@ -206,6 +232,8 @@ async def test_the_filter_vocabulary_is_served_to_the_client(client, ready):
     # The materialised summary would double-count the imports it is made of.
     assert "DEPENDS_ON" not in body["edge_types"]
     assert body["granularities"] == ["module", "file", "symbol"]
+    # The UI warns before a click using this, rather than repeating the number.
+    assert body["page_size"] == PAGE
 
 
 # -- Isolation and input handling -----------------------------------------
@@ -222,7 +250,9 @@ async def test_an_id_from_another_repository_opens_nothing(client, ready):
     body = await view(client, ready, expand=[module_id(OTHER_REPO, "api")])
 
     assert body["expanded"] == []
-    assert ids(body) == [module_id(REPO, "api"), module_id(REPO, "web")]
+    assert ids(body) == [
+        module_id(REPO, "api"), module_id(REPO, "web"), module_id(REPO, "widgets"),
+    ]
 
 
 async def test_an_unknown_relationship_type_is_rejected_at_the_edge(client, ready):
@@ -257,3 +287,98 @@ async def test_the_view_needs_a_session(client, graph):
     response = await client.post(f"/graph/view?repo_full_name={REPO}", json={})
 
     assert response.status_code == 401
+
+
+# -- Opening one subtree, and paging a wide one ---------------------------
+
+async def test_expand_to_can_be_confined_to_one_folder(client, ready):
+    """The point of the whole exercise: opening `api` costs `api`, not the repo."""
+    body = await view(
+        client, ready, expand_to="file", expand_from=module_id(REPO, "api"),
+    )
+
+    assert f"{REPO}:api/routes/users.py" in ids(body)
+    # Everything outside the chosen subtree is untouched.
+    assert module_id(REPO, "web") in ids(body)
+    assert module_id(REPO, "widgets") in ids(body)
+    assert f"{REPO}:web/page.tsx" not in ids(body)
+
+
+async def test_confining_to_a_nested_folder_opens_the_way_down_to_it(client, ready):
+    body = await view(
+        client, ready, expand_to="file", expand_from=module_id(REPO, "api/routes"),
+    )
+
+    assert f"{REPO}:api/routes/users.py" in ids(body)
+    # `api/services` had to stay shut, but `api` had to open to reach routes.
+    assert module_id(REPO, "api/services") in ids(body)
+    assert module_id(REPO, "api") not in ids(body)
+
+
+async def test_confining_to_another_repository_opens_nothing(client, ready):
+    body = await view(
+        client, ready, expand_to="symbol", expand_from=module_id(OTHER_REPO, "api"),
+    )
+
+    assert body["expanded"] == []
+    assert all(node["label"] == "Module" for node in body["nodes"])
+
+
+async def test_a_wide_folder_is_paged_rather_than_dumped(client, ready):
+    body = await view(client, ready, expand=[module_id(REPO, "widgets")])
+
+    widgets = [node for node in body["nodes"] if node["label"] == "File"]
+    assert len(widgets) == PAGE
+    assert body["overflows"] == [{
+        "id": f"{module_id(REPO, 'widgets')}::more",
+        "container_id": module_id(REPO, "widgets"),
+        "container_name": "widgets",
+        "shown": PAGE,
+        "hidden": WIDE_COUNT - PAGE,
+    }]
+    # Paging is not a loss: the rest is on screen as a marker.
+    assert body["truncated"] is False
+
+
+async def test_the_marker_carries_what_it_stands_for(client, ready):
+    body = await view(client, ready, expand=[module_id(REPO, "widgets")])
+    marker = body["overflows"][0]["id"]
+
+    into_marker = [edge for edge in body["edges"] if edge["target"] == marker]
+    assert into_marker and into_marker[0]["weight"] == WIDE_HIDDEN
+    assert into_marker[0]["collapsed"] is True
+
+
+async def test_revealing_a_folder_draws_all_of_it(client, ready):
+    body = await view(
+        client, ready,
+        expand=[module_id(REPO, "widgets")],
+        reveal=[module_id(REPO, "widgets")],
+    )
+
+    assert len([node for node in body["nodes"] if node["label"] == "File"]) == WIDE_COUNT
+    assert body["overflows"] == []
+
+
+async def test_nothing_is_lost_between_paged_and_revealed(client, ready):
+    def weight(body):
+        return sum(edge["weight"] for edge in body["edges"])
+
+    paged = await view(client, ready, expand=[module_id(REPO, "widgets")])
+    revealed = await view(
+        client, ready,
+        expand=[module_id(REPO, "widgets")],
+        reveal=[module_id(REPO, "widgets")],
+    )
+
+    assert weight(paged) == weight(revealed)
+
+
+async def test_too_many_reveals_are_rejected_at_the_edge(client, ready):
+    response = await client.post(
+        f"/graph/view?repo_full_name={REPO}",
+        json={"reveal": [f"{REPO}:m{index}" for index in range(200)]},
+        headers=ready,
+    )
+
+    assert response.status_code == 422

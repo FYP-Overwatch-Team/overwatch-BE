@@ -8,6 +8,7 @@ id, and `lod` renders a view. All three are pure; the service layer in
 from app.knowledge_graph.view.hierarchy import (
     PlacementCache,
     container_chain,
+    is_within,
     nearest_visible,
     parent_of,
 )
@@ -24,6 +25,7 @@ from app.knowledge_graph.view.model import (
     ViewFilters,
     ViewGraph,
     ViewNode,
+    ViewOverflow,
     ViewRequest,
 )
 
@@ -40,8 +42,10 @@ __all__ = [
     "ViewFilters",
     "ViewGraph",
     "ViewNode",
+    "ViewOverflow",
     "ViewRequest",
     "container_chain",
+    "is_within",
     "nearest_visible",
     "parent_of",
     "project",

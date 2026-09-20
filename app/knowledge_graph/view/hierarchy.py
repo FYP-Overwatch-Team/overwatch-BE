@@ -71,23 +71,45 @@ def container_chain(node_id: str, repo_full_name: str, label: NodeLabel) -> list
     return [repository]
 
 
+def is_within(node_id: str, container_id: str) -> bool:
+    """Whether one node lies inside another, by id arithmetic alone.
+
+    Ids are path-derived, so this is a prefix test — but only at a separator,
+    or `repo:apiary` would count as being inside `repo:api`, and `repo:app.tsx`
+    as being inside `repo:app`.
+    """
+    if node_id == container_id:
+        return True
+    if not node_id.startswith(container_id):
+        return False
+    separator = node_id[len(container_id)]
+    return separator in ("/", "#")
+
+
 def nearest_visible(
     node_id: str,
     label: NodeLabel,
     visible: frozenset[str] | set[str],
     repo_full_name: str,
+    redirects: Mapping[str, str] | None = None,
 ) -> str | None:
     """The node itself if it is on screen, else the closest ancestor that is.
+
+    `redirects` stands in for nodes that are *represented* on screen without
+    being drawn — the children an open container did not have room for, which
+    a "6 more" marker speaks for. Consulted at every step, so a symbol inside
+    a file inside the overflow still finds its way to the marker.
 
     None means the node has no visible ancestor at all, which happens when a
     filter hid its whole branch. An edge to it is dropped rather than drawn to
     something arbitrary.
     """
-    if node_id in visible:
-        return node_id
-    for ancestor in container_chain(node_id, repo_full_name, label):
-        if ancestor in visible:
-            return ancestor
+    redirects = redirects or {}
+    for step in (node_id, *container_chain(node_id, repo_full_name, label)):
+        if step in visible:
+            return step
+        if step in redirects:
+            return redirects[step]
     return None
 
 
@@ -98,17 +120,23 @@ class PlacementCache:
     endpoints than edges, so the chain for each is computed once.
     """
 
-    __slots__ = ("_repo", "_visible", "_resolved")
+    __slots__ = ("_repo", "_visible", "_redirects", "_resolved")
 
-    def __init__(self, repo_full_name: str, visible: frozenset[str] | set[str]) -> None:
+    def __init__(
+        self,
+        repo_full_name: str,
+        visible: frozenset[str] | set[str],
+        redirects: Mapping[str, str] | None = None,
+    ) -> None:
         self._repo = repo_full_name
         self._visible = visible
+        self._redirects = redirects or {}
         self._resolved: dict[str, str | None] = {}
 
     def place(self, node_id: str, label: NodeLabel) -> str | None:
         if node_id not in self._resolved:
             self._resolved[node_id] = nearest_visible(
-                node_id, label, self._visible, self._repo,
+                node_id, label, self._visible, self._repo, self._redirects,
             )
         return self._resolved[node_id]
 

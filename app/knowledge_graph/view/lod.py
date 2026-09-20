@@ -11,6 +11,11 @@ between two folders become one edge marked ×100; open one of the folders and
 the same hundred calls redistribute across its children. Nothing is invented
 and nothing is hidden — the weight always adds up.
 
+One container can still hold more than anyone wants to look at, so children
+are **paged**: the most connected are drawn and the rest gather behind a
+marker that carries their relationships. The marker behaves exactly like a
+shut folder, which is why the weight still adds up when it appears.
+
 Pure: no database, no clock, no I/O. The service layer fetches, this decides.
 """
 
@@ -28,6 +33,7 @@ from app.knowledge_graph.view.model import (
     ViewEdge,
     ViewGraph,
     ViewNode,
+    ViewOverflow,
     ViewRequest,
 )
 
@@ -51,22 +57,39 @@ def project(
     concrete set of open containers is the service's job, because it is the
     service that can fetch their contents.
     """
-    visible, opened, nodes_truncated = _walk(repo_full_name, children_by_parent, request)
-    view_edges, edges_truncated = _roll_up(repo_full_name, visible, edges, request)
+    walk = _walk(repo_full_name, children_by_parent, request)
+    view_edges, edges_truncated = _roll_up(
+        repo_full_name, walk.visible, walk.represented_by, edges, request,
+    )
 
     return ViewGraph(
-        nodes=tuple(visible),
+        nodes=tuple(walk.visible),
         edges=view_edges,
-        expanded=tuple(sorted(opened, key=lambda node: node.id)),
-        truncated=nodes_truncated or edges_truncated,
+        expanded=tuple(sorted(walk.opened, key=lambda node: node.id)),
+        overflows=tuple(walk.overflows),
+        truncated=walk.truncated or edges_truncated,
     )
+
+
+class _Walk:
+    """What one pass down the tree produced."""
+
+    __slots__ = ("visible", "opened", "overflows", "represented_by", "truncated")
+
+    def __init__(self) -> None:
+        self.visible: list[ViewNode] = []
+        self.opened: list[ViewNode] = []
+        self.overflows: list[ViewOverflow] = []
+        #: Child id -> the marker that speaks for it on the canvas.
+        self.represented_by: dict[str, str] = {}
+        self.truncated = False
 
 
 def _walk(
     repo_full_name: str,
     children_by_parent: Mapping[str, Sequence[ViewNode]],
     request: ViewRequest,
-) -> tuple[list[ViewNode], list[ViewNode], bool]:
+) -> _Walk:
     """Breadth-first from the repository, descending only into open containers.
 
     An id the client asked to expand but whose own parent is shut is never
@@ -76,51 +99,100 @@ def _walk(
     hole where its children should be.
     """
     requested = set(request.expanded)
+    revealed = set(request.revealed)
+    names = _names(children_by_parent)
+
+    walk = _Walk()
     queue: deque[str] = deque([repository_id(repo_full_name)])
     descended: set[str] = set(queue)
-    opened: list[ViewNode] = []
-    visible: list[ViewNode] = []
     placed: set[str] = set()
-    truncated = False
 
     while queue:
         parent = queue.popleft()
+        drawable: list[ViewNode] = []
+
         for child in children_by_parent.get(parent, ()):
             if child.id in placed or child.id in descended:
                 continue  # a tree, but never trust the shape of stored data
 
-            open_it = (
+            if (
                 child.is_container
                 and child.id in requested
                 and child.id in children_by_parent
-            )
-            if open_it:
-                opened.append(replace(child, parent_id=parent))
+            ):
+                walk.opened.append(replace(child, parent_id=parent))
                 descended.add(child.id)
                 queue.append(child.id)
                 continue
 
-            if not request.filters.allows_node(child.label):
-                continue
-            if len(visible) >= request.caps.max_nodes:
-                truncated = True
-                continue
-            visible.append(replace(child, parent_id=parent))
-            placed.add(child.id)
+            if request.filters.allows_node(child.label):
+                drawable.append(child)
 
-    visible.sort(key=lambda node: node.id)
-    return visible, opened, truncated
+        _draw(walk, parent, drawable, names, placed, request, revealed)
+
+    walk.visible.sort(key=lambda node: node.id)
+    return walk
+
+
+def _draw(
+    walk: _Walk,
+    parent: str,
+    drawable: list[ViewNode],
+    names: Mapping[str, str],
+    placed: set[str],
+    request: ViewRequest,
+    revealed: set[str],
+) -> None:
+    """Draw one container's children, gathering the surplus behind a marker.
+
+    Most connected first, so the page that gets drawn is the one worth
+    looking at rather than whichever names sort earliest.
+    """
+    drawable.sort(key=lambda node: (-node.degree, node.id))
+
+    limit = len(drawable) if parent in revealed else request.caps.page_size
+    shown, surplus = drawable[:limit], drawable[limit:]
+
+    for child in shown:
+        if len(walk.visible) >= request.caps.max_nodes:
+            walk.truncated = True
+            return
+        walk.visible.append(replace(child, parent_id=parent))
+        placed.add(child.id)
+
+    if not surplus:
+        return
+
+    marker = ViewOverflow(
+        container_id=parent,
+        container_name=names.get(parent, parent),
+        shown=len(shown),
+        hidden=len(surplus),
+    )
+    walk.overflows.append(marker)
+    for child in surplus:
+        walk.represented_by[child.id] = marker.id
+
+
+def _names(children_by_parent: Mapping[str, Sequence[ViewNode]]) -> dict[str, str]:
+    """Every container's name, gathered from wherever it appeared as a child."""
+    return {
+        node.id: node.name
+        for children in children_by_parent.values()
+        for node in children
+    }
 
 
 def _roll_up(
     repo_full_name: str,
     visible: Sequence[ViewNode],
+    represented_by: Mapping[str, str],
     edges: Sequence[RollupEdge],
     request: ViewRequest,
 ) -> tuple[tuple[ViewEdge, ...], bool]:
     """Redraw every relationship against whichever node is actually on screen."""
     visible_ids = {node.id for node in visible}
-    placement = PlacementCache(repo_full_name, visible_ids)
+    placement = PlacementCache(repo_full_name, visible_ids, represented_by)
 
     weights: dict[tuple[str, str, EdgeType], int] = {}
     collapsed: set[tuple[str, str, EdgeType]] = set()

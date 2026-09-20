@@ -22,6 +22,7 @@ from app.knowledge_graph.view.model import (
     VIEWABLE_EDGE_TYPES,
     VIEWABLE_NODE_LABELS,
     Granularity,
+    ViewCaps,
     ViewFilters,
     ViewGraph,
     ViewRequest,
@@ -43,6 +44,10 @@ MIN_SEARCH_TERM = 2
 #: so a larger list is rejected at the edge rather than silently ignored.
 MAX_EXPANDED = 64
 MAX_NODE_ID = 512
+
+#: A node id as it arrives from a client. Bounded, and never concatenated into
+#: a query — it is matched as a parameter or compared as a string.
+NodeId = Annotated[str, Field(min_length=1, max_length=MAX_NODE_ID)]
 
 ConnectedRepo = Annotated[dict, Depends(require_connected_repo)]
 
@@ -77,11 +82,15 @@ class GraphViewBody(BaseModel):
 
     #: Containers to open. Ids whose parent is shut are ignored, and the
     #: response reports what is actually open.
-    expand: list[Annotated[str, Field(min_length=1, max_length=MAX_NODE_ID)]] = Field(
-        default_factory=list, max_length=MAX_EXPANDED,
-    )
+    expand: list[NodeId] = Field(default_factory=list, max_length=MAX_EXPANDED)
+    #: Containers whose children should be drawn in full rather than paged.
+    #: This is what clicking a "6 more" marker sends.
+    reveal: list[NodeId] = Field(default_factory=list, max_length=MAX_EXPANDED)
     #: Open everything down to this level in one step, without naming ids.
     expand_to: Granularity | None = None
+    #: Confines `expand_to` to one subtree. Without it the whole repository
+    #: opens, which is rarely wanted and always the expensive answer.
+    expand_from: NodeId | None = None
     #: Omit to see every kind of node / relationship.
     node_labels: list[NodeLabel] | None = None
     edge_types: list[EdgeType] | None = None
@@ -115,8 +124,13 @@ async def get_view(repo: ConnectedRepo, body: GraphViewBody | None = None) -> di
     view = await build_view(
         get_knowledge_graph_store(),
         repo["repo_full_name"],
-        ViewRequest(expanded=request.expand, filters=request.filters()),
+        ViewRequest(
+            expanded=request.expand,
+            revealed=request.reveal,
+            filters=request.filters(),
+        ),
         granularity=request.expand_to,
+        scope=request.expand_from,
     )
     return {
         "repo_full_name": repo["repo_full_name"],
@@ -128,11 +142,18 @@ async def get_view(repo: ConnectedRepo, body: GraphViewBody | None = None) -> di
 
 @router.get("/view/options")
 async def view_options() -> dict:
-    """Everything a client may filter a view by, so the UI is never out of date."""
+    """Everything a client may filter a view by, so the UI is never out of date.
+
+    `page_size` is included so the UI can warn *before* a click that a folder
+    is wider than one page, rather than repeating the number and drifting.
+    """
+    caps = ViewCaps()
     return {
         "node_labels": sorted(str(label) for label in VIEWABLE_NODE_LABELS),
         "edge_types": sorted(str(edge_type) for edge_type in VIEWABLE_EDGE_TYPES),
         "granularities": [str(level) for level in Granularity],
+        "page_size": caps.page_size,
+        "max_nodes": caps.max_nodes,
     }
 
 
@@ -164,6 +185,16 @@ def _serialise(view: ViewGraph) -> dict:
                 "collapsed": edge.collapsed,
             }
             for edge in view.edges
+        ],
+        "overflows": [
+            {
+                "id": overflow.id,
+                "container_id": overflow.container_id,
+                "container_name": overflow.container_name,
+                "shown": overflow.shown,
+                "hidden": overflow.hidden,
+            }
+            for overflow in view.overflows
         ],
         "expanded": [
             {

@@ -83,6 +83,10 @@ class ViewNode:
     #: only the projection knows, because only it knows what is open. It is
     #: what lets the UI offer "close the folder this came out of".
     parent_id: str | None = None
+    #: How many relationships this node takes part in, ignoring containment.
+    #: Used to decide which children are worth drawing first: most of a folder
+    #: is usually uninteresting, and alphabetical order buries what is not.
+    degree: int = 0
 
     @property
     def is_container(self) -> bool:
@@ -103,6 +107,32 @@ class RollupEdge:
     source_label: NodeLabel
     target_label: NodeLabel
     weight: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class ViewOverflow:
+    """The children of an open container that there was no room to draw.
+
+    It is a real node on the canvas, not a footnote: the relationships of
+    everything it stands for are drawn against it, exactly as they would be
+    against a shut folder. Opening it reveals the rest.
+    """
+
+    #: The open container whose children these are — which is also the
+    #: container the marker is drawn under, and what "reveal" names.
+    container_id: str
+    container_name: str
+    shown: int
+    hidden: int
+
+    @property
+    def id(self) -> str:
+        """A canvas id that cannot collide with a graph id.
+
+        Graph ids separate on `/` and `#`; this uses neither, so nothing in
+        the graph can ever produce it.
+        """
+        return f"{self.container_id}::more"
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,10 +167,16 @@ class ViewFilters:
 
 @dataclass(frozen=True, slots=True)
 class ViewCaps:
-    """Ceilings applied to one view, so no request can ask for the whole graph."""
+    """Ceilings applied to one view, so no request can ask for the whole graph.
+
+    `page_size` is the one a person notices: it is how many children a single
+    container may contribute before the rest are gathered behind a marker. A
+    folder of eighty files should not cost eighty boxes to glance at.
+    """
 
     max_nodes: int = 400
     max_edges: int = 1_200
+    page_size: int = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,8 +190,12 @@ class ViewGraph:
     #: to be looked up. An id the client asked to expand but whose parent is
     #: shut is absent, so the client can drop it instead of resending it.
     expanded: tuple[ViewNode, ...] = ()
+    #: Markers standing for children there was no room to draw.
+    overflows: tuple[ViewOverflow, ...] = ()
     #: True when a cap cut the result short, so the UI can say so instead of
-    #: quietly showing a partial picture.
+    #: quietly showing a partial picture. Paging is *not* truncation: an
+    #: overflow marker is on screen and can be opened, so it is reported as
+    #: itself rather than as a loss.
     truncated: bool = False
 
     def node_ids(self) -> set[str]:
@@ -170,5 +210,8 @@ class ViewRequest:
     """Everything the projection needs to know about what was asked for."""
 
     expanded: Sequence[str] = ()
+    #: Containers whose children are drawn in full, past `page_size`. This is
+    #: what clicking a "6 more" marker turns into.
+    revealed: Sequence[str] = ()
     filters: ViewFilters = field(default_factory=ViewFilters)
     caps: ViewCaps = field(default_factory=ViewCaps)

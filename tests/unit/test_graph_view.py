@@ -309,3 +309,102 @@ def test_an_id_outside_this_repository_has_no_place_in_the_view(unknown):
 
 def test_the_repository_itself_is_the_frame_not_a_node_in_it():
     assert container_chain(repository_id(REPO), REPO, NodeLabel.REPOSITORY) == []
+
+
+# -- Paging a wide container ----------------------------------------------
+
+def wide_file(index: int, degree: int) -> ViewNode:
+    path = f"ui/part{index:02d}.tsx"
+    return ViewNode(
+        id=file_id(REPO, path), name=f"part{index:02d}.tsx",
+        label=NodeLabel.FILE, path=path, child_count=0, degree=degree,
+    )
+
+
+#: Twenty files in one folder, each less connected than the last.
+WIDE_FILES = [wide_file(index, degree=100 - index) for index in range(20)]
+
+WIDE_TREE = {
+    repository_id(REPO): [module("ui", children=20), module("web")],
+    module_id(REPO, "ui"): WIDE_FILES,
+    module_id(REPO, "web"): [file_node("web/page.tsx")],
+}
+
+#: `web/page.tsx` imports one drawn file and one that will not fit.
+WIDE_EDGES = (
+    RollupEdge(
+        source=file_id(REPO, "web/page.tsx"), target=WIDE_FILES[0].id,
+        type=EdgeType.IMPORTS,
+        source_label=NodeLabel.FILE, target_label=NodeLabel.FILE, weight=2,
+    ),
+    RollupEdge(
+        source=file_id(REPO, "web/page.tsx"), target=WIDE_FILES[19].id,
+        type=EdgeType.IMPORTS,
+        source_label=NodeLabel.FILE, target_label=NodeLabel.FILE, weight=7,
+    ),
+)
+
+
+def wide_view(revealed=(), page_size=12):
+    return project(
+        REPO, WIDE_TREE, WIDE_EDGES,
+        ViewRequest(
+            expanded=[module_id(REPO, "ui")],
+            revealed=revealed,
+            caps=ViewCaps(page_size=page_size),
+        ),
+    )
+
+
+def test_a_wide_folder_draws_a_page_and_gathers_the_rest():
+    view = wide_view()
+    files = [node for node in view.nodes if node.label is NodeLabel.FILE]
+
+    assert len(files) == 12
+    assert len(view.overflows) == 1
+    assert view.overflows[0].hidden == 8
+    assert view.overflows[0].shown == 12
+    assert view.overflows[0].container_id == module_id(REPO, "ui")
+
+
+def test_the_page_keeps_the_most_connected_children():
+    drawn = {node.id for node in wide_view().nodes}
+
+    assert WIDE_FILES[0].id in drawn      # most connected
+    assert WIDE_FILES[19].id not in drawn  # least
+
+
+def test_the_marker_carries_the_relationships_of_what_it_hides():
+    view = wide_view()
+    marker = view.overflows[0]
+
+    to_marker = [edge for edge in view.edges if edge.target == marker.id]
+    assert to_marker and to_marker[0].weight == 7
+    assert to_marker[0].collapsed is True
+
+
+def test_paging_never_loses_a_relationship():
+    """Whether a file is drawn or gathered, its imports still show up."""
+    assert sum(edge.weight for edge in wide_view().edges) == 2 + 7
+    assert sum(edge.weight for edge in wide_view(page_size=50).edges) == 2 + 7
+
+
+def test_revealing_draws_the_rest_and_retires_the_marker():
+    view = wide_view(revealed=[module_id(REPO, "ui")])
+
+    assert len([node for node in view.nodes if node.label is NodeLabel.FILE]) == 20
+    assert view.overflows == ()
+    assert WIDE_FILES[19].id in {node.id for node in view.nodes}
+
+
+def test_a_marker_id_cannot_collide_with_a_graph_id():
+    """Graph ids separate on `/` and `#`; the marker uses neither."""
+    marker = wide_view().overflows[0]
+
+    assert "::more" in marker.id
+    assert marker.id not in {node.id for node in WIDE_FILES}
+
+
+def test_paging_is_not_reported_as_truncation():
+    """Nothing was lost — the marker is on screen and can be opened."""
+    assert wide_view().truncated is False

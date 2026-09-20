@@ -11,7 +11,8 @@ data the projection cannot ask for:
 
 * **Granularity.** "Open everything down to files" is a request to expand
   containers we have not seen yet, so it is walked level by level, fetching as
-  it goes, until it runs out of tree or out of budget.
+  it goes, until it runs out of tree or out of budget. It is *scoped*: opening
+  one folder to its files should cost that folder, not the repository.
 * **Which files are open.** A symbol is folded into its file inside the
   database unless that file is open, and only this walk knows which files
   those are.
@@ -20,11 +21,14 @@ Every repository name reaching this module has already been authorised by
 `require_connected_repo`, and every query the store runs is scoped to it.
 """
 
+from dataclasses import replace
+
 import structlog
 
 from app.knowledge_graph.build.ids import repository_id
 from app.knowledge_graph.build.model import NodeLabel
 from app.knowledge_graph.ports import KnowledgeGraphStore
+from app.knowledge_graph.view.hierarchy import is_within
 from app.knowledge_graph.view.lod import opens_automatically, project
 from app.knowledge_graph.view.model import (
     VIEWABLE_EDGE_TYPES,
@@ -52,39 +56,87 @@ async def build_view(
     request: ViewRequest,
     *,
     granularity: Granularity | None = None,
+    scope: str | None = None,
 ) -> ViewGraph:
-    """Fetch what the view needs and render it."""
-    children, opened, open_files = await _gather(
-        store, repo_full_name, request, granularity,
-    )
+    """Fetch what the view needs and render it.
+
+    `scope` confines `granularity` to one subtree. Without it, "open to files"
+    means the whole repository, which is rarely what anyone wants and always
+    what hurts most.
+    """
+    gathered = await _gather(store, repo_full_name, request, granularity, scope)
 
     edge_types = sorted(
         str(edge_type)
         for edge_type in (request.filters.edge_types & VIEWABLE_EDGE_TYPES)
     )
     edges = await store.rollup_edges(
-        repo_full_name, edge_types=edge_types, expanded_files=sorted(open_files),
+        repo_full_name,
+        edge_types=edge_types,
+        expanded_files=sorted(gathered.open_files),
     )
 
     view = project(
         repo_full_name,
-        children,
+        gathered.children,
         edges,
         ViewRequest(
-            expanded=sorted(opened),
+            expanded=sorted(gathered.opened),
+            revealed=request.revealed,
             filters=request.filters,
             caps=request.caps,
         ),
     )
+    # The fetch has its own ceiling, and a ceiling nobody is told about is a
+    # silently wrong picture.
+    if gathered.capped:
+        view = replace(view, truncated=True)
+
     logger.info(
         "graph_view_built",
         repo=repo_full_name,
         opened=len(view.expanded),
         nodes=len(view.nodes),
         edges=len(view.edges),
+        overflows=len(view.overflows),
         truncated=view.truncated,
     )
     return view
+
+
+class _Gathered:
+    """What the fetch produced, and whether it had to stop early."""
+
+    __slots__ = ("children", "opened", "open_files", "capped")
+
+    def __init__(self) -> None:
+        self.children: dict[str, list[ViewNode]] = {}
+        self.opened: set[str] = set()
+        self.open_files: set[str] = set()
+        self.capped = False
+
+
+def _wants_opening(
+    child: ViewNode,
+    requested: set[str],
+    granularity: Granularity | None,
+    scope: str | None,
+) -> bool:
+    """Whether this container should be open in the view being built.
+
+    Asking for it by id always wins. A granularity opens by label, and a scope
+    confines that to one subtree — plus the containers on the way down to it,
+    which have to be open for the subtree to be reachable at all.
+    """
+    if child.id in requested:
+        return True
+    if granularity is None:
+        return False
+    if scope is None:
+        return opens_automatically(child.label, granularity)
+    if is_within(child.id, scope):
+        return opens_automatically(child.label, granularity)
+    return is_within(scope, child.id)
 
 
 async def _gather(
@@ -92,16 +144,11 @@ async def _gather(
     repo_full_name: str,
     request: ViewRequest,
     granularity: Granularity | None,
-) -> tuple[dict[str, list[ViewNode]], set[str], set[str]]:
-    """Walk down the containment tree, fetching only what will be rendered.
-
-    Returns the children of every container that ends up open, the set that is
-    actually open, and the paths of the open files.
-    """
+    scope: str | None,
+) -> _Gathered:
+    """Walk down the containment tree, fetching only what will be rendered."""
     requested = set(request.expanded)
-    children: dict[str, list[ViewNode]] = {}
-    opened: set[str] = set()
-    open_files: set[str] = set()
+    gathered = _Gathered()
 
     frontier = {repository_id(repo_full_name)}
     fetched: set[str] = set()
@@ -113,23 +160,24 @@ async def _gather(
         fetched.update(pending)
 
         for batch in _batched(pending, PARENTS_PER_QUERY):
-            children.update(await store.view_children(repo_full_name, batch))
+            gathered.children.update(await store.view_children(repo_full_name, batch))
 
         frontier = set()
         for parent in pending:
-            for child in children.get(parent, ()):
-                if not child.is_container or len(opened) >= MAX_OPEN_CONTAINERS:
+            for child in gathered.children.get(parent, ()):
+                if not child.is_container:
                     continue
-                if child.id not in requested and not opens_automatically(
-                    child.label, granularity,
-                ):
+                if not _wants_opening(child, requested, granularity, scope):
                     continue
-                opened.add(child.id)
+                if len(gathered.opened) >= MAX_OPEN_CONTAINERS:
+                    gathered.capped = True
+                    continue
+                gathered.opened.add(child.id)
                 frontier.add(child.id)
                 if child.label is NodeLabel.FILE and child.path:
-                    open_files.add(child.path)
+                    gathered.open_files.add(child.path)
 
-    return children, opened, open_files
+    return gathered
 
 
 def _batched(values: list[str], size: int) -> list[list[str]]:
