@@ -20,5 +20,14 @@ class Repo(BaseModel):
     webhook_error: str | None = None
     parse_status: str = "pending"  # pending | in_progress | done | failed
     parse_error: str | None = None
+    # Set while the indexing lock is held. A lock older than
+    # `parse_lock_stale_minutes` is treated as abandoned by a crashed run.
+    parse_started_at: datetime | None = None
+    # Work that arrived while an index was running, drained before the lock is
+    # released so a push is never silently dropped.
+    sync_requested_at: datetime | None = None
+    pending_full: bool = False
+    pending_changed: list[str] = []
+    pending_removed: list[str] = []
     connected_at: datetime
     updated_at: datetime

@@ -8,10 +8,15 @@ import structlog
 from app.core import security
 from app.core.config import get_settings
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, UnauthorizedError
+from app.core.repo_identity import InvalidRepoName, checkout_dir, validate_repo_full_name
 from app.db import mongo
+from app.integrations import git_cli
 from app.integrations.github_client import get_github_client
 
 logger = structlog.get_logger("app.repos")
+
+# Checkouts hold private source code: owner-only, never world-readable.
+CHECKOUT_DIR_MODE = 0o700
 
 
 def _now() -> datetime:
@@ -25,42 +30,73 @@ async def get_github_token(user_id: str) -> str:
     return security.decrypt_secret(doc["access_token_encrypted"])
 
 
+def repos_root() -> Path:
+    return Path(get_settings().repos_dir)
+
+
 def repo_workdir(repo_full_name: str) -> Path:
-    return Path(get_settings().repos_dir) / repo_full_name.replace("/", "__")
+    """Checkout location for a repository, validated to stay under the root."""
+    return checkout_dir(repos_root(), repo_full_name)
+
+
+def ensure_private_repos_root() -> Path:
+    """Create the checkout root owner-only, tightening it if it already exists."""
+    root = repos_root()
+    root.mkdir(parents=True, exist_ok=True, mode=CHECKOUT_DIR_MODE)
+    root.chmod(CHECKOUT_DIR_MODE)
+    return root
 
 
 async def clone_repo(repo_full_name: str, token: str) -> Path:
     """Shallow-clone the default branch; wipes any previous checkout first."""
     dest = repo_workdir(repo_full_name)
+    ensure_private_repos_root()
     if dest.exists():
         await asyncio.to_thread(_rmtree, dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    url = f"https://x-access-token:{token}@github.com/{repo_full_name}.git"
-    proc = await asyncio.create_subprocess_exec(
-        "git", "clone", "--depth", "1", url, str(dest),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        # never echo stderr verbatim — the clone URL embeds the token
-        raise RuntimeError(f"git clone failed with exit code {proc.returncode}")
+    await git_cli.clone(repo_full_name, token, dest)
     return dest
 
 
-async def update_workdir(repo_full_name: str, token: str) -> Path:
+async def update_workdir(repo_full_name: str, token: str, *, branch: str | None = None) -> Path:
     """Bring the shallow checkout up to date; falls back to a fresh clone."""
     dest = repo_workdir(repo_full_name)
     if not (dest / ".git").exists():
         return await clone_repo(repo_full_name, token)
-    for args in (["fetch", "--depth", "1", "origin"], ["reset", "--hard", "FETCH_HEAD"]):
-        proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(dest), *args,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-        if proc.returncode != 0:
-            return await clone_repo(repo_full_name, token)
+    try:
+        await git_cli.ensure_clean_remote(dest, repo_full_name)
+        await git_cli.fetch_and_reset(dest, repo_full_name, token, branch=branch)
+    except git_cli.GitCommandError as exc:
+        logger.warning("git_update_failed_recloning", repo=repo_full_name, error=str(exc))
+        return await clone_repo(repo_full_name, token)
     return dest
+
+
+async def sanitize_existing_checkouts() -> int:
+    """Strip credentials that earlier versions persisted into `.git/config`.
+
+    Runs once at boot. A checkout that cannot be cleaned is deleted rather
+    than left holding a usable token; the next sync re-clones it.
+    """
+    if not repos_root().is_dir():
+        return 0
+    ensure_private_repos_root()
+
+    cleaned = 0
+    for repo_full_name in await mongo.repos().distinct("repo_full_name"):
+        try:
+            dest = repo_workdir(repo_full_name)
+        except InvalidRepoName:
+            continue
+        if not (dest / ".git").exists():
+            continue
+        try:
+            if await git_cli.ensure_clean_remote(dest, repo_full_name):
+                cleaned += 1
+        except Exception:
+            logger.exception("checkout_sanitize_failed_discarding", repo=repo_full_name)
+            await asyncio.to_thread(_rmtree, dest)
+            cleaned += 1
+    return cleaned
 
 
 def _rmtree(path: Path) -> None:
@@ -109,6 +145,7 @@ async def register_push_webhook(user_id: str, repo_full_name: str) -> dict:
 
 async def connect_repo(user_id: str, repo_full_name: str) -> dict:
     """Register webhook + clone + enqueue parse for a repo. Statuses tracked independently."""
+    validate_repo_full_name(repo_full_name)
     existing = await mongo.repos().find_one({"user_id": user_id, "repo_full_name": repo_full_name})
     if existing:
         raise ConflictError("repository already connected", error_code="repo_already_connected")
@@ -153,6 +190,51 @@ async def connect_repo(user_id: str, repo_full_name: str) -> dict:
         })
 
     return await mongo.repos().find_one({"user_id": user_id, "repo_full_name": repo_full_name})
+
+
+async def disconnect_repo(user_id: str, repo_full_name: str) -> None:
+    """Disconnect a repository and leave nothing of it behind.
+
+    Source code, extracted facts and the graph all exist only because the
+    repository was connected, so disconnecting removes every one of them, plus
+    the webhook on GitHub. Best-effort where GitHub is concerned: a webhook we
+    cannot delete must not prevent us deleting our own copy of the data.
+    """
+    validate_repo_full_name(repo_full_name)
+    repo = await mongo.repos().find_one({"user_id": user_id, "repo_full_name": repo_full_name})
+    if repo is None:
+        raise NotFoundError("repository is not connected", error_code="repo_not_connected")
+
+    if repo.get("webhook_id"):
+        try:
+            token = await get_github_token(user_id)
+            await get_github_client().delete_webhook(token, repo_full_name, repo["webhook_id"])
+        except Exception:
+            logger.warning("webhook_delete_failed", repo=repo_full_name, exc_info=True)
+
+    still_connected = await mongo.repos().count_documents(
+        {"repo_full_name": repo_full_name, "user_id": {"$ne": user_id}},
+    )
+    await mongo.repos().delete_one({"user_id": user_id, "repo_full_name": repo_full_name})
+
+    # Facts, graph and checkout are keyed by repository, not by user, so they
+    # are only removed once nobody else has it connected.
+    if not still_connected:
+        await _purge_repository_data(repo_full_name)
+
+    logger.info("repo_disconnected", repo=repo_full_name, purged=not still_connected)
+
+
+async def _purge_repository_data(repo_full_name: str) -> None:
+    from app.services.facts_repository import get_facts_store
+    from app.services.knowledge_graph_store import get_knowledge_graph_store
+
+    await get_knowledge_graph_store().delete_repository(repo_full_name)
+    await get_facts_store().delete_repo(repo_full_name)
+
+    workdir = repo_workdir(repo_full_name)
+    if workdir.exists():
+        await asyncio.to_thread(_rmtree, workdir)
 
 
 async def _update_repo(user_id: str, repo_full_name: str, fields: dict) -> None:

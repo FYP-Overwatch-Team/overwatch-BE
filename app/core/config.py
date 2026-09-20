@@ -33,6 +33,12 @@ class Settings(BaseSettings):
 
     ticket_sync_interval_seconds: int = 300
 
+    # Every git invocation is bounded; a hung clone must not pin a worker.
+    git_command_timeout_seconds: int = 300
+    # A parse lock older than this is assumed to belong to a crashed run and
+    # can be reclaimed, so a restart mid-parse cannot wedge a repository.
+    parse_lock_stale_minutes: int = 15
+
 
 @lru_cache
 def get_settings() -> Settings:
