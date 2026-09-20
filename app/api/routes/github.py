@@ -1,7 +1,8 @@
-from fastapi import APIRouter, BackgroundTasks, Depends
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, Depends, Response
+from pydantic import BaseModel, Field
 
 from app.api.deps import get_current_user_id
+from app.core.repo_identity import REPO_FULL_NAME_PATTERN
 from app.db import mongo
 from app.integrations.github_client import get_github_client
 from app.services import repo_service
@@ -11,7 +12,9 @@ router = APIRouter(prefix="/github", tags=["github"])
 
 
 class ConnectRepoRequest(BaseModel):
-    repo_full_name: str
+    # Rejected at the edge as well as in the service: this value ends up in a
+    # filesystem path and in a GitHub API URL.
+    repo_full_name: str = Field(pattern=REPO_FULL_NAME_PATTERN, max_length=140)
 
 
 @router.get("/repos")
@@ -61,6 +64,17 @@ async def retry_webhook(
         "webhook_status": doc["webhook_status"],
         "webhook_error": doc.get("webhook_error"),
     }
+
+
+@router.delete("/repos/{owner}/{name}", status_code=204)
+async def disconnect_repo(
+    owner: str,
+    name: str,
+    user_id: str = Depends(get_current_user_id),
+) -> Response:
+    """Disconnect a repository and delete everything derived from it."""
+    await repo_service.disconnect_repo(user_id, f"{owner}/{name}")
+    return Response(status_code=204)
 
 
 @router.get("/repos/connected")

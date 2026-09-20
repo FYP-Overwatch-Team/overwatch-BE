@@ -1,7 +1,8 @@
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.core.exceptions import UnauthorizedError
+from app.core.exceptions import NotFoundError, UnauthorizedError
+from app.core.repo_identity import validate_repo_full_name
 from app.core.security import TokenError, verify_access_token
 from app.db import mongo
 
@@ -24,3 +25,22 @@ async def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict:
     if user is None:
         raise UnauthorizedError("user not found", error_code="unknown_user")
     return user
+
+
+async def require_connected_repo(
+    repo_full_name: str, user_id: str = Depends(get_current_user_id),
+) -> dict:
+    """Authorise access to one repository's graph.
+
+    Every graph route depends on this. Node ids embed the repository name, so
+    without a single check in front of them a crafted id would be a way to
+    read another tenant's subgraph. Returning the repository document also
+    gives routes the parse status and graph version without a second query.
+    """
+    validate_repo_full_name(repo_full_name)
+    repo = await mongo.repos().find_one(
+        {"user_id": user_id, "repo_full_name": repo_full_name},
+    )
+    if repo is None:
+        raise NotFoundError("repository is not connected", error_code="repo_not_connected")
+    return repo

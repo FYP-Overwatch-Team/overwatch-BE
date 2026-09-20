@@ -116,6 +116,18 @@ class GitHubClient:
             raise ExternalServiceError(message, error_code="webhook_create_failed")
         return resp.json()["id"]
 
+    async def delete_webhook(self, token: str, repo_full_name: str, hook_id: int) -> bool:
+        """Remove a push webhook. Returns False if it was already gone."""
+        resp = await self._http.delete(
+            f"{GITHUB_API_BASE}/repos/{repo_full_name}/hooks/{hook_id}",
+            headers=self._auth_headers(token),
+        )
+        self._log_call("DELETE", f"/repos/{repo_full_name}/hooks/{hook_id}", resp)
+        if resp.status_code == 404:
+            return False
+        self._checked(resp)
+        return resp.status_code in (204, 200)
+
     @staticmethod
     def _auth_headers(token: str) -> dict:
         return {
