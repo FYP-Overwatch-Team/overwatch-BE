@@ -7,11 +7,13 @@ makes snapshot tests and delta writes possible.
 
 Layers, from coarse to fine:
 
-    Repository → Module → File → Symbol
-                    ↘ Package
+    Repository → Module → Module… → File → Symbol
+                    ↘ Package, Route
 
-The module layer is materialised for the dashboard; the file and symbol layers
-are what the chat, drill-down and (later) the contract checker read.
+Modules nest: every directory is one, so the containment chain runs all the
+way from the repository down to a single definition. Packages and routes have
+no directory, so they hang under the two synthetic modules. That unbroken
+chain is what the interactive view walks when a node is expanded or collapsed.
 """
 
 from collections import Counter, defaultdict
@@ -19,11 +21,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from app.knowledge_graph.build.ids import (
+    EXTERNAL_MODULE,
+    ROUTES_MODULE,
     ecosystem_for_language,
     route_id,
     file_id,
     module_id,
-    module_of,
+    owning_module,
     package_id,
     repository_id,
     symbol_id,
@@ -79,6 +83,8 @@ def build_snapshot(
     module_nodes, module_edges = build_module_layer(repo_full_name, facts_by_path, links)
     nodes.extend(module_nodes)
     edges.extend(module_edges)
+    # Only the outermost modules hang off the repository; the rest are
+    # reached through their parent module, which the projection wired up.
     edges.extend(
         GraphEdge(
             source=repository_id(repo_full_name),
@@ -86,6 +92,7 @@ def build_snapshot(
             type=EdgeType.CONTAINS,
         )
         for module in module_nodes
+        if module.properties.get("depth") == 1
     )
 
     symbol_ids = _add_files_and_symbols(
@@ -153,7 +160,7 @@ def _add_files_and_symbols(
         )
         edges.append(
             GraphEdge(
-                source=module_id(repo_full_name, module_of(path)),
+                source=module_id(repo_full_name, owning_module(path)),
                 target=this_file,
                 type=EdgeType.CONTAINS,
                 origin_file=path,
@@ -238,6 +245,14 @@ def _add_packages(
                 "name": package_names[identifier],
                 "ecosystem": ecosystems[identifier],
             },
+        )
+        for identifier in sorted(package_names)
+    )
+    edges.extend(
+        GraphEdge(
+            source=module_id(repo_full_name, EXTERNAL_MODULE),
+            target=identifier,
+            type=EdgeType.CONTAINS,
         )
         for identifier in sorted(package_names)
     )
@@ -333,6 +348,14 @@ def _add_http_layer(
         )
 
     nodes.extend(routes[identifier] for identifier in sorted(routes))
+    edges.extend(
+        GraphEdge(
+            source=module_id(repo_full_name, ROUTES_MODULE),
+            target=identifier,
+            type=EdgeType.CONTAINS,
+        )
+        for identifier in sorted(routes)
+    )
 
 
 def _add_symbol_edges(

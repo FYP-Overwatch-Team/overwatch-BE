@@ -10,6 +10,7 @@ from typing import Protocol
 
 from app.knowledge_graph.build.model import GraphDelta
 from app.knowledge_graph.facts import FileFacts
+from app.knowledge_graph.view.model import RollupEdge, ViewNode
 
 
 class FactsStore(Protocol):
@@ -65,6 +66,21 @@ class KnowledgeGraphStore(Protocol):
 
     async def module_view(self, repo_full_name: str) -> dict:
         """The module-level nodes and edges the dashboard renders."""
+
+    async def view_children(
+        self, repo_full_name: str, parent_ids: Sequence[str],
+    ) -> dict[str, list[ViewNode]]:
+        """What each of these nodes directly contains, capped per parent."""
+
+    async def rollup_edges(
+        self,
+        repo_full_name: str,
+        *,
+        edge_types: Sequence[str],
+        expanded_files: Sequence[str] = (),
+        limit: int = 20_000,
+    ) -> list[RollupEdge]:
+        """Relationships of these types, with symbols folded into closed files."""
 
     async def node_ids(self, repo_full_name: str) -> set[str]:
         """Every node id stored for a repository."""

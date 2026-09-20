@@ -312,3 +312,111 @@ def test_labels_and_types_are_rejected_unless_they_come_from_the_enums():
             _safe_label(hostile)
         with pytest.raises(ValueError):
             _safe_type(hostile)
+
+
+# -- Queries the interactive view is built from ----------------------------
+
+def nested_delta(repo: str = REPO) -> GraphDelta:
+    """Two nested modules, a file in each, and a call across them."""
+    routes, store_dir = module_id(repo, "api/routes"), module_id(repo, "api/services")
+    users, storage = f"{repo}:api/routes/users.py", f"{repo}:api/services/store.py"
+    list_users, fetch = f"{users}#list_users", f"{storage}#fetch"
+
+    return GraphDelta(
+        repo_full_name=repo,
+        version="sha-2",
+        upserted_nodes=(
+            module_node(repo, "api", depth=1, file_count=2),
+            module_node(repo, "api/routes", depth=2),
+            module_node(repo, "api/services", depth=2),
+            file_node(repo, "api/routes/users.py"),
+            file_node(repo, "api/services/store.py"),
+            GraphNode(list_users, NodeLabel.SYMBOL, {
+                "name": "list_users", "kind": "function", "file_path": "api/routes/users.py",
+            }),
+            GraphNode(fetch, NodeLabel.SYMBOL, {
+                "name": "fetch", "kind": "function", "file_path": "api/services/store.py",
+            }),
+        ),
+        upserted_edges=(
+            GraphEdge(module_id(repo, "api"), routes, EdgeType.CONTAINS),
+            GraphEdge(module_id(repo, "api"), store_dir, EdgeType.CONTAINS),
+            GraphEdge(routes, users, EdgeType.CONTAINS),
+            GraphEdge(store_dir, storage, EdgeType.CONTAINS),
+            GraphEdge(users, list_users, EdgeType.DEFINES),
+            GraphEdge(storage, fetch, EdgeType.DEFINES),
+            GraphEdge(list_users, fetch, EdgeType.CALLS, {"count": 4}),
+        ),
+    )
+
+
+async def test_view_children_returns_one_level_with_labels_and_counts(store):
+    await store.apply(nested_delta())
+
+    children = await store.view_children(REPO, [module_id(REPO, "api")])
+    inside_api = children[module_id(REPO, "api")]
+
+    assert [node.id for node in inside_api] == [
+        module_id(REPO, "api/routes"), module_id(REPO, "api/services"),
+    ]
+    assert all(node.label is NodeLabel.MODULE for node in inside_api)
+    # Each holds one file, so each is still worth opening.
+    assert all(node.child_count == 1 for node in inside_api)
+
+
+async def test_view_children_reports_a_leaf_as_having_nothing_to_open(store):
+    await store.apply(nested_delta())
+
+    children = await store.view_children(REPO, [f"{REPO}:api/routes/users.py"])
+    symbols = children[f"{REPO}:api/routes/users.py"]
+
+    assert [node.name for node in symbols] == ["list_users"]
+    assert symbols[0].child_count == 0
+
+
+async def test_view_children_never_crosses_into_another_repository(store):
+    await store.apply(nested_delta(REPO))
+    await store.apply(nested_delta(OTHER_REPO))
+
+    children = await store.view_children(REPO, [module_id(OTHER_REPO, "api")])
+
+    assert children == {}
+
+
+async def test_rollup_folds_a_call_into_the_files_that_hold_the_symbols(store):
+    await store.apply(nested_delta())
+
+    edges = await store.rollup_edges(REPO, edge_types=[str(EdgeType.CALLS)])
+
+    assert len(edges) == 1
+    assert edges[0].source == f"{REPO}:api/routes/users.py"
+    assert edges[0].target == f"{REPO}:api/services/store.py"
+    assert edges[0].source_label is NodeLabel.FILE
+    assert edges[0].weight == 4  # the call count travels with the edge
+
+
+async def test_rollup_keeps_symbols_apart_once_their_file_is_open(store):
+    await store.apply(nested_delta())
+
+    edges = await store.rollup_edges(
+        REPO,
+        edge_types=[str(EdgeType.CALLS)],
+        expanded_files=["api/routes/users.py", "api/services/store.py"],
+    )
+
+    assert edges[0].source == f"{REPO}:api/routes/users.py#list_users"
+    assert edges[0].source_label is NodeLabel.SYMBOL
+
+
+async def test_rollup_is_scoped_to_one_repository(store):
+    await store.apply(nested_delta(REPO))
+    await store.apply(nested_delta(OTHER_REPO))
+
+    edges = await store.rollup_edges(REPO, edge_types=[str(EdgeType.CALLS)])
+
+    assert {edge.source for edge in edges} == {f"{REPO}:api/routes/users.py"}
+
+
+async def test_rollup_rejects_an_edge_type_we_do_not_define(store):
+    with pytest.raises(ValueError):
+        await store.rollup_edges(REPO, edge_types=["DROP DATABASE"])

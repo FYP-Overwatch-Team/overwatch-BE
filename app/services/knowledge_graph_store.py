@@ -32,6 +32,11 @@ from app.knowledge_graph.build.model import (
     GraphNode,
     NodeLabel,
 )
+from app.knowledge_graph.view.model import (
+    CONTAINMENT_EDGE_TYPES,
+    RollupEdge,
+    ViewNode,
+)
 
 logger = structlog.get_logger("app.knowledge_graph.store")
 
@@ -48,6 +53,9 @@ WRITE_CHUNK = 1_000
 #: Read caps. Every query is bounded so one request cannot pull a whole
 #: repository into memory, whatever the caller asks for.
 CHILDREN_LIMIT = 500
+#: Containers one view request may open, and rolled-up rows it may pull back.
+VIEW_PARENTS_LIMIT = 64
+VIEW_EDGE_LIMIT = 20_000
 NEIGHBOUR_LIMIT = 500
 SEARCH_LIMIT = 50
 #: Traversal depth is concatenated into the query, so it is allow-listed.
@@ -71,6 +79,16 @@ def _traversal_pattern(direction: str, depth: int) -> str:
     if direction == "in":
         return f"<-{hops}-"
     return f"-{hops}-"
+
+
+def _containment_pattern() -> str:
+    """`CONTAINS|DEFINES|HAS_MEMBER`, built from the enum, for a match pattern.
+
+    Relationship types cannot be parameterised, so this is concatenated into
+    the query — which is safe precisely because every part of it comes from
+    `EdgeType` and is checked by `_safe_type`.
+    """
+    return "|".join(_safe_type(edge_type) for edge_type in CONTAINMENT_EDGE_TYPES)
 
 
 def _validated_edge_types(edge_types: Sequence[str] | None) -> list[str] | None:
@@ -115,6 +133,70 @@ def _chunks(rows: Sequence[Any]) -> list[Sequence[Any]]:
     return [rows[start:start + WRITE_CHUNK] for start in range(0, len(rows), WRITE_CHUNK)]
 
 
+#: Folds a Symbol endpoint into its File unless that file is open. Written
+#: once and formatted per endpoint so the two ends cannot drift apart; every
+#: value inside it is a query parameter.
+_FOLD_TO_FILE = (
+    "CASE WHEN $symbol IN labels({node}) AND {node}.file_path IS NOT NULL "
+    "AND NOT {node}.file_path IN $expanded_files "
+    "THEN {folded} ELSE {plain} END"
+)
+
+
+def _fold_fragment(node: str, field: str) -> str:
+    folded = f"$prefix + {node}.file_path" if field == "id" else "$file"
+    plain = f"{node}.id" if field == "id" else f"[label IN labels({node}) WHERE label <> $base][0]"
+    return _FOLD_TO_FILE.format(node=node, folded=folded, plain=plain)
+
+
+def _view_node(row: dict) -> ViewNode | None:
+    """One row of a children query as a `ViewNode`, or None if unrecognised."""
+    try:
+        label = NodeLabel(row["label"])
+    except ValueError:
+        return None  # a label this version does not know: leave it out
+    return ViewNode(
+        id=row["id"],
+        name=row.get("name") or row.get("path") or row["id"],
+        label=label,
+        kind=row.get("kind"),
+        path=row.get("path"),
+        depth=row.get("depth") or 0,
+        file_count=row.get("file_count") or 0,
+        definition_count=row.get("definition_count") or 0,
+        child_count=row.get("child_count") or 0,
+        language=row.get("language"),
+    )
+
+
+def _group_children(rows: Sequence[dict]) -> dict[str, list[ViewNode]]:
+    grouped: dict[str, list[ViewNode]] = {}
+    for row in rows:
+        node = _view_node(row)
+        if node is not None:
+            grouped.setdefault(row["parent"], []).append(node)
+    return grouped
+
+
+def _rollup_edges_from_rows(rows: Sequence[dict]) -> list[RollupEdge]:
+    edges: list[RollupEdge] = []
+    for row in rows:
+        try:
+            edges.append(
+                RollupEdge(
+                    source=row["source"],
+                    target=row["target"],
+                    type=EdgeType(row["type"]),
+                    source_label=NodeLabel(row["source_label"]),
+                    target_label=NodeLabel(row["target_label"]),
+                    weight=int(row.get("weight") or 1),
+                )
+            )
+        except (ValueError, TypeError):
+            continue  # a type or label this version does not know
+    return edges
+
+
 class Neo4jKnowledgeGraphStore:
     """The knowledge graph as stored in Neo4j."""
 
@@ -149,6 +231,7 @@ class Neo4jKnowledgeGraphStore:
         nodes = await self._store.run(
             f"""
             MATCH (n:{NodeLabel.MODULE} {{repo: $repo}})
+            WHERE coalesce(n.depth, 1) = 1
             RETURN n.id AS id, n.name AS name, n.kind AS kind,
                    n.file_count AS file_count, n.definition_count AS definition_count
             ORDER BY id
@@ -313,6 +396,91 @@ class Neo4jKnowledgeGraphStore:
         }
 
 
+    # -- interactive view --------------------------------------------------
+
+    async def view_children(
+        self, repo_full_name: str, parent_ids: Sequence[str],
+    ) -> dict[str, list[ViewNode]]:
+        """What each of these nodes contains, one level down.
+
+        The result is capped *per parent*, so one enormous directory cannot
+        starve the others of the request's budget.
+        """
+        parents = list(dict.fromkeys(parent_ids))[:VIEW_PARENTS_LIMIT]
+        if not parents:
+            return {}
+
+        containment = _containment_pattern()
+        rows = await self._store.run(
+            f"""
+            MATCH (p:{BASE_LABEL} {{repo: $repo}})-[:{containment}]->(c:{BASE_LABEL})
+            WHERE p.id IN $parents AND c.repo = $repo
+            WITH p.id AS parent, c ORDER BY c.id
+            WITH parent, collect(c)[..$per_parent] AS children
+            UNWIND children AS c
+            RETURN parent,
+                   c.id AS id, c.name AS name, c.kind AS kind, c.path AS path,
+                   [label IN labels(c) WHERE label <> $base][0] AS label,
+                   coalesce(c.depth, 0) AS depth,
+                   coalesce(c.file_count, 0) AS file_count,
+                   coalesce(c.definition_count, 0) AS definition_count,
+                   c.language AS language,
+                   size([(c)-[:{containment}]->(x:{BASE_LABEL}) | x]) AS child_count
+            ORDER BY parent, id
+            """,
+            repo=repo_full_name,
+            parents=parents,
+            per_parent=CHILDREN_LIMIT,
+            base=BASE_LABEL,
+        )
+        return _group_children(rows)
+
+    async def rollup_edges(
+        self,
+        repo_full_name: str,
+        *,
+        edge_types: Sequence[str],
+        expanded_files: Sequence[str] = (),
+        limit: int = VIEW_EDGE_LIMIT,
+    ) -> list[RollupEdge]:
+        """Every relationship of these types, pre-aggregated for the view.
+
+        Symbols are folded into their file *in the database* unless that file
+        is open, which is what keeps a repository with a hundred thousand
+        definitions from shipping a hundred thousand rows to render a picture
+        of a dozen boxes. The remaining rollup — file into folder into folder —
+        is arithmetic on ids and happens in the projection.
+        """
+        types = _validated_edge_types(edge_types)
+        if not types:
+            return []
+
+        rows = await self._store.run(
+            f"""
+            MATCH (a:{BASE_LABEL} {{repo: $repo}})-[e]->(b:{BASE_LABEL} {{repo: $repo}})
+            WHERE type(e) IN $types
+            WITH e,
+                 {_fold_fragment("a", "id")} AS source,
+                 {_fold_fragment("a", "label")} AS source_label,
+                 {_fold_fragment("b", "id")} AS target,
+                 {_fold_fragment("b", "label")} AS target_label
+            RETURN source, source_label, target, target_label, type(e) AS type,
+                   sum(coalesce(e.count, e.weight, 1)) AS weight
+            ORDER BY source, target, type
+            LIMIT $limit
+            """,
+            repo=repo_full_name,
+            types=types,
+            expanded_files=list(expanded_files),
+            prefix=f"{repo_full_name}:",
+            symbol=str(NodeLabel.SYMBOL),
+            file=str(NodeLabel.FILE),
+            base=BASE_LABEL,
+            limit=min(limit, VIEW_EDGE_LIMIT),
+        )
+        return _rollup_edges_from_rows(rows)
+
+
     # -- writes ------------------------------------------------------------
 
     async def _upsert_nodes(self, repo: str, version: str, nodes: Sequence[GraphNode]) -> None:
@@ -429,7 +597,9 @@ class InMemoryKnowledgeGraphStore:
     async def module_view(self, repo_full_name: str) -> dict:
         modules = {
             node_id: node for node_id, node in self.nodes.items()
-            if node["repo"] == repo_full_name and node["label"] == str(NodeLabel.MODULE)
+            if node["repo"] == repo_full_name
+            and node["label"] == str(NodeLabel.MODULE)
+            and node.get("depth", 1) == 1
         }
         nodes = [
             {
@@ -558,6 +728,95 @@ class InMemoryKnowledgeGraphStore:
         ]
         matches.sort(key=lambda row: (len(str(row["name"] or row["path"] or "")), row["id"]))
         return matches[:min(limit, SEARCH_LIMIT)]
+
+    async def view_children(
+        self, repo_full_name: str, parent_ids: Sequence[str],
+    ) -> dict[str, list[ViewNode]]:
+        parents = list(dict.fromkeys(parent_ids))[:VIEW_PARENTS_LIMIT]
+        wanted = {str(edge_type) for edge_type in CONTAINMENT_EDGE_TYPES}
+        grouped: dict[str, list[ViewNode]] = {}
+
+        for edge in sorted(self.edges.values(), key=lambda e: (e["source"], e["target"])):
+            if edge["repo"] != repo_full_name or edge["type"] not in wanted:
+                continue
+            if edge["source"] not in parents:
+                continue
+            child = self.nodes.get(edge["target"])
+            if child is None or child["repo"] != repo_full_name:
+                continue
+            siblings = grouped.setdefault(edge["source"], [])
+            if len(siblings) >= CHILDREN_LIMIT:
+                continue
+            node = _view_node({
+                **child,
+                "label": child["label"],
+                "child_count": self._child_count(repo_full_name, child["id"]),
+            })
+            if node is not None:
+                siblings.append(node)
+
+        return grouped
+
+    async def rollup_edges(
+        self,
+        repo_full_name: str,
+        *,
+        edge_types: Sequence[str],
+        expanded_files: Sequence[str] = (),
+        limit: int = VIEW_EDGE_LIMIT,
+    ) -> list[RollupEdge]:
+        types = set(_validated_edge_types(edge_types) or ())
+        if not types:
+            return []
+        open_files = set(expanded_files)
+        weights: dict[tuple[str, str, str, str, str], int] = {}
+
+        for edge in self.edges.values():
+            if edge["repo"] != repo_full_name or edge["type"] not in types:
+                continue
+            source = self.nodes.get(edge["source"])
+            target = self.nodes.get(edge["target"])
+            if source is None or target is None:
+                continue
+            source_id, source_label = self._fold(repo_full_name, source, open_files)
+            target_id, target_label = self._fold(repo_full_name, target, open_files)
+            key = (source_id, source_label, target_id, target_label, edge["type"])
+            weight = edge.get("count") or edge.get("weight") or 1
+            weights[key] = weights.get(key, 0) + int(weight)
+
+        rows = [
+            {
+                "source": source, "source_label": source_label,
+                "target": target, "target_label": target_label,
+                "type": edge_type, "weight": weight,
+            }
+            for (source, source_label, target, target_label, edge_type), weight
+            in sorted(weights.items())
+        ][:min(limit, VIEW_EDGE_LIMIT)]
+        return _rollup_edges_from_rows(rows)
+
+    def _child_count(self, repo_full_name: str, node_id: str) -> int:
+        wanted = {str(edge_type) for edge_type in CONTAINMENT_EDGE_TYPES}
+        return sum(
+            1 for edge in self.edges.values()
+            if edge["repo"] == repo_full_name
+            and edge["source"] == node_id
+            and edge["type"] in wanted
+        )
+
+    @staticmethod
+    def _fold(
+        repo_full_name: str, node: dict, open_files: set[str],
+    ) -> tuple[str, str]:
+        """Mirror of the Neo4j CASE: a symbol becomes its file unless it is open."""
+        file_path = node.get("file_path")
+        if (
+            node["label"] == str(NodeLabel.SYMBOL)
+            and file_path
+            and file_path not in open_files
+        ):
+            return f"{repo_full_name}:{file_path}", str(NodeLabel.FILE)
+        return node["id"], node["label"]
 
     async def counts(self, repo_full_name: str) -> dict:
         nodes_by_label: dict[str, int] = {}
