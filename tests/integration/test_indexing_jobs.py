@@ -216,3 +216,82 @@ async def test_indexing_does_not_block_the_event_loop(monkeypatch, tmp_path):
     # Inline parsing would stall the loop for the full 0.4s.
     assert stalls and max(stalls) < 0.25
     assert (await _repo_doc())["parse_status"] == "done"
+
+
+async def test_a_graph_from_an_older_builder_is_rebuilt_not_patched(monkeypatch):
+    """A shape change invalidates the whole graph, not just the changed files.
+
+    An incremental sync diffs the new snapshot against one rebuilt from cached
+    facts. If the *builder* changed, the old graph holds nodes the new
+    snapshot has no opinion about, so they survive the diff and the stored
+    graph keeps its old shape forever. The only correct answer is to rebuild.
+    """
+    from app.knowledge_graph.build import GRAPH_BUILD_VERSION
+
+    calls: list[bool] = []
+
+    async def fake_pipeline_index(self, repo_full_name, checkout, version, *, full):
+        calls.append(full)
+        from app.knowledge_graph.pipeline import IndexResult
+
+        return IndexResult(repo_full_name=repo_full_name, version=version, files_indexed=0)
+
+    from app.integrations import git_cli
+    from app.knowledge_graph.pipeline import IndexingPipeline
+
+    monkeypatch.setattr(IndexingPipeline, "index", fake_pipeline_index)
+    monkeypatch.setattr(git_cli, "current_commit", lambda _path: _resolved("sha-1"))
+    monkeypatch.setattr(repo_service, "repo_workdir", lambda repo_full_name: Path("."))
+    # An incremental sync pulls the checkout forward first; neither GitHub nor
+    # the filesystem is what this test is about.
+    monkeypatch.setattr(repo_service, "get_github_token", lambda user_id: _resolved("t"))
+    monkeypatch.setattr(
+        repo_service, "update_workdir", lambda repo, token: _resolved(Path(".")),
+    )
+
+    await _insert_repo()
+
+    # Stored by a builder that predates the current shape.
+    await mongo.repos().update_one(
+        {"user_id": USER, "repo_full_name": REPO},
+        {"$set": {"graph_build_version": GRAPH_BUILD_VERSION - 1}},
+    )
+    await jobs._index(USER, REPO, full=False)
+    assert calls == [True], "an out-of-date shape must force a full rebuild"
+
+    # Now it is current, so an incremental sync stays incremental.
+    calls.clear()
+    await jobs._index(USER, REPO, full=False)
+    assert calls == [False]
+
+    doc = await _repo_doc()
+    assert doc["graph_build_version"] == GRAPH_BUILD_VERSION
+
+
+async def test_a_graph_with_no_recorded_shape_is_rebuilt(monkeypatch):
+    """Every graph written before the version existed is of unknown shape."""
+    calls: list[bool] = []
+
+    async def fake_pipeline_index(self, repo_full_name, checkout, version, *, full):
+        calls.append(full)
+        from app.knowledge_graph.pipeline import IndexResult
+
+        return IndexResult(repo_full_name=repo_full_name, version=version, files_indexed=0)
+
+    from app.integrations import git_cli
+    from app.knowledge_graph.pipeline import IndexingPipeline
+
+    monkeypatch.setattr(IndexingPipeline, "index", fake_pipeline_index)
+    monkeypatch.setattr(git_cli, "current_commit", lambda _path: _resolved("sha-1"))
+    monkeypatch.setattr(repo_service, "repo_workdir", lambda repo_full_name: Path("."))
+
+    await _insert_repo()
+    await jobs._index(USER, REPO, full=False)
+
+    assert calls == [True]
+
+
+def _resolved(value):
+    future: asyncio.Future = asyncio.get_event_loop().create_future()
+    future.set_result(value)
+    return future

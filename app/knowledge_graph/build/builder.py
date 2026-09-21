@@ -45,6 +45,20 @@ from app.knowledge_graph.limits import DEFAULT_LIMITS, Limits
 from app.knowledge_graph.link import EdgeKind, RepositoryLinks, SymbolRef
 from app.knowledge_graph.link.http import route_key
 
+#: The *shape* of the graph this module produces, as opposed to the parser
+#: version, which guards the cached facts.
+#:
+#: Bump it whenever a snapshot of the same commit would come out different —
+#: a new layer, a changed containment rule, a node that stops being written.
+#: A repository whose stored graph was built by an older version is rebuilt
+#: from scratch on its next sync, because an incremental diff against a graph
+#: of a different shape preserves the old shape: the nodes it would need to
+#: remove are not in the new snapshot to be compared against.
+#:
+#: 1 — folders nest at every depth, and a top-level file is held by the
+#:     repository rather than by an invented `root` folder.
+GRAPH_BUILD_VERSION = 1
+
 _EDGE_TYPE_BY_KIND = {
     EdgeKind.CALLS: EdgeType.CALLS,
     EdgeKind.RENDERS: EdgeType.RENDERS,

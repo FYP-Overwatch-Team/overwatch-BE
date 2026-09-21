@@ -25,6 +25,7 @@ import structlog
 from app.core.config import get_settings
 from app.db import mongo
 from app.integrations import git_cli
+from app.knowledge_graph.build import GRAPH_BUILD_VERSION
 from app.knowledge_graph.pipeline import IndexingPipeline
 from app.services import repo_service
 from app.services.facts_repository import get_facts_store
@@ -208,6 +209,22 @@ async def _incremental_index(
 
 
 async def _index(user_id: str, repo_full_name: str, *, full: bool) -> None:
+    repo = await mongo.repos().find_one(
+        {"user_id": user_id, "repo_full_name": repo_full_name},
+    )
+    # A graph written by an older builder has a different shape, and an
+    # incremental diff against it would keep that shape: the nodes that ought
+    # to go are not in the new snapshot to be compared against. Rebuild it.
+    stale_shape = (repo or {}).get("graph_build_version") != GRAPH_BUILD_VERSION
+    if stale_shape and not full:
+        logger.info(
+            "graph_rebuild_forced",
+            repo=repo_full_name,
+            stored=(repo or {}).get("graph_build_version"),
+            current=GRAPH_BUILD_VERSION,
+        )
+    full = full or stale_shape
+
     if full:
         # The checkout already exists from connect; no token needed.
         workdir = repo_service.repo_workdir(repo_full_name)
@@ -223,6 +240,7 @@ async def _index(user_id: str, repo_full_name: str, *, full: bool) -> None:
         {"user_id": user_id, "repo_full_name": repo_full_name},
         {"$set": {
             "graph_version": result.version,
+            "graph_build_version": result.build_version,
             "graph_stats": result.as_stats_document(),
             "indexed_at": _now(),
             "updated_at": _now(),

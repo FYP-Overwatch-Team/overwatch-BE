@@ -29,7 +29,12 @@ from typing import Any
 import structlog
 
 from app.knowledge_graph import project_config
-from app.knowledge_graph.build import build_snapshot, diff_snapshots, full_delta
+from app.knowledge_graph.build import (
+    GRAPH_BUILD_VERSION,
+    build_snapshot,
+    diff_snapshots,
+    full_delta,
+)
 from app.knowledge_graph.build.model import GraphDelta, GraphSnapshot
 from app.knowledge_graph.discovery import DiscoveredFile, discover
 from app.knowledge_graph.extract.pool import (
@@ -62,9 +67,14 @@ class IndexResult:
     delta: Mapping[str, int] = field(default_factory=dict)
     stats: Mapping[str, Any] = field(default_factory=dict)
 
+    #: The shape of the graph that was written, so a later run can tell
+    #: whether the stored graph predates a change to the builder.
+    build_version: int = GRAPH_BUILD_VERSION
+
     def as_stats_document(self) -> dict[str, Any]:
         return {
             "version": self.version,
+            "build_version": self.build_version,
             "files": self.files_indexed,
             "plan": dict(self.plan),
             "delta": dict(self.delta),
