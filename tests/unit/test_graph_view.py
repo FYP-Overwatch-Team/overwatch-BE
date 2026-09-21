@@ -226,12 +226,39 @@ def test_a_relationship_inside_a_collapsed_module_is_not_drawn():
     assert len(view().edges) == 1
 
 
-def test_expanding_a_module_replaces_it_with_its_children():
-    ids = [node.id for node in view(expanded=[module_id(REPO, "api")]).nodes]
-    assert module_id(REPO, "api") not in ids
+def test_opening_a_folder_draws_its_contents_beneath_it():
+    result = view(expanded=[module_id(REPO, "api")])
+    ids = [node.id for node in result.nodes]
+
+    # The folder stays where it is — that is what makes the picture a tree.
+    assert module_id(REPO, "api") in ids
     assert module_id(REPO, "api/routes") in ids
     assert module_id(REPO, "api/services") in ids
     assert module_id(REPO, "web") in ids  # untouched
+
+    opened = next(node for node in result.nodes if node.id == module_id(REPO, "api"))
+    assert opened.expanded is True
+
+
+def test_the_tree_is_drawn_between_nodes_that_are_both_on_screen():
+    result = view(expanded=[module_id(REPO, "api")])
+    lines = {(line.parent, line.child) for line in result.containment}
+
+    assert (module_id(REPO, "api"), module_id(REPO, "api/routes")) in lines
+    assert (module_id(REPO, "api"), module_id(REPO, "api/services")) in lines
+    # `web` hangs off the repository, which is the frame, not a box in it.
+    assert all(line.parent != REPO for line in result.containment)
+
+
+def test_a_shut_folder_holds_nothing_on_screen():
+    assert view().containment == ()
+
+
+def test_folders_are_drawn_before_files():
+    result = view(expanded=[module_id(REPO, "api"), module_id(REPO, "api/routes")])
+    labels = [node.label for node in result.nodes]
+
+    assert labels == sorted(labels, key=lambda label: 0 if label is NodeLabel.MODULE else 1)
 
 
 def test_expanding_reveals_the_relationship_that_was_hidden_inside():
@@ -285,9 +312,22 @@ def test_filtering_out_a_relationship_type_removes_its_edges():
 
 
 def test_filtering_out_a_node_label_removes_those_nodes():
+    """An open folder survives a filter: it is the scaffolding, not content.
+
+    Hiding it would leave whatever is inside it hanging off nothing, which is
+    a worse answer than showing the folder you opened.
+    """
     filters = ViewFilters(node_labels=frozenset({NodeLabel.FILE}))
-    result = view(expanded=[module_id(REPO, "api"), module_id(REPO, "api/routes")], filters=filters)
-    assert [node.id for node in result.nodes] == [file_id(REPO, "api/routes/users.py")]
+    result = view(
+        expanded=[module_id(REPO, "api"), module_id(REPO, "api/routes")],
+        filters=filters,
+    )
+    ids = [node.id for node in result.nodes]
+
+    assert file_id(REPO, "api/routes/users.py") in ids
+    assert module_id(REPO, "web") not in ids       # shut, and filtered out
+    assert module_id(REPO, "api") in ids           # open, so it stays
+    assert module_id(REPO, "api/routes") in ids
 
 
 def test_a_cap_truncates_and_says_so():

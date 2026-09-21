@@ -148,12 +148,17 @@ async def test_a_collapsed_folder_carries_the_edges_of_everything_inside_it(clie
     }
 
 
-async def test_opening_a_folder_swaps_it_for_what_is_inside(client, ready):
+async def test_opening_a_folder_draws_what_is_inside_it_beneath_it(client, ready):
     body = await view(client, ready, expand=[module_id(REPO, "api")])
 
-    assert module_id(REPO, "api") not in ids(body)
+    # The folder stays put; the tree grows downwards from it.
+    assert module_id(REPO, "api") in ids(body)
     assert module_id(REPO, "api/routes") in ids(body)
     assert module_id(REPO, "web") in ids(body)
+    assert {(line["parent"], line["child"]) for line in body["containment"]} == {
+        (module_id(REPO, "api"), module_id(REPO, "api/routes")),
+        (module_id(REPO, "api"), module_id(REPO, "api/services")),
+    }
     # Open containers come back described, not just named: they are no longer
     # on screen, so the client cannot look their names up.
     assert body["expanded"] == [{
@@ -196,7 +201,16 @@ async def test_expand_to_files_opens_every_folder_in_one_step(client, ready):
 
     assert f"{REPO}:api/routes/users.py" in ids(body)
     assert f"{REPO}:web/page.tsx" in ids(body)
-    assert all(node["label"] == "File" for node in body["nodes"])
+    # Every file sits under the folder that holds it.
+    held = {line["child"] for line in body["containment"]}
+    assert f"{REPO}:api/routes/users.py" in held
+
+
+async def test_folders_are_drawn_before_the_files_beside_them(client, ready):
+    body = await view(client, ready, expand=[module_id(REPO, "widgets")])
+
+    labels = [node["label"] for node in body["nodes"]]
+    assert labels.index("Module") < labels.index("File")
 
 
 async def test_filtering_relationship_types_leaves_the_nodes_alone(client, ready):
@@ -209,17 +223,35 @@ async def test_filtering_relationship_types_leaves_the_nodes_alone(client, ready
 
 
 async def test_filtering_node_labels_keeps_only_those_nodes(client, ready):
+    """Open folders survive a filter — they are the scaffolding for what is
+    inside them, and hiding them would leave it hanging off nothing."""
     body = await view(client, ready, expand_to="file", node_labels=["Module"])
 
-    assert ids(body) == []
+    assert all(node["label"] == "Module" for node in body["nodes"])
+    assert module_id(REPO, "api") in ids(body)
 
 
-async def test_every_node_says_whether_it_can_be_opened(client, ready):
+async def test_a_shut_repository_has_no_tree_to_draw(client, ready):
     body = await view(client, ready)
 
-    assert all(node["expandable"] for node in body["nodes"])
+    assert body["containment"] == []
+
+
+async def test_every_node_says_whether_it_can_be_opened_and_whether_it_is(client, ready):
+    shut = await view(client, ready)
+    assert all(node["expandable"] for node in shut["nodes"])
+    assert not any(node["expanded"] for node in shut["nodes"])
+
+    opened = await view(client, ready, expand=[module_id(REPO, "api")])
+    by_id = {node["id"]: node for node in opened["nodes"]}
+    assert by_id[module_id(REPO, "api")]["expanded"] is True
+    assert by_id[module_id(REPO, "web")]["expanded"] is False
+
+    # Files hold nothing here, so nothing offers to open them.
     leaves = await view(client, ready, expand_to="file")
-    assert not any(node["expandable"] for node in leaves["nodes"])
+    assert not any(
+        node["expandable"] for node in leaves["nodes"] if node["label"] == "File"
+    )
 
 
 async def test_the_filter_vocabulary_is_served_to_the_client(client, ready):
@@ -310,9 +342,10 @@ async def test_confining_to_a_nested_folder_opens_the_way_down_to_it(client, rea
     )
 
     assert f"{REPO}:api/routes/users.py" in ids(body)
-    # `api/services` had to stay shut, but `api` had to open to reach routes.
+    # `api/services` stayed shut; `api` had to open to reach routes, and shows
+    # as the folder holding both.
     assert module_id(REPO, "api/services") in ids(body)
-    assert module_id(REPO, "api") not in ids(body)
+    assert module_id(REPO, "api") in ids(body)
 
 
 async def test_confining_to_another_repository_opens_nothing(client, ready):

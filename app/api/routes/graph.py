@@ -173,6 +173,7 @@ def _serialise(view: ViewGraph) -> dict:
                 "language": node.language,
                 "parent_id": node.parent_id,
                 "expandable": node.is_container,
+                "expanded": node.expanded,
             }
             for node in view.nodes
         ],
@@ -185,6 +186,10 @@ def _serialise(view: ViewGraph) -> dict:
                 "collapsed": edge.collapsed,
             }
             for edge in view.edges
+        ],
+        "containment": [
+            {"parent": line.parent, "child": line.child}
+            for line in view.containment
         ],
         "overflows": [
             {

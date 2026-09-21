@@ -1,11 +1,16 @@
 """What an interactive view of the graph is made of.
 
 A view is one *level-of-detail* rendering: the repository seen with some
-containers opened and the rest left shut. Opening `api` swaps that one box for
-the folders and files inside it; shutting it puts the box back. Everything
-else on screen is untouched, so a view can mix granularities — one folder
-opened to its symbols while the rest of the repository stays a handful of
-boxes.
+containers opened and the rest left shut. It reads as a folder tree growing
+downwards. The top row is the repository's top-level folders; opening one
+keeps it where it is and draws what is inside it underneath — subfolders
+first, then files — joined to it by a containment line. Opening one of those
+does the same again, so the shape on screen is the shape of the tree, and you
+can always see which folder a node came out of.
+
+Shutting a folder removes what was under it and leaves the folder. Everything
+else on screen is untouched, so a view can mix depths — one folder opened down
+to its symbols while the rest of the repository stays a handful of boxes.
 
 These are plain dataclasses on purpose: the projection that produces them is
 pure, and pure code is the part worth testing exhaustively.
@@ -87,6 +92,9 @@ class ViewNode:
     #: Used to decide which children are worth drawing first: most of a folder
     #: is usually uninteresting, and alphabetical order buries what is not.
     degree: int = 0
+    #: True when this node is open and what it holds is drawn beneath it. Set
+    #: by the projection, which is the only thing that knows.
+    expanded: bool = False
 
     @property
     def is_container(self) -> bool:
@@ -107,6 +115,35 @@ class RollupEdge:
     source_label: NodeLabel
     target_label: NodeLabel
     weight: int = 1
+
+
+#: The order children are drawn in: folders before files before definitions,
+#: then the external and route collections. Reading a folder should feel like
+#: reading a directory listing, and a listing puts its folders first.
+DRAW_ORDER: dict[NodeLabel, int] = {
+    NodeLabel.MODULE: 0,
+    NodeLabel.FILE: 1,
+    NodeLabel.SYMBOL: 2,
+    NodeLabel.PACKAGE: 3,
+    NodeLabel.ROUTE: 4,
+}
+
+
+def draw_rank(label: NodeLabel) -> int:
+    return DRAW_ORDER.get(label, len(DRAW_ORDER))
+
+
+@dataclass(frozen=True, slots=True)
+class ViewContainment:
+    """A line from an open folder to something it holds.
+
+    Kept apart from the relationship edges because it means something else
+    entirely: it is the shape of the tree, not a dependency, and it is neither
+    filtered nor weighted nor rolled up.
+    """
+
+    parent: str
+    child: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +229,9 @@ class ViewGraph:
     expanded: tuple[ViewNode, ...] = ()
     #: Markers standing for children there was no room to draw.
     overflows: tuple[ViewOverflow, ...] = ()
+    #: The tree: which visible node holds which. Only ever between two nodes
+    #: that are both on screen.
+    containment: tuple[ViewContainment, ...] = ()
     #: True when a cap cut the result short, so the UI can say so instead of
     #: quietly showing a partial picture. Paging is *not* truncation: an
     #: overflow marker is on screen and can be opened, so it is reported as

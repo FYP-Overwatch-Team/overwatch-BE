@@ -1,10 +1,14 @@
 """Turning a containment tree plus a set of open containers into one view.
 
 The rule is small enough to state in a sentence: **walk down from the
-repository, and wherever a container is open, draw its children instead of
-it.** Everything else follows — a shut container stands for its whole subtree,
-so every relationship inside that subtree is drawn against the container, and
+repository, and wherever a folder is open, draw what is inside it underneath
+it.** Everything else follows — a shut folder stands for its whole subtree, so
+every relationship inside that subtree is drawn against the folder, and
 relationships that stay entirely inside it are not drawn at all.
+
+An open folder stays on screen. That is what makes the picture a tree rather
+than a set of boxes that changes identity every time you click: you can see
+which folder each node came out of, and close it again from where it is.
 
 That rolling-up is what makes the view readable at any zoom. A hundred calls
 between two folders become one edge marked ×100; open one of the folders and
@@ -30,11 +34,13 @@ from app.knowledge_graph.view.model import (
     Granularity,
     OPENS_THROUGH,
     RollupEdge,
+    ViewContainment,
     ViewEdge,
     ViewGraph,
     ViewNode,
     ViewOverflow,
     ViewRequest,
+    draw_rank,
 )
 
 
@@ -67,8 +73,29 @@ def project(
         edges=view_edges,
         expanded=tuple(sorted(walk.opened, key=lambda node: node.id)),
         overflows=tuple(walk.overflows),
+        containment=_containment(walk),
         truncated=walk.truncated or edges_truncated,
     )
+
+
+def _containment(walk: "_Walk") -> tuple[ViewContainment, ...]:
+    """The tree, as lines between nodes that are both on screen.
+
+    A top-level folder's parent is the repository, which is the frame the view
+    is drawn in rather than a box within it, so those get no line.
+    """
+    on_screen = {node.id for node in walk.visible}
+    lines = [
+        ViewContainment(parent=node.parent_id, child=node.id)
+        for node in walk.visible
+        if node.parent_id is not None and node.parent_id in on_screen
+    ]
+    lines.extend(
+        ViewContainment(parent=marker.container_id, child=marker.id)
+        for marker in walk.overflows
+        if marker.container_id in on_screen
+    )
+    return tuple(sorted(lines, key=lambda line: (line.parent, line.child)))
 
 
 class _Walk:
@@ -120,7 +147,14 @@ def _walk(
                 and child.id in requested
                 and child.id in children_by_parent
             ):
-                walk.opened.append(replace(child, parent_id=parent))
+                # An open folder is drawn *and* descended into. It is never
+                # dropped for the node cap: without it the nodes beneath would
+                # hang off nothing, and the cap is already bounded by how many
+                # folders the fetch will open.
+                opened = replace(child, parent_id=parent, expanded=True)
+                walk.opened.append(opened)
+                walk.visible.append(opened)
+                placed.add(child.id)
                 descended.add(child.id)
                 queue.append(child.id)
                 continue
@@ -130,7 +164,9 @@ def _walk(
 
         _draw(walk, parent, drawable, names, placed, request, revealed)
 
-    walk.visible.sort(key=lambda node: node.id)
+    # Folders before files before definitions, so a level reads like a
+    # directory listing. Ties broken by id, so the layout is stable.
+    walk.visible.sort(key=lambda node: (draw_rank(node.label), node.id))
     return walk
 
 
@@ -143,12 +179,14 @@ def _draw(
     request: ViewRequest,
     revealed: set[str],
 ) -> None:
-    """Draw one container's children, gathering the surplus behind a marker.
+    """Draw one folder's children, gathering the surplus behind a marker.
 
-    Most connected first, so the page that gets drawn is the one worth
-    looking at rather than whichever names sort earliest.
+    Folders come before files, as they would in a directory listing, and
+    within each group the most connected come first — so a page that has to
+    stop short keeps what is worth looking at rather than whichever names sort
+    earliest.
     """
-    drawable.sort(key=lambda node: (-node.degree, node.id))
+    drawable.sort(key=lambda node: (draw_rank(node.label), -node.degree, node.id))
 
     limit = len(drawable) if parent in revealed else request.caps.page_size
     shown, surplus = drawable[:limit], drawable[limit:]
