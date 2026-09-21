@@ -84,9 +84,12 @@ def _subtree_totals(
     languages: dict[str, Counter[str]] = defaultdict(Counter)
 
     for path, facts in facts_by_path.items():
+        directory = owning_module(path)
+        if directory is None:
+            continue  # a top-level file: the repository holds it, not a folder
         # A file is counted against its own directory and every directory above
         # it, so a collapsed module reports the whole subtree it stands for.
-        for module in module_ancestry(owning_module(path)):
+        for module in module_ancestry(directory):
             file_counts[module] += 1
             symbol_counts[module] += len(facts.definitions)
             languages[module][facts.language] += 1
@@ -140,13 +143,19 @@ def _top_level_summary(
     """
     internal: Counter[tuple[str, str]] = Counter()
     for file_import in links.imports:
-        source, target = module_of(file_import.source_file), module_of(file_import.target_file)
-        if source != target:  # a module depending on itself says nothing
-            internal[(source, target)] += 1
+        source = module_of(file_import.source_file)
+        target = module_of(file_import.target_file)
+        # A top-level file belongs to no module, and a module depending on
+        # itself says nothing.
+        if source is None or target is None or source == target:
+            continue
+        internal[(source, target)] += 1
 
     external: Counter[str] = Counter()
     for package_use in links.packages:
-        external[module_of(package_use.source_file)] += 1
+        module = module_of(package_use.source_file)
+        if module is not None:
+            external[module] += 1
 
     edges = [
         GraphEdge(

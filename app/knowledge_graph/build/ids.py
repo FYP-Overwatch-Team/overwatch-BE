@@ -16,11 +16,9 @@ import posixpath
 EXTERNAL_MODULE = "__external__"
 #: Routes belong to no directory, so they hang under their own module.
 ROUTES_MODULE = "__routes__"
-#: Top-level files belong to this pseudo-module.
-ROOT_MODULE = "root"
 #: Modules that stand for something other than a directory. They have no
 #: parent but the repository, and never gain one by path arithmetic.
-SYNTHETIC_MODULES = frozenset({EXTERNAL_MODULE, ROUTES_MODULE, ROOT_MODULE})
+SYNTHETIC_MODULES = frozenset({EXTERNAL_MODULE, ROUTES_MODULE})
 
 _ECOSYSTEM_BY_LANGUAGE = {
     "python": "pypi",
@@ -66,20 +64,23 @@ def route_id(repo_full_name: str, method: str, normalised_path: str) -> str:
     return f"{repo_full_name}:route:{method.upper()} {normalised_path}"
 
 
-def module_of(path: str) -> str:
-    """The top-level directory a file belongs to, or `root` for a top-level file."""
+def module_of(path: str) -> str | None:
+    """The outermost directory a file belongs to, or None if it has none."""
     head, _, _ = path.partition("/")
-    return head if "/" in path else ROOT_MODULE
+    return head if "/" in path else None
 
 
-def owning_module(path: str) -> str:
-    """The module that *directly* contains a file: its immediate directory.
+def owning_module(path: str) -> str | None:
+    """The directory that *directly* contains a file: `api/routes/users.py`
+    -> `api/routes`. Contrast `module_of`, which returns the outermost one.
 
-    `api/routes/users.py` -> `api/routes`, and a top-level file -> `root`.
-    Contrast `module_of`, which always returns the outermost directory.
+    None means the repository holds the file itself. Inventing a folder for
+    those — there used to be one called `root` — puts a directory on screen
+    that is not in the repository, and the tree stops matching what a person
+    sees when they look at their own checkout.
     """
     head, separator, _ = path.rpartition("/")
-    return head if separator else ROOT_MODULE
+    return head if separator else None
 
 
 def module_ancestry(module: str) -> list[str]:

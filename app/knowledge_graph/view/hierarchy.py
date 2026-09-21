@@ -57,16 +57,20 @@ def container_chain(node_id: str, repo_full_name: str, label: NodeLabel) -> list
         path = remainder.partition("#")[0]
         return [
             file_id(repo_full_name, path),
-            *_modules_above(repo_full_name, owning_module(path)),
+            *_directories_above(repo_full_name, path),
             repository,
         ]
     if label is NodeLabel.FILE:
-        return [*_modules_above(repo_full_name, owning_module(remainder)), repository]
+        return [*_directories_above(repo_full_name, remainder), repository]
     if label is NodeLabel.MODULE:
         parent = parent_module(remainder)
         if parent is None:
             return [repository]
-        return [*_modules_above(repo_full_name, parent), repository]
+        return [
+            *(module_id(repo_full_name, name)
+              for name in reversed(module_ancestry(parent))),
+            repository,
+        ]
 
     return [repository]
 
@@ -141,9 +145,18 @@ class PlacementCache:
         return self._resolved[node_id]
 
 
-def _modules_above(repo_full_name: str, module: str) -> list[str]:
-    """Module ids from `module` up to the outermost one, nearest first."""
-    return [module_id(repo_full_name, name) for name in reversed(module_ancestry(module))]
+def _directories_above(repo_full_name: str, path: str) -> list[str]:
+    """Module ids for the directories holding a file, nearest first.
+
+    Empty for a top-level file: nothing holds it but the repository.
+    """
+    directory = owning_module(path)
+    if directory is None:
+        return []
+    return [
+        module_id(repo_full_name, name)
+        for name in reversed(module_ancestry(directory))
+    ]
 
 
 def parent_of(node_id: str, repo_full_name: str, label: NodeLabel) -> str | None:

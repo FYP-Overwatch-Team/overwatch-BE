@@ -18,7 +18,7 @@ Three rules shape this module:
 import re
 from dataclasses import dataclass, field
 
-from app.knowledge_graph.build.ids import module_id, module_of
+from app.knowledge_graph.build.ids import module_id, module_of, repository_id
 from app.knowledge_graph.build.model import EdgeType
 from app.knowledge_graph.ports import KnowledgeGraphStore
 
@@ -98,7 +98,11 @@ def owning_module_id(node_id: str, repo_full_name: str) -> str:
     path = remainder.partition("#")[0]
     if not path or path.startswith("pkg:"):
         return node_id
-    return module_id(repo_full_name, module_of(path))
+    module = module_of(path)
+    # A top-level file belongs to no module; the repository owns it.
+    if module is None:
+        return repository_id(repo_full_name)
+    return module_id(repo_full_name, module)
 
 
 def keywords(question: str) -> list[str]:

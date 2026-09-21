@@ -96,7 +96,8 @@ def test_keywords_ignore_filler_words():
 def test_owning_module_is_derived_from_a_file_or_symbol_id():
     assert owning_module_id(HANDLER, REPO) == MODULE
     assert owning_module_id(FILE, REPO) == MODULE
-    assert owning_module_id(f"{REPO}:main.py", REPO) == f"{REPO}:root"
+    # A top-level file belongs to no module; the repository owns it.
+    assert owning_module_id(f"{REPO}:main.py", REPO) == REPO
     # Packages belong to no module of ours.
     assert owning_module_id(f"{REPO}:pkg:npm/react", REPO) == f"{REPO}:pkg:npm/react"
 

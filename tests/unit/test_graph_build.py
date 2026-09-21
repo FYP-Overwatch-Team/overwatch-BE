@@ -66,19 +66,31 @@ def test_module_layer_keeps_the_ids_the_dashboard_already_uses():
     assert ids_with_label(snapshot, NodeLabel.MODULE) == {
         module_id(REPO, "api"),
         module_id(REPO, "services"),
-        module_id(REPO, "root"),  # top-level files
         module_id(REPO, EXTERNAL_MODULE),  # requests
     }
+
+
+def test_a_top_level_file_is_held_by_the_repository_not_an_invented_folder():
+    """There is no `root` directory in anybody's checkout, so there is none here."""
+    snapshot = snapshot_of()
+
+    holder = next(
+        edge.source for edge in snapshot.edges
+        if edge.type is EdgeType.CONTAINS and edge.target == f"{REPO}:main.py"
+    )
+    assert holder == REPO
 
 
 def test_module_dependencies_carry_a_weight():
     snapshot = snapshot_of()
 
     depends = {(e.source, e.target): e.properties["weight"] for e in edges_of(snapshot, EdgeType.DEPENDS_ON)}
-    assert depends[(module_id(REPO, "root"), module_id(REPO, "api"))] == 1
     assert depends[(module_id(REPO, "api"), module_id(REPO, "services"))] == 1
     # A module never depends on itself.
     assert all(source != target for source, target in depends)
+    # `main.py` imports from `api`, but it belongs to no module, so the
+    # module-level summary has nothing to say about it.
+    assert all("main.py" not in source for source, _ in depends)
 
 
 def test_external_usage_is_aggregated_onto_one_node():

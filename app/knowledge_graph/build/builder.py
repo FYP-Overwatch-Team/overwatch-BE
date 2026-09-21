@@ -158,9 +158,15 @@ def _add_files_and_symbols(
                 },
             )
         )
+        # A file with no directory above it is held by the repository itself.
+        directory = owning_module(path)
         edges.append(
             GraphEdge(
-                source=module_id(repo_full_name, owning_module(path)),
+                source=(
+                    module_id(repo_full_name, directory)
+                    if directory is not None
+                    else repository_id(repo_full_name)
+                ),
                 target=this_file,
                 type=EdgeType.CONTAINS,
                 origin_file=path,
