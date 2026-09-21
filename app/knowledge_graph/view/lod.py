@@ -10,6 +10,11 @@ An open folder stays on screen. That is what makes the picture a tree rather
 than a set of boxes that changes identity every time you click: you can see
 which folder each node came out of, and close it again from where it is.
 
+The repository itself is the root of that tree and is always drawn, alone,
+above everything else. It is structure rather than content: it is never
+filtered out, never shut, and never has a relationship drawn against it — an
+edge that has nowhere else to land is dropped rather than piled onto the root.
+
 That rolling-up is what makes the view readable at any zoom. A hundred calls
 between two folders become one edge marked ×100; open one of the folders and
 the same hundred calls redistribute across its children. Nothing is invented
@@ -40,7 +45,8 @@ from app.knowledge_graph.view.model import (
     ViewNode,
     ViewOverflow,
     ViewRequest,
-    draw_rank,
+    listing_key,
+    paging_key,
 )
 
 
@@ -64,8 +70,12 @@ def project(
     service that can fetch their contents.
     """
     walk = _walk(repo_full_name, children_by_parent, request)
+    # The root is drawn but kept out of the rollup: everything in the graph
+    # sits beneath it, so it would otherwise collect every edge whose real
+    # endpoint a filter had hidden.
+    landable = [node for node in walk.visible if node.label is not NodeLabel.REPOSITORY]
     view_edges, edges_truncated = _roll_up(
-        repo_full_name, walk.visible, walk.represented_by, edges, request,
+        repo_full_name, landable, walk.represented_by, edges, request,
     )
 
     return ViewGraph(
@@ -78,12 +88,30 @@ def project(
     )
 
 
-def _containment(walk: "_Walk") -> tuple[ViewContainment, ...]:
-    """The tree, as lines between nodes that are both on screen.
+def _root_node(
+    repo_full_name: str,
+    children_by_parent: Mapping[str, Sequence[ViewNode]],
+) -> ViewNode:
+    """The repository, as the one node every other node hangs beneath.
 
-    A top-level folder's parent is the repository, which is the frame the view
-    is drawn in rather than a box within it, so those get no line.
+    Synthesised rather than fetched: its id, name and contents are all known
+    already, and a query for something this fixed would be a query wasted.
     """
+    identifier = repository_id(repo_full_name)
+    return ViewNode(
+        id=identifier,
+        name=repo_full_name,
+        label=NodeLabel.REPOSITORY,
+        kind="repository",
+        path=None,
+        child_count=len(children_by_parent.get(identifier, ())),
+        # Always open, and never shut: it is the root, not a folder.
+        expanded=True,
+    )
+
+
+def _containment(walk: "_Walk") -> tuple[ViewContainment, ...]:
+    """The tree, as lines between nodes that are both on screen."""
     on_screen = {node.id for node in walk.visible}
     lines = [
         ViewContainment(parent=node.parent_id, child=node.id)
@@ -130,9 +158,12 @@ def _walk(
     names = _names(children_by_parent)
 
     walk = _Walk()
-    queue: deque[str] = deque([repository_id(repo_full_name)])
+    root = repository_id(repo_full_name)
+    walk.visible.append(_root_node(repo_full_name, children_by_parent))
+
+    queue: deque[str] = deque([root])
     descended: set[str] = set(queue)
-    placed: set[str] = set()
+    placed: set[str] = {root}
 
     while queue:
         parent = queue.popleft()
@@ -166,7 +197,7 @@ def _walk(
 
     # Folders before files before definitions, so a level reads like a
     # directory listing. Ties broken by id, so the layout is stable.
-    walk.visible.sort(key=lambda node: (draw_rank(node.label), node.id))
+    walk.visible.sort(key=listing_key)
     return walk
 
 
@@ -186,7 +217,7 @@ def _draw(
     stop short keeps what is worth looking at rather than whichever names sort
     earliest.
     """
-    drawable.sort(key=lambda node: (draw_rank(node.label), -node.degree, node.id))
+    drawable.sort(key=paging_key)
 
     limit = len(drawable) if parent in revealed else request.caps.page_size
     shown, surplus = drawable[:limit], drawable[limit:]

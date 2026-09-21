@@ -17,6 +17,7 @@ from app.knowledge_graph.discovery import SourceFile, detect_language
 from app.knowledge_graph.extract import extract
 from app.knowledge_graph.link import link_repository
 from app.knowledge_graph.project_config import ProjectConfig
+from app.knowledge_graph.view.model import draw_rank
 from app.knowledge_graph.view import (
     CONTAINMENT_EDGE_TYPES,
     SUMMARY_EDGE_TYPES,
@@ -204,10 +205,29 @@ def view(expanded=(), filters=None, caps=None):
     )
 
 
-def test_the_default_view_is_the_outermost_modules():
+def test_the_default_view_is_the_repository_and_its_outermost_folders():
     assert [node.id for node in view().nodes] == [
-        module_id(REPO, "api"), module_id(REPO, "web"),
+        repository_id(REPO), module_id(REPO, "api"), module_id(REPO, "web"),
     ]
+
+
+def test_the_root_is_drawn_above_everything_and_cannot_be_shut():
+    root = view().nodes[0]
+
+    assert root.label is NodeLabel.REPOSITORY
+    assert root.name == REPO
+    assert root.expanded is True
+
+
+def test_nothing_is_ever_drawn_as_a_relationship_with_the_root():
+    """Every node sits under it, so it would otherwise collect the orphans."""
+    filters = ViewFilters(node_labels=frozenset())
+    result = view(filters=filters)
+
+    assert all(
+        repository_id(REPO) not in (edge.source, edge.target)
+        for edge in result.edges
+    )
 
 
 def test_an_edge_between_two_files_is_drawn_between_the_modules_holding_them():
@@ -246,19 +266,20 @@ def test_the_tree_is_drawn_between_nodes_that_are_both_on_screen():
 
     assert (module_id(REPO, "api"), module_id(REPO, "api/routes")) in lines
     assert (module_id(REPO, "api"), module_id(REPO, "api/services")) in lines
-    # `web` hangs off the repository, which is the frame, not a box in it.
-    assert all(line.parent != REPO for line in result.containment)
+    # The outermost folders hang off the repository.
+    assert (repository_id(REPO), module_id(REPO, "api")) in lines
+    assert (repository_id(REPO), module_id(REPO, "web")) in lines
 
 
-def test_a_shut_folder_holds_nothing_on_screen():
-    assert view().containment == ()
+def test_a_shut_repository_holds_only_its_outermost_folders():
+    assert {line.parent for line in view().containment} == {repository_id(REPO)}
 
 
 def test_folders_are_drawn_before_files():
     result = view(expanded=[module_id(REPO, "api"), module_id(REPO, "api/routes")])
-    labels = [node.label for node in result.nodes]
+    ranks = [draw_rank(node.label) for node in result.nodes]
 
-    assert labels == sorted(labels, key=lambda label: 0 if label is NodeLabel.MODULE else 1)
+    assert ranks == sorted(ranks)
 
 
 def test_expanding_reveals_the_relationship_that_was_hidden_inside():
@@ -292,7 +313,7 @@ def test_an_expansion_whose_parent_is_shut_is_ignored_and_reported_as_such():
     result = view(expanded=[module_id(REPO, "api/routes")])
     assert result.expanded == ()
     assert [node.id for node in result.nodes] == [
-        module_id(REPO, "api"), module_id(REPO, "web"),
+        repository_id(REPO), module_id(REPO, "api"), module_id(REPO, "web"),
     ]
 
 
@@ -331,8 +352,11 @@ def test_filtering_out_a_node_label_removes_those_nodes():
 
 
 def test_a_cap_truncates_and_says_so():
-    result = view(caps=ViewCaps(max_nodes=1))
-    assert len(result.nodes) == 1
+    result = view(caps=ViewCaps(max_nodes=2))
+
+    # The root, plus as much as the cap allowed.
+    assert len(result.nodes) == 2
+    assert result.nodes[0].label is NodeLabel.REPOSITORY
     assert result.truncated is True
 
 

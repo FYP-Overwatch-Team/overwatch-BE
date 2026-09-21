@@ -121,6 +121,7 @@ class RollupEdge:
 #: then the external and route collections. Reading a folder should feel like
 #: reading a directory listing, and a listing puts its folders first.
 DRAW_ORDER: dict[NodeLabel, int] = {
+    NodeLabel.REPOSITORY: -1,
     NodeLabel.MODULE: 0,
     NodeLabel.FILE: 1,
     NodeLabel.SYMBOL: 2,
@@ -131,6 +132,33 @@ DRAW_ORDER: dict[NodeLabel, int] = {
 
 def draw_rank(label: NodeLabel) -> int:
     return DRAW_ORDER.get(label, len(DRAW_ORDER))
+
+
+#: Module kinds that stand for something other than a directory. They are
+#: drawn after the real folders, at the end of the listing, because that is
+#: where "everything else" belongs.
+SYNTHETIC_KINDS = frozenset({"external", "routes"})
+
+
+def _group(node: "ViewNode") -> tuple[int, int]:
+    """The listing group a node belongs to: folders, then files, then the rest,
+    with the two synthetic folders after the real ones."""
+    return (draw_rank(node.label), 1 if node.kind in SYNTHETIC_KINDS else 0)
+
+
+def listing_key(node: "ViewNode") -> tuple[int, int, str]:
+    """Where a node sits in a listing. This is the order it is drawn in."""
+    return (*_group(node), node.id)
+
+
+def paging_key(node: "ViewNode") -> tuple[int, int, int, str]:
+    """Which children survive a page that has to stop short.
+
+    Same grouping, but within a group the most connected come first: if a
+    folder holds more than fits, the ones worth looking at should be the ones
+    that stay.
+    """
+    return (*_group(node), -node.degree, node.id)
 
 
 @dataclass(frozen=True, slots=True)

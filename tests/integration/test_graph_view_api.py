@@ -126,16 +126,36 @@ def ids(body) -> list[str]:
     return [node["id"] for node in body["nodes"]]
 
 
-async def test_the_default_view_is_the_outermost_folders(client, ready):
+def folders_nodes(body) -> list[dict]:
+    """Everything but the repository root, which is always drawn."""
+    return [node for node in body["nodes"] if node["label"] != "Repository"]
+
+
+def folders(body) -> list[str]:
+    return [node["id"] for node in folders_nodes(body)]
+
+
+async def test_the_default_view_is_the_repository_and_its_outermost_folders(client, ready):
     body = await view(client, ready)
 
-    assert ids(body) == [
+    assert ids(body)[0] == REPO
+    assert folders(body) == [
         module_id(REPO, "api"), module_id(REPO, "web"), module_id(REPO, "widgets"),
     ]
     assert body["expanded"] == []
     assert body["truncated"] is False
-    # The repository is the frame the view is drawn in, never a box inside it.
-    assert REPO not in ids(body)
+
+
+async def test_the_root_sits_above_the_outermost_folders(client, ready):
+    body = await view(client, ready)
+
+    root = body["nodes"][0]
+    assert root["label"] == "Repository"
+    assert root["name"] == REPO
+    assert root["expanded"] is True
+    assert {line["child"] for line in body["containment"] if line["parent"] == REPO} == {
+        module_id(REPO, "api"), module_id(REPO, "web"), module_id(REPO, "widgets"),
+    }
 
 
 async def test_a_collapsed_folder_carries_the_edges_of_everything_inside_it(client, ready):
@@ -155,9 +175,12 @@ async def test_opening_a_folder_draws_what_is_inside_it_beneath_it(client, ready
     assert module_id(REPO, "api") in ids(body)
     assert module_id(REPO, "api/routes") in ids(body)
     assert module_id(REPO, "web") in ids(body)
-    assert {(line["parent"], line["child"]) for line in body["containment"]} == {
-        (module_id(REPO, "api"), module_id(REPO, "api/routes")),
-        (module_id(REPO, "api"), module_id(REPO, "api/services")),
+    held_by_api = {
+        line["child"] for line in body["containment"]
+        if line["parent"] == module_id(REPO, "api")
+    }
+    assert held_by_api == {
+        module_id(REPO, "api/routes"), module_id(REPO, "api/services"),
     }
     # Open containers come back described, not just named: they are no longer
     # on screen, so the client cannot look their names up.
@@ -217,7 +240,7 @@ async def test_filtering_relationship_types_leaves_the_nodes_alone(client, ready
     body = await view(client, ready, edge_types=["CALLS"])
 
     assert body["edges"] == []
-    assert ids(body) == [
+    assert folders(body) == [
         module_id(REPO, "api"), module_id(REPO, "web"), module_id(REPO, "widgets"),
     ]
 
@@ -227,20 +250,21 @@ async def test_filtering_node_labels_keeps_only_those_nodes(client, ready):
     inside them, and hiding them would leave it hanging off nothing."""
     body = await view(client, ready, expand_to="file", node_labels=["Module"])
 
-    assert all(node["label"] == "Module" for node in body["nodes"])
+    assert all(node["label"] == "Module" for node in body["nodes"] if node["id"] != REPO)
     assert module_id(REPO, "api") in ids(body)
 
 
-async def test_a_shut_repository_has_no_tree_to_draw(client, ready):
+async def test_a_shut_repository_holds_only_its_outermost_folders(client, ready):
     body = await view(client, ready)
 
-    assert body["containment"] == []
+    assert {line["parent"] for line in body["containment"]} == {REPO}
 
 
 async def test_every_node_says_whether_it_can_be_opened_and_whether_it_is(client, ready):
     shut = await view(client, ready)
-    assert all(node["expandable"] for node in shut["nodes"])
-    assert not any(node["expanded"] for node in shut["nodes"])
+    assert all(node["expandable"] for node in shut["nodes"] if node["id"] != REPO)
+    # The root is always open; nothing else is.
+    assert [node["id"] for node in shut["nodes"] if node["expanded"]] == [REPO]
 
     opened = await view(client, ready, expand=[module_id(REPO, "api")])
     by_id = {node["id"]: node for node in opened["nodes"]}
@@ -282,7 +306,7 @@ async def test_an_id_from_another_repository_opens_nothing(client, ready):
     body = await view(client, ready, expand=[module_id(OTHER_REPO, "api")])
 
     assert body["expanded"] == []
-    assert ids(body) == [
+    assert folders(body) == [
         module_id(REPO, "api"), module_id(REPO, "web"), module_id(REPO, "widgets"),
     ]
 
@@ -354,7 +378,7 @@ async def test_confining_to_another_repository_opens_nothing(client, ready):
     )
 
     assert body["expanded"] == []
-    assert all(node["label"] == "Module" for node in body["nodes"])
+    assert all(node["label"] == "Module" for node in folders_nodes(body))
 
 
 async def test_a_wide_folder_is_paged_rather_than_dumped(client, ready):
