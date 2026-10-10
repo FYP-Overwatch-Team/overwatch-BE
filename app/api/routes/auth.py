@@ -3,7 +3,7 @@ import secrets
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import RedirectResponse
 
-from app.api.cookies import cookie_samesite, cookie_secure
+from app.core.cookies import cookie_samesite, cookie_secure
 from app.core.config import get_settings
 from app.core.exceptions import UnauthorizedError
 from app.integrations.github_client import get_github_client

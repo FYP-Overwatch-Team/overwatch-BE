@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 import structlog
 
 from app.core.exceptions import ExternalServiceError
@@ -12,9 +10,6 @@ logger = structlog.get_logger("app.tickets")
 PAGE_SIZE = 100
 TICKET_FIELDS = "summary,status,assignee,priority,updated"
 
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 async def fetch_all_tickets(user_id: str, project_key: str) -> list[dict]:

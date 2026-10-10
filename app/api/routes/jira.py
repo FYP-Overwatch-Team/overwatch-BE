@@ -4,7 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from app.api.cookies import cookie_samesite, cookie_secure
+from app.core.cookies import cookie_samesite, cookie_secure
 from app.api.deps import get_current_user_id
 from app.core.config import get_settings
 from app.core.exceptions import UnauthorizedError

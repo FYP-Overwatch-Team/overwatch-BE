@@ -18,11 +18,12 @@ module owns only *when* it runs and what happens if it fails.
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import structlog
 
 from app.core.config import get_settings
+from app.core.time import utcnow
 from app.db import mongo
 from app.integrations import git_cli
 from app.knowledge_graph.build import GRAPH_BUILD_VERSION
@@ -54,9 +55,6 @@ class PendingSync:
         return not self.full and not self.changed and not self.removed
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
 
 # --------------------------------------------------------------------------
 # Repository lock
@@ -65,7 +63,7 @@ def _now() -> datetime:
 
 async def _claim(user_id: str, repo_full_name: str) -> bool:
     """Take the indexing lock, reclaiming one abandoned by a crashed run."""
-    now = _now()
+    now = utcnow()
     stale_before = now - timedelta(minutes=get_settings().parse_lock_stale_minutes)
     claimed = await mongo.repos().find_one_and_update(
         {
@@ -91,14 +89,14 @@ async def _release(user_id: str, repo_full_name: str, status: str, error: str | 
             "parse_status": status,
             "parse_error": error,
             "parse_started_at": None,
-            "updated_at": _now(),
+            "updated_at": utcnow(),
         }},
     )
 
 
 async def _record_pending(user_id: str, repo_full_name: str, pending: PendingSync) -> None:
     """Remember work that could not run because the lock was held."""
-    update: dict = {"$set": {"sync_requested_at": _now()}}
+    update: dict = {"$set": {"sync_requested_at": utcnow()}}
     if pending.full:
         update["$set"]["pending_full"] = True
     else:
@@ -242,8 +240,8 @@ async def _index(user_id: str, repo_full_name: str, *, full: bool) -> None:
             "graph_version": result.version,
             "graph_build_version": result.build_version,
             "graph_stats": result.as_stats_document(),
-            "indexed_at": _now(),
-            "updated_at": _now(),
+            "indexed_at": utcnow(),
+            "updated_at": utcnow(),
         }},
     )
 
@@ -308,7 +306,7 @@ async def run_ticket_sync(user_id: str, project_key: str) -> None:
             "status": {"$ne": "disconnected"},
             "sync_status": {"$ne": "in_progress"},
         },
-        {"$set": {"sync_status": "in_progress", "updated_at": _now()}},
+        {"$set": {"sync_status": "in_progress", "updated_at": utcnow()}},
     )
     if claimed is None:
         logger.info("ticket_sync_skipped_already_running", project=project_key)
@@ -321,8 +319,8 @@ async def run_ticket_sync(user_id: str, project_key: str) -> None:
             {"$set": {
                 "sync_status": "done",
                 "sync_error": None,
-                "last_synced_at": _now(),
-                "updated_at": _now(),
+                "last_synced_at": utcnow(),
+                "updated_at": utcnow(),
             }},
         )
         logger.info("ticket_sync_done", project=project_key, tickets=count)
@@ -333,7 +331,7 @@ async def run_ticket_sync(user_id: str, project_key: str) -> None:
             {"$set": {
                 "sync_status": "failed",
                 "sync_error": str(exc),
-                "updated_at": _now(),
+                "updated_at": utcnow(),
             }},
         )
 

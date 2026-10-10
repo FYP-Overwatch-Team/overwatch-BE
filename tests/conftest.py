@@ -31,7 +31,7 @@ def test_env(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def mock_mongo():
-    client = AsyncMongoMockClient()
+    client = AsyncMongoMockClient(tz_aware=True)
     mongo.use_db(client["overwatch_test"])
     yield
     mongo.use_db(None)

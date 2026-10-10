@@ -9,7 +9,8 @@ _db: AsyncIOMotorDatabase | None = None
 def connect() -> AsyncIOMotorDatabase:
     global _client, _db
     settings = get_settings()
-    _client = AsyncIOMotorClient(settings.mongo_uri)
+    # tz_aware: datetimes come back UTC-aware, so comparisons with utcnow() just work
+    _client = AsyncIOMotorClient(settings.mongo_uri, tz_aware=True)
     _db = _client[settings.mongo_db_name]
     return _db
 

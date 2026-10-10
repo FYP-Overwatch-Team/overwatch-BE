@@ -117,7 +117,3 @@ def get_jira_client() -> JiraClient:
         _client = JiraClient()
     return _client
 
-
-def use_jira_client(client: JiraClient) -> None:
-    global _client
-    _client = client

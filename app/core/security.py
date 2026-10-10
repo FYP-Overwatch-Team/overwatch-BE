@@ -1,11 +1,12 @@
 import hashlib
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import jwt
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.core.config import get_settings
+from app.core.time import utcnow
 
 ACCESS_TOKEN_TTL = timedelta(minutes=15)
 JWT_ALGORITHM = "HS256"
@@ -16,7 +17,7 @@ class TokenError(Exception):
 
 
 def issue_access_token(user_id: str, *, ttl: timedelta = ACCESS_TOKEN_TTL) -> str:
-    now = datetime.now(timezone.utc)
+    now = utcnow()
     payload = {"sub": user_id, "iat": now, "exp": now + ttl, "type": "access"}
     return jwt.encode(payload, get_settings().jwt_secret_key, algorithm=JWT_ALGORITHM)
 
