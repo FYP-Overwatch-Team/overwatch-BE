@@ -171,3 +171,19 @@ async def test_malformed_project_keys_are_rejected(client):
     headers = {"Authorization": f"Bearer {await login(client)}"}
     resp = await client.post("/jira/projects/connect", json={"project_key": "OVR OR 1=1"}, headers=headers)
     assert resp.status_code == 422
+
+
+async def test_list_projects_reads_every_page(client):
+    headers = {"Authorization": f"Bearer {await login(client)}"}
+    await connect_jira(client, headers)
+
+    with respx.mock as router:
+        router.get(PROJECT_SEARCH, params={"startAt": "0"}).mock(return_value=Response(200, json={
+            "values": [{"key": "OVR", "name": "Overwatch", "id": "1"}], "isLast": False,
+        }))
+        router.get(PROJECT_SEARCH, params={"startAt": "1"}).mock(return_value=Response(200, json={
+            "values": [{"key": "OPS", "name": "Ops", "id": "2"}], "isLast": True,
+        }))
+        resp = await client.get("/jira/projects", headers=headers)
+
+    assert [p["key"] for p in resp.json()["data"]] == ["OVR", "OPS"]
