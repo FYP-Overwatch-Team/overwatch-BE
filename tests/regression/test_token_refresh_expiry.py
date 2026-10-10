@@ -12,7 +12,7 @@ pytestmark = pytest.mark.regression
 
 
 async def test_expired_refresh_token_rejected_with_stable_error_code():
-    _, raw = await service.create_session("user-1")
+    raw = await service.create_session("user-1")
     await mongo.refresh_tokens().update_one(
         {"token_hash": security.hash_refresh_token(raw)},
         {"$set": {"expires_at": datetime.now(timezone.utc) - timedelta(seconds=60)}},
@@ -23,7 +23,7 @@ async def test_expired_refresh_token_rejected_with_stable_error_code():
 
 
 async def test_token_still_valid_just_before_expiry():
-    _, raw = await service.create_session("user-1")
+    raw = await service.create_session("user-1")
     await mongo.refresh_tokens().update_one(
         {"token_hash": security.hash_refresh_token(raw)},
         {"$set": {"expires_at": datetime.now(timezone.utc) + timedelta(minutes=1)}},
@@ -33,7 +33,7 @@ async def test_token_still_valid_just_before_expiry():
 
 
 async def test_family_revocation_marks_every_generation():
-    _, raw1 = await service.create_session("user-1")
+    raw1 = await service.create_session("user-1")
     _, raw2 = await service.rotate(raw1)
     _, raw3 = await service.rotate(raw2)
 

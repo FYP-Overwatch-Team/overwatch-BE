@@ -63,7 +63,7 @@ async def github_callback(
         return _to_frontend("/sign-in?error=github_unavailable")
 
     # no token in the URL: the frontend calls /auth/refresh with the cookie set here
-    _, raw_refresh = await service.sign_in_with_github(profile, tokens)
+    raw_refresh = await service.sign_in_with_github(profile, tokens)
     response = _to_frontend("/auth/complete")
     _set_cookie(response, REFRESH_COOKIE, raw_refresh, max_age=REFRESH_MAX_AGE)
     return response

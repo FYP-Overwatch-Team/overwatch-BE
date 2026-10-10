@@ -36,7 +36,7 @@ async def real_mongo():
 
 
 async def test_concurrent_rotation_of_one_token_succeeds_once(real_mongo):
-    _, raw = await service.create_session("user-1")
+    raw = await service.create_session("user-1")
     results = await asyncio.gather(*(service.rotate(raw) for _ in range(5)), return_exceptions=True)
 
     succeeded = [r for r in results if not isinstance(r, Exception)]

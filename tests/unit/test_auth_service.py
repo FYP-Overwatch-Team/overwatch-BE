@@ -33,8 +33,7 @@ async def test_github_token_stored_encrypted():
 
 
 async def test_session_and_rotation():
-    access, raw1 = await service.create_session("user-1")
-    assert security.verify_access_token(access) == "user-1"
+    raw1 = await service.create_session("user-1")
 
     access2, raw2 = await service.rotate(raw1)
     assert security.verify_access_token(access2) == "user-1"
@@ -48,14 +47,14 @@ async def test_session_and_rotation():
 async def test_a_token_can_be_claimed_only_once():
     # the single conditional write is what makes rotation atomic; the race
     # itself is exercised against real Mongo in test_auth_sessions_mongo.py
-    _, raw = await service.create_session("user-1")
+    raw = await service.create_session("user-1")
     token_hash = security.hash_refresh_token(raw)
     assert await repository.claim_refresh_token(token_hash, "next-1") is not None
     assert await repository.claim_refresh_token(token_hash, "next-2") is None
 
 
 async def test_reuse_of_rotated_token_revokes_family():
-    _, raw1 = await service.create_session("user-1")
+    raw1 = await service.create_session("user-1")
     _, raw2 = await service.rotate(raw1)
 
     with pytest.raises(UnauthorizedError) as exc:
@@ -74,16 +73,16 @@ async def test_unknown_refresh_token_rejected():
 
 
 async def test_logout_revokes_family():
-    _, raw = await service.create_session("user-1")
+    raw = await service.create_session("user-1")
     await service.logout(raw)
     with pytest.raises(UnauthorizedError):
         await service.rotate(raw)
 
 
 async def test_logout_everywhere_revokes_every_family():
-    _, laptop = await service.create_session("user-1")
-    _, phone = await service.create_session("user-1")
-    _, other_user = await service.create_session("user-2")
+    laptop = await service.create_session("user-1")
+    phone = await service.create_session("user-1")
+    other_user = await service.create_session("user-2")
 
     await service.logout_everywhere("user-1")
 

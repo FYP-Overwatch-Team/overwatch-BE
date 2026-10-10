@@ -22,14 +22,15 @@ logger = structlog.get_logger("app.auth")
 REFRESH_TOKEN_TTL = timedelta(days=30)
 
 
-async def sign_in_with_github(profile: dict, github_tokens: dict) -> tuple[str, str]:
-    """Upsert the user, keep their GitHub user token, start a session. Returns (access_jwt, raw_refresh)."""
+async def sign_in_with_github(profile: dict, github_tokens: dict) -> str:
+    """Upsert the user, keep their GitHub user token, start a session. Returns the raw refresh token."""
     user = await repository.upsert_github_user(profile)
     await oauth_tokens.save(user["_id"], "github", github_tokens)
     return await create_session(user["_id"])
 
 
-async def create_session(user_id: str, family_id: str | None = None) -> tuple[str, str]:
+async def create_session(user_id: str, family_id: str | None = None) -> str:
+    """Start a session family; the access token comes from the first /auth/refresh. Returns the raw refresh token."""
     raw_refresh = security.generate_refresh_token()
     await repository.insert_refresh_token(
         security.hash_refresh_token(raw_refresh),
@@ -37,7 +38,7 @@ async def create_session(user_id: str, family_id: str | None = None) -> tuple[st
         family_id or uuid.uuid4().hex,
         utcnow() + REFRESH_TOKEN_TTL,
     )
-    return security.issue_access_token(user_id), raw_refresh
+    return raw_refresh
 
 
 async def rotate(raw_refresh: str) -> tuple[str, str]:
