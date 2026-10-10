@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 
 import jwt
@@ -69,6 +70,45 @@ async def test_repos_are_listed_across_installations_and_pages(client, headers, 
     assert len(repos) == 102
     assert repos[0]["full_name"] == "acme/api" and repos[0]["installation_id"] == 10
     assert [r["full_name"] for r in repos if r["connected"]] == [REPO]
+
+
+async def test_installations_are_listed_side_by_side(client, headers):
+    # installation 9 only answers once installation 10 has been asked, which a one-by-one listing never does
+    asked_10 = asyncio.Event()
+
+    async def installation_9(request):
+        await asyncio.wait_for(asked_10.wait(), timeout=1)
+        return Response(200, json={"total_count": 1, "repositories": [repo_payload("octocat/zeta", 1)]})
+
+    def installation_10(request):
+        asked_10.set()
+        return Response(200, json={"total_count": 1, "repositories": [repo_payload("acme/api", 2)]})
+
+    with respx.mock as router:
+        router.get(f"{API}/user/installations").mock(return_value=Response(200, json={
+            "total_count": 2, "installations": [INSTALLATION, {**INSTALLATION, "id": 10}],
+        }))
+        router.get(f"{API}/user/installations/9/repositories").mock(side_effect=installation_9)
+        router.get(f"{API}/user/installations/10/repositories").mock(side_effect=installation_10)
+        resp = await client.get("/github/repos", headers=headers)
+
+    assert resp.status_code == 200
+    assert [(r["full_name"], r["installation_id"]) for r in resp.json()["data"]] == [("acme/api", 10), ("octocat/zeta", 9)]
+
+
+async def test_one_failing_installation_fails_the_list(client, headers):
+    with respx.mock as router:
+        router.get(f"{API}/user/installations").mock(return_value=Response(200, json={
+            "total_count": 2, "installations": [INSTALLATION, {**INSTALLATION, "id": 10}],
+        }))
+        router.get(f"{API}/user/installations/9/repositories").mock(
+            return_value=Response(200, json={"total_count": 1, "repositories": [repo_payload()]}),
+        )
+        router.get(f"{API}/user/installations/10/repositories").mock(return_value=Response(500, json={"message": "boom"}))
+        resp = await client.get("/github/repos", headers=headers)
+
+    # a partial list would read as "these are all your repos"
+    assert resp.status_code >= 500
 
 
 async def test_connect_records_the_installation_and_queues_a_full_index(client, headers, record_jobs, github_app_key):

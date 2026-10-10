@@ -5,6 +5,7 @@ can access *and* the App is installed on); the installation token is what the
 background jobs clone and fetch with.
 """
 
+import asyncio
 from datetime import timedelta
 
 import structlog
@@ -47,17 +48,21 @@ async def list_repos(user_id: str) -> list[dict]:
     token = await user_token(user_id)
     connected = {repo["repo_full_name"] for repo in await repository.list_for_user(user_id)}
 
-    repos = []
-    for inst in await github.list_user_installations(token):
-        for repo in await github.list_installation_repos(token, inst["id"]):
-            repos.append({
-                "id": repo["id"],
-                "full_name": repo["full_name"],
-                "private": repo.get("private", False),
-                "default_branch": repo.get("default_branch"),
-                "installation_id": inst["id"],
-                "connected": repo["full_name"] in connected,
-            })
+    installations = await github.list_user_installations(token)
+    # one request chain per installation, run side by side; any failure fails the whole list
+    pages = await asyncio.gather(*(github.list_installation_repos(token, inst["id"]) for inst in installations))
+    repos = [
+        {
+            "id": repo["id"],
+            "full_name": repo["full_name"],
+            "private": repo.get("private", False),
+            "default_branch": repo.get("default_branch"),
+            "installation_id": inst["id"],
+            "connected": repo["full_name"] in connected,
+        }
+        for inst, inst_repos in zip(installations, pages)
+        for repo in inst_repos
+    ]
     return sorted(repos, key=lambda repo: repo["full_name"].lower())
 
 
