@@ -42,7 +42,7 @@ async def test_full_setup_reports_repos_and_project(client):
     body = (await client.get("/onboarding/status", headers=headers)).json()["data"]
 
     assert body["github"]["repos"] == [{
-        "repo_full_name": "octocat/hello-world", "parse_status": "in_progress",
+        "repo_full_name": "octocat/hello-world", "graph_stats": None, "parse_status": "in_progress",
         "parse_error": None, "access_status": "active",
     }]
     assert body["jira"] == {

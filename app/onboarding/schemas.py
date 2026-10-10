@@ -1,8 +1,11 @@
+from typing import Any
+
 from pydantic import BaseModel
 
 
 class OnboardingRepo(BaseModel):
     repo_full_name: str
+    graph_stats: dict[str, Any] | None = None
     parse_status: str
     parse_error: str | None = None
     access_status: str = "active"
