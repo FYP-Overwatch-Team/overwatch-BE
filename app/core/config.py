@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     neo4j_password: str = ""
 
     # GitHub App (sign-in via user authorization, repo access via installations)
-    github_app_id: str = ""
     github_app_client_id: str = ""
     github_app_client_secret: str = ""
     github_app_slug: str = ""

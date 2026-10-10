@@ -34,7 +34,7 @@ Sign-in and repo access both go through one GitHub App. Create a personal one fo
 | Subscribe to events | Push |
 
 Then generate a client secret and a private key. Save the key as `github-app.pem` in this folder
-(gitignored) and set `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` and
+(gitignored) and set `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` and
 `GITHUB_APP_SLUG` (the app's URL name). Installation, repository-selection and authorization
 events are delivered to every App automatically.
 
@@ -107,7 +107,7 @@ Use `git push --no-verify` only for exceptional, intentional bypasses.
    these secrets via the platform's secret manager (never commit them):
    - `JWT_SECRET_KEY`, `FERNET_KEY` (generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
    - `MONGO_URI`, `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`
-   - `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_SLUG`,
+   - `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_SLUG`,
      `GITHUB_WEBHOOK_SECRET`, and `GITHUB_APP_PRIVATE_KEY_PATH` pointing at the mounted `.pem`
    - `JIRA_CLIENT_ID`, `JIRA_CLIENT_SECRET`
    - `GEMINI_API_KEY`
