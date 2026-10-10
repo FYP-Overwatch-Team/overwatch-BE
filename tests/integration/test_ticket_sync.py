@@ -6,7 +6,7 @@ import respx
 from httpx import Response
 
 from app.db import mongo
-from app.services import jira_service
+from app.db import oauth_tokens
 from app.workers import jobs
 from tests.integration.test_auth_flow import login
 
@@ -24,8 +24,8 @@ ISSUES = json.loads((FIXTURES / "sample_jira_tickets.json").read_text(encoding="
 
 @pytest.fixture
 async def jira_connected():
-    await jira_service.store_tokens(
-        USER, {"access_token": "jira-access", "refresh_token": "r", "expires_in": 3600},
+    await oauth_tokens.save(
+        USER, "jira", {"access_token": "jira-access", "refresh_token": "r", "expires_in": 3600},
         cloud_id="cloud-1",
     )
     await mongo.jira_projects().insert_one({
@@ -128,22 +128,19 @@ async def test_ticket_list_filters_sort_and_pagination(client):
     await seed_tickets_for(user["_id"])
 
     resp = await client.get("/tickets", headers=headers)
-    body = resp.json()
-    assert body["total"] == 3
-    assert [t["ticket_key"] for t in body["tickets"]] == ["OVR-3", "OVR-2", "OVR-1"]  # updated desc
+    assert resp.json()["meta"] == {"total": 3, "page": 1, "page_size": 25}
+    assert [t["ticket_key"] for t in resp.json()["data"]] == ["OVR-3", "OVR-2", "OVR-1"]  # updated desc
 
     resp = await client.get("/tickets?status=In Progress", headers=headers)
-    body = resp.json()
-    assert body["total"] == 1
-    assert body["tickets"][0]["ticket_key"] == "OVR-2"
+    assert resp.json()["meta"]["total"] == 1
+    assert resp.json()["data"][0]["ticket_key"] == "OVR-2"
 
     resp = await client.get("/tickets?assignee=Alex Doe", headers=headers)
-    assert resp.json()["tickets"][0]["ticket_key"] == "OVR-1"
+    assert resp.json()["data"][0]["ticket_key"] == "OVR-1"
 
     resp = await client.get("/tickets?page=2&page_size=2", headers=headers)
-    body = resp.json()
-    assert len(body["tickets"]) == 1
-    assert body["tickets"][0]["ticket_key"] == "OVR-1"
+    assert len(resp.json()["data"]) == 1
+    assert resp.json()["data"][0]["ticket_key"] == "OVR-1"
 
 
 async def test_tickets_scoped_to_user(client):
@@ -152,7 +149,7 @@ async def test_tickets_scoped_to_user(client):
     await seed_tickets_for("someone-else")
 
     resp = await client.get("/tickets", headers=headers)
-    assert resp.json()["total"] == 0
+    assert resp.json()["meta"]["total"] == 0
 
 
 async def test_resync_all_projects_covers_every_connection(jira_connected):
@@ -161,8 +158,8 @@ async def test_resync_all_projects_covers_every_connection(jira_connected):
         "sync_status": "pending", "sync_error": None, "last_synced_at": None,
         "connected_at": 1, "updated_at": 1,
     })
-    await jira_service.store_tokens(
-        "user-2", {"access_token": "a2", "refresh_token": "r2", "expires_in": 3600},
+    await oauth_tokens.save(
+        "user-2", "jira", {"access_token": "a2", "refresh_token": "r2", "expires_in": 3600},
         cloud_id="cloud-1",
     )
     with respx.mock as router:

@@ -3,7 +3,7 @@ import structlog
 from app.core.exceptions import ExternalServiceError
 from app.db import mongo
 from app.integrations.jira_client import get_jira_client
-from app.services import jira_service
+from app.jira import service as jira_service
 
 logger = structlog.get_logger("app.tickets")
 
@@ -13,7 +13,7 @@ TICKET_FIELDS = "summary,status,assignee,priority,updated"
 
 
 async def fetch_all_tickets(user_id: str, project_key: str) -> list[dict]:
-    access_token, cloud_id = await jira_service.get_access_token(user_id)
+    access_token, cloud_id = await jira_service.access_token(user_id)
     client = get_jira_client()
     issues: list[dict] = []
     next_page_token: str | None = None
