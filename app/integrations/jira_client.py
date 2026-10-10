@@ -5,6 +5,7 @@ import structlog
 
 from app.core.config import get_settings
 from app.core.exceptions import ExternalServiceError, UnauthorizedError
+from app.integrations.http_log import log_call
 
 logger = structlog.get_logger("app.jira")
 
@@ -59,7 +60,7 @@ class JiraClient:
 
     async def _token_request(self, payload: dict) -> dict:
         resp = await self._http.post(ATLASSIAN_TOKEN_URL, json=payload)
-        self._log_call("POST", "/oauth/token", resp)
+        log_call(logger, "jira_api_call", "POST", "/oauth/token", resp)
         if resp.status_code != 200:
             if payload["grant_type"] == "refresh_token":
                 raise JiraAuthExpired("Jira refresh token rejected; re-authorization required")
@@ -74,7 +75,7 @@ class JiraClient:
             ACCESSIBLE_RESOURCES_URL,
             headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
         )
-        self._log_call("GET", "/oauth/token/accessible-resources", resp)
+        log_call(logger, "jira_api_call", "GET", "/oauth/token/accessible-resources", resp)
         if resp.status_code != 200:
             raise ExternalServiceError("failed to fetch accessible Atlassian resources")
         return resp.json()
@@ -85,27 +86,12 @@ class JiraClient:
             params=params or None,
             headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
         )
-        self._log_call("GET", path, resp)
+        log_call(logger, "jira_api_call", "GET", path, resp)
         if resp.status_code == 401:
             raise JiraAuthExpired("Jira token is no longer valid")
         if resp.status_code == 429:
             raise ExternalServiceError("Jira rate limit hit", error_code="jira_rate_limited")
         return resp
-
-    @staticmethod
-    def _log_call(method: str, path: str, resp: httpx.Response) -> None:
-        try:
-            latency_ms = round(resp.elapsed.total_seconds() * 1000, 1)
-        except RuntimeError:
-            latency_ms = None
-        logger.info(
-            "jira_api_call",
-            method=method,
-            path=path,
-            status=resp.status_code,
-            ratelimit_remaining=resp.headers.get("x-ratelimit-remaining"),
-            latency_ms=latency_ms,
-        )
 
 
 _client: JiraClient | None = None
