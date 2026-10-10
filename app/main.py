@@ -5,14 +5,19 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import github, graph, jira, onboarding, query, tickets, webhooks
+from app.api.routes import graph, query, tickets
 from app.auth.router import router as auth_router
+from app.github import checkout
+from app.github.router import router as github_router
+from app.github.webhooks import router as webhooks_router
+from app.jira.router import router as jira_router
+from app.onboarding.router import router as onboarding_router
 from app.workers import jobs
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
+from app.core.responses import EnvelopeRoute
 from app.core.logging import RequestContextMiddleware, configure_logging
 from app.db import mongo
-from app.services import repo_service
 from app.services.knowledge_graph_store import get_knowledge_graph_store
 
 
@@ -38,7 +43,7 @@ async def lifespan(app: FastAPI):
     try:
         # Earlier versions cloned with the token inside the remote URL, which
         # git persists in .git/config. Remove any that are still on disk.
-        cleaned = await repo_service.sanitize_existing_checkouts()
+        cleaned = await checkout.sanitize_existing_checkouts()
         if cleaned:
             structlog.get_logger("app.repos").warning(
                 "checkout_credentials_scrubbed", checkouts=cleaned,
@@ -86,17 +91,19 @@ def create_app(manage_db: bool = True) -> FastAPI:
     register_exception_handlers(app)
 
     app.include_router(auth_router)
-    app.include_router(github.router)
-    app.include_router(jira.router)
-    app.include_router(onboarding.router)
+    app.include_router(github_router)
+    app.include_router(jira_router)
+    app.include_router(onboarding_router)
     app.include_router(graph.router)
-    app.include_router(webhooks.router)
+    app.include_router(webhooks_router)
     app.include_router(tickets.router)
     app.include_router(query.router)
 
+    app.router.route_class = EnvelopeRoute  # app-level routes return the envelope too
+
     @app.get("/health")
     async def health() -> dict:
-        return {"status": "ok", "env": settings.app_env}
+        return {"env": settings.app_env}
 
     return app
 
