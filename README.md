@@ -27,7 +27,7 @@ Sign-in and repo access both go through one GitHub App. Create a personal one fo
 | Callback URL | `http://localhost:8000/auth/github/callback` |
 | Expire user authorization tokens | on |
 | Request user authorization (OAuth) during installation | off |
-| Setup URL | `http://localhost:3000/onboarding/github` (Redirect on update: on) |
+| Setup URL | `http://localhost:3000/github/setup` (Redirect on update: on); it sends users on to onboarding or Settings → Repositories |
 | Webhook URL | your smee.io channel (below) |
 | Webhook secret | `openssl rand -hex 32` → `GITHUB_WEBHOOK_SECRET` |
 | Repository permissions | Contents: read-only, Metadata: read-only |
@@ -100,7 +100,7 @@ Use `git push --no-verify` only for exceptional, intentional bypasses.
 1. Provision Atlas (get `MONGO_URI`) and AuraDB (get `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`).
 2. Create the production GitHub App (settings as above, with the deployed URLs:
    callback `https://<your-api-domain>/auth/github/callback`, webhook
-   `https://<your-api-domain>/webhooks/github`, setup URL `https://<your-frontend>/onboarding/github`)
+   `https://<your-api-domain>/webhooks/github`, setup URL `https://<your-frontend>/github/setup`)
    and an Atlassian app with callback `https://<your-api-domain>/jira/callback`.
 3. Get a Gemini API key.
 4. On Railway/Render, set the build to use the repo's `Dockerfile` and configure
