@@ -304,6 +304,15 @@ async def test_a_repository_the_user_has_not_connected_is_not_viewable(client, r
     assert response.status_code == 404
 
 
+async def test_a_repository_whose_access_was_revoked_is_not_viewable(client, ready):
+    await mongo.repos().update_one({"repo_full_name": REPO}, {"$set": {"access_status": "revoked"}})
+
+    response = await client.post(f"/graph/view?repo_full_name={REPO}", json={}, headers=ready)
+
+    assert response.status_code == 403
+    assert response.json()["meta"]["error_code"] == "repo_access_revoked"
+
+
 async def test_an_id_from_another_repository_opens_nothing(client, ready):
     body = await view(client, ready, expand=[module_id(OTHER_REPO, "api")])
 

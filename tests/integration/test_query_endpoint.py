@@ -67,6 +67,19 @@ async def test_query_requires_connected_repo(client, graph_store, fake_gemini):
     assert resp.json()["meta"]["error_code"] == "repo_not_connected"
 
 
+async def test_query_refuses_a_revoked_repo(client, graph_store, fake_gemini):
+    headers = await authed(client)
+    user = await mongo.users().find_one({})
+    await seed_connected_repo_with_graph(user["_id"])
+    await mongo.repos().update_one({"repo_full_name": REPO}, {"$set": {"access_status": "revoked"}})
+
+    resp = await client.post("/query/flow", json={"repo_full_name": REPO, "question": "q"}, headers=headers)
+
+    assert resp.status_code == 403
+    assert resp.json()["meta"]["error_code"] == "repo_access_revoked"
+    assert fake_gemini.calls == []
+
+
 async def test_query_requires_auth(client):
     resp = await client.post("/query/ask", json={"repo_full_name": REPO, "question": "q"})
     assert resp.status_code == 401

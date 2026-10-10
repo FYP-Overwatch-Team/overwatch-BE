@@ -8,7 +8,7 @@ from datetime import datetime
 
 from pymongo import ReturnDocument
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ForbiddenError, NotFoundError
 from app.core.repo_identity import validate_repo_full_name
 from app.core.time import utcnow
 from app.db import mongo
@@ -23,6 +23,14 @@ async def get_connected(user_id: str, repo_full_name: str) -> dict:
     repo = await find(user_id, repo_full_name)
     if repo is None:
         raise NotFoundError("repository is not connected", error_code="repo_not_connected")
+    return repo
+
+
+async def get_readable(user_id: str, repo_full_name: str) -> dict:
+    """A connected repo whose GitHub access still stands; its graph is not served after a revoke."""
+    repo = await get_connected(user_id, repo_full_name)
+    if repo.get("access_status", "active") != "active":
+        raise ForbiddenError("GitHub access to this repository was revoked", error_code="repo_access_revoked")
     return repo
 
 

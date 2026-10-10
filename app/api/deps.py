@@ -4,7 +4,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.auth.repository import get_user
 from app.core.exceptions import UnauthorizedError
 from app.core.security import TokenError, verify_access_token
-from app.github.repository import get_connected
+from app.github.repository import get_readable
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -35,4 +35,4 @@ async def require_connected_repo(
     Node ids embed the repo name, so without one check in front of them a crafted
     id could read another tenant's subgraph.
     """
-    return await get_connected(user_id, repo_full_name)
+    return await get_readable(user_id, repo_full_name)
