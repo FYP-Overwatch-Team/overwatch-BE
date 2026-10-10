@@ -2,10 +2,9 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.auth.repository import get_user
-from app.core.exceptions import NotFoundError, UnauthorizedError
-from app.core.repo_identity import validate_repo_full_name
+from app.core.exceptions import UnauthorizedError
 from app.core.security import TokenError, verify_access_token
-from app.db import mongo
+from app.github.repository import get_connected
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -31,17 +30,9 @@ async def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict:
 async def require_connected_repo(
     repo_full_name: str, user_id: str = Depends(get_current_user_id),
 ) -> dict:
-    """Authorise access to one repository's graph.
+    """Authorise access to one repo's graph; every graph route depends on this.
 
-    Every graph route depends on this. Node ids embed the repository name, so
-    without a single check in front of them a crafted id would be a way to
-    read another tenant's subgraph. Returning the repository document also
-    gives routes the parse status and graph version without a second query.
+    Node ids embed the repo name, so without one check in front of them a crafted
+    id could read another tenant's subgraph.
     """
-    validate_repo_full_name(repo_full_name)
-    repo = await mongo.repos().find_one(
-        {"user_id": user_id, "repo_full_name": repo_full_name},
-    )
-    if repo is None:
-        raise NotFoundError("repository is not connected", error_code="repo_not_connected")
-    return repo
+    return await get_connected(user_id, repo_full_name)

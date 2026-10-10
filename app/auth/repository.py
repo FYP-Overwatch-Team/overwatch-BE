@@ -32,6 +32,10 @@ async def get_user(user_id: str) -> dict | None:
     return await mongo.users().find_one({"_id": user_id})
 
 
+async def find_user_by_github_id(github_id: int) -> dict | None:
+    return await mongo.users().find_one({"github_id": github_id})
+
+
 async def insert_refresh_token(token_hash: str, user_id: str, family_id: str, expires_at: datetime) -> None:
     await mongo.refresh_tokens().insert_one({
         "token_hash": token_hash,

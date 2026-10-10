@@ -87,6 +87,9 @@ async def ensure_indexes() -> None:
     await oauth_tokens().create_index([("user_id", 1), ("provider", 1)], unique=True)
     await repos().create_index([("user_id", 1), ("repo_full_name", 1)], unique=True)
     await repos().create_index("repo_full_name")
+    # webhook routing: push events carry the repo id, installation events the installation id
+    await repos().create_index("github_repo_id")
+    await repos().create_index("installation_id")
     await jira_projects().create_index([("user_id", 1), ("project_key", 1)], unique=True)
     # Must match the sync upsert filter exactly — that keys on ticket_key alone,
     # so a ticket moved between projects updates rather than duplicating.

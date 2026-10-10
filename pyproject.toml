@@ -33,6 +33,10 @@ testpaths = ["tests"]
 markers = [
     "regression: snapshot-style regression tests (run in isolation with -m regression)",
 ]
+filterwarnings = [
+    # mongomock's own TTL sweep still calls datetime.utcnow()
+    "ignore:datetime.datetime.utcnow:DeprecationWarning:mongomock",
+]
 
 [build-system]
 requires = ["hatchling"]

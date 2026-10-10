@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import secrets
 from datetime import timedelta
@@ -35,6 +36,13 @@ def verify_access_token(token: str) -> str:
 
 def generate_refresh_token() -> str:
     return secrets.token_urlsafe(48)
+
+
+def pkce_pair() -> tuple[str, str]:
+    """(code_verifier, S256 code_challenge) for an OAuth authorization request."""
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return verifier, base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
 def hash_refresh_token(raw: str) -> str:

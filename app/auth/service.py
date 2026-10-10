@@ -15,26 +15,17 @@ from app.auth import repository
 from app.core import security
 from app.core.exceptions import UnauthorizedError
 from app.core.time import utcnow
-from app.db import mongo
+from app.db import oauth_tokens
 
 logger = structlog.get_logger("app.auth")
 
 REFRESH_TOKEN_TTL = timedelta(days=30)
 
 
-async def sign_in_with_github(profile: dict, github_token: str) -> tuple[str, str]:
-    """Upsert the user, keep their GitHub token, start a session. Returns (access_jwt, raw_refresh)."""
+async def sign_in_with_github(profile: dict, github_tokens: dict) -> tuple[str, str]:
+    """Upsert the user, keep their GitHub user token, start a session. Returns (access_jwt, raw_refresh)."""
     user = await repository.upsert_github_user(profile)
-    # TODO(BE3): moves to the shared provider-token store with the GitHub App switch
-    await mongo.oauth_tokens().update_one(
-        {"user_id": user["_id"], "provider": "github"},
-        {"$set": {
-            "access_token_encrypted": security.encrypt_secret(github_token),
-            "status": "active",
-            "updated_at": utcnow(),
-        }},
-        upsert=True,
-    )
+    await oauth_tokens.save(user["_id"], "github", github_tokens)
     return await create_session(user["_id"])
 
 

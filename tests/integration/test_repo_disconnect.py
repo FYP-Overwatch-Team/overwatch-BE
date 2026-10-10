@@ -8,7 +8,7 @@ from app.core.config import get_settings
 from app.db import mongo
 from app.knowledge_graph.build.model import EdgeType, GraphDelta, GraphEdge, GraphNode, NodeLabel
 from app.knowledge_graph.facts import FileFacts
-from app.services import repo_service
+from app.github import checkout as checkouts
 from app.services.facts_repository import InMemoryFactsStore, use_facts_store
 from app.services.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
@@ -33,7 +33,7 @@ async def seed_everything(user_id: str, facts, graph, checkout_root) -> None:
     now = datetime.now(timezone.utc)
     await mongo.repos().insert_one({
         "user_id": user_id, "repo_full_name": REPO, "default_branch": "main",
-        "webhook_id": 42, "webhook_status": "created", "parse_status": "done",
+        "installation_id": 9, "access_status": "active", "parse_status": "done",
         "connected_at": now, "updated_at": now,
     })
     await facts.save_many(REPO, [FileFacts(path="a.py", language="python", content_hash="h")])
@@ -44,7 +44,7 @@ async def seed_everything(user_id: str, facts, graph, checkout_root) -> None:
             upserted_nodes=(GraphNode(f"{REPO}:api", NodeLabel.MODULE, {"name": "api", "kind": "module"}),),
         )
     )
-    checkout = repo_service.repo_workdir(REPO)
+    checkout = checkouts.repo_workdir(REPO)
     (checkout / "src").mkdir(parents=True, exist_ok=True)
     (checkout / "src" / "a.py").write_text("x = 1\n")
 
@@ -62,14 +62,15 @@ async def test_disconnect_removes_every_trace(client, stores, checkout_root):
     access = await login(client)
     user = await mongo.users().find_one({})
     await seed_everything(user["_id"], facts, graph, checkout_root)
-    checkout = repo_service.repo_workdir(REPO)
+    checkout = checkouts.repo_workdir(REPO)
     assert checkout.exists()
 
     response = await client.delete(
         f"/github/repos/{REPO}", headers={"Authorization": f"Bearer {access}"},
     )
 
-    assert response.status_code == 204
+    assert response.status_code == 200
+    assert response.json() == {"status": "success", "code": 200, "data": None, "meta": {}}
     assert await mongo.repos().find_one({"repo_full_name": REPO}) is None
     assert await facts.load_all(REPO) == {}
     assert await graph.node_ids(REPO) == set()
@@ -85,7 +86,7 @@ async def test_disconnecting_an_unconnected_repository_is_a_404(client, stores, 
     )
 
     assert response.status_code == 404
-    assert response.json()["error_code"] == "repo_not_connected"
+    assert response.json()["meta"]["error_code"] == "repo_not_connected"
 
 
 async def test_one_user_cannot_disconnect_another_users_repository(client, stores, checkout_root):
@@ -114,7 +115,7 @@ async def test_shared_repositories_keep_their_data_until_the_last_user_leaves(
     now = datetime.now(timezone.utc)
     await mongo.repos().insert_one({
         "user_id": "other-user", "repo_full_name": REPO, "default_branch": "main",
-        "webhook_status": "created", "parse_status": "done",
+        "installation_id": 9, "access_status": "active", "parse_status": "done",
         "connected_at": now, "updated_at": now,
     })
 

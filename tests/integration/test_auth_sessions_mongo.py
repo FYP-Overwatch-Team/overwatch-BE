@@ -46,5 +46,5 @@ async def test_concurrent_rotation_of_one_token_succeeds_once(real_mongo):
 
 
 async def test_concurrent_first_sign_ins_create_one_user(real_mongo):
-    await asyncio.gather(*(service.sign_in_with_github(PROFILE, "gho") for _ in range(5)), return_exceptions=True)
+    await asyncio.gather(*(service.sign_in_with_github(PROFILE, {"access_token": "ghu"}) for _ in range(5)), return_exceptions=True)
     assert await mongo.users().count_documents({"github_id": 42}) == 1

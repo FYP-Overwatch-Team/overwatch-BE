@@ -9,7 +9,6 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     app_base_url: str = "http://localhost:8000"
     frontend_origin: str = "http://localhost:3000"
-    public_webhook_base_url: str = ""
 
     jwt_secret_key: str = "dev-only-secret"
     fernet_key: str = ""
@@ -21,8 +20,13 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
 
-    github_client_id: str = ""
-    github_client_secret: str = ""
+    # GitHub App (sign-in via user authorization, repo access via installations)
+    github_app_id: str = ""
+    github_app_client_id: str = ""
+    github_app_client_secret: str = ""
+    github_app_slug: str = ""
+    github_app_private_key_path: str = ""
+    github_webhook_secret: str = ""
 
     jira_client_id: str = ""
     jira_client_secret: str = ""

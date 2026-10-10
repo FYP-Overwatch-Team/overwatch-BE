@@ -8,8 +8,8 @@ from app.db import mongo
 PROFILE = {"id": 42, "login": "octocat", "name": "Octo Cat", "avatar_url": "https://img"}
 
 
-async def _sign_in(profile=PROFILE, token="gho_token") -> dict:
-    await service.sign_in_with_github(profile, token)
+async def _sign_in(profile=PROFILE, token="ghu_token") -> dict:
+    await service.sign_in_with_github(profile, {"access_token": token, "expires_in": 28800, "refresh_token": "ghr_token"})
     return await mongo.users().find_one({"github_id": profile["id"]})
 
 
@@ -25,10 +25,11 @@ async def test_sign_in_creates_then_updates_user():
 
 
 async def test_github_token_stored_encrypted():
-    user = await _sign_in(token="gho_supersecret")
+    user = await _sign_in(token="ghu_supersecret")
     doc = await mongo.oauth_tokens().find_one({"user_id": user["_id"], "provider": "github"})
-    assert "gho_supersecret" not in str(doc)
-    assert security.decrypt_secret(doc["access_token_encrypted"]) == "gho_supersecret"
+    assert "ghu_supersecret" not in str(doc) and "ghr_token" not in str(doc)
+    assert security.decrypt_secret(doc["access_token_encrypted"]) == "ghu_supersecret"
+    assert doc["expires_at"] is not None
 
 
 async def test_session_and_rotation():
