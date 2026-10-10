@@ -4,6 +4,8 @@ A repo doc belongs to one user. Several users can connect the same repo; the
 checkout, facts and graph are keyed by repo name and shared between them.
 """
 
+from datetime import datetime
+
 from pymongo import ReturnDocument
 
 from app.core.exceptions import NotFoundError
@@ -39,10 +41,22 @@ async def update(user_id: str, repo_full_name: str, fields: dict) -> None:
     )
 
 
-async def mark_pending(user_id: str, repo_full_name: str) -> dict | None:
-    """Queue a re-index unless one is already queued or running; returns None if it is."""
+async def mark_pending(user_id: str, repo_full_name: str, stale_before: datetime) -> dict | None:
+    """Queue a re-index unless one is already queued or running; returns None if it is.
+
+    A queue or run older than `stale_before` was lost to a restart, so it can be retried; that's the
+    same rule the indexing lock uses to reclaim it.
+    """
     return await mongo.repos().find_one_and_update(
-        {"user_id": user_id, "repo_full_name": repo_full_name, "parse_status": {"$nin": ["pending", "in_progress"]}},
+        {
+            "user_id": user_id,
+            "repo_full_name": repo_full_name,
+            "$or": [
+                {"parse_status": {"$nin": ["pending", "in_progress"]}},
+                {"parse_status": "pending", "updated_at": {"$lt": stale_before}},
+                {"parse_status": "in_progress", "parse_started_at": {"$not": {"$gte": stale_before}}},
+            ],
+        },
         {"$set": {"parse_status": "pending", "parse_error": None, "updated_at": utcnow()}},
         return_document=ReturnDocument.AFTER,
     )
@@ -61,6 +75,15 @@ async def connected_by_others(repo_full_name: str, user_id: str) -> bool:
 async def find_by_github_repo(github_repo_id: int, installation_id: int) -> list[dict]:
     """Every user's connection of one repo through one installation."""
     return [doc async for doc in mongo.repos().find({"github_repo_id": github_repo_id, "installation_id": installation_id})]
+
+
+async def reattach(installation_id: int, github_repo_ids: list[int]) -> int:
+    """Point repos at a (new) installation that can read them again, e.g. after the App is reinstalled."""
+    result = await mongo.repos().update_many(
+        {"github_repo_id": {"$in": github_repo_ids}},
+        {"$set": {"installation_id": installation_id, "access_status": "active", "updated_at": utcnow()}},
+    )
+    return result.modified_count
 
 
 async def set_access_status(installation_id: int, status: str, *, github_repo_ids: list[int] | None = None) -> int:

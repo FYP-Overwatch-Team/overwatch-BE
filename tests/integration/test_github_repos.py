@@ -1,9 +1,13 @@
+from datetime import timedelta
+
 import jwt
 import pytest
 import respx
 from httpx import Response
 
+from app.core.time import utcnow
 from app.db import mongo
+from app.github import repository
 from tests.integration.test_auth_flow import login
 
 REPO = "octocat/hello-world"
@@ -145,7 +149,7 @@ async def test_a_failed_index_can_be_retried(client, headers, record_jobs):
 
 async def test_retry_while_indexing_conflicts(client, headers, record_jobs):
     await _connect(client, headers)
-    await mongo.repos().update_one({}, {"$set": {"parse_status": "in_progress"}})
+    await mongo.repos().update_one({}, {"$set": {"parse_status": "in_progress", "parse_started_at": utcnow()}})
 
     resp = await client.post(f"/github/repos/{REPO}/index", headers=headers)
     assert resp.status_code == 409
@@ -155,3 +159,30 @@ async def test_retry_while_indexing_conflicts(client, headers, record_jobs):
 async def test_retry_for_an_unknown_repo_is_not_found(client, headers):
     resp = await client.post(f"/github/repos/{REPO}/index", headers=headers)
     assert resp.status_code == 404
+
+
+async def test_stale_in_progress_index_can_be_retried(client, headers, record_jobs):
+    await _connect(client, headers)
+    old = utcnow() - timedelta(hours=6)
+    await mongo.repos().update_one({}, {"$set": {"parse_status": "in_progress", "parse_started_at": old, "updated_at": old}})
+    resp = await client.post(f"/github/repos/{REPO}/index", headers=headers)
+    assert resp.status_code == 202, resp.json()
+
+
+async def test_pending_left_by_a_restart_can_be_retried(client, headers, record_jobs):
+    await _connect(client, headers)
+    old = utcnow() - timedelta(hours=6)
+    await mongo.repos().update_one({}, {"$set": {"parse_status": "pending", "updated_at": old}})
+    resp = await client.post(f"/github/repos/{REPO}/index", headers=headers)
+    assert resp.status_code == 202, resp.json()
+
+
+async def test_concurrent_connect_is_a_conflict_not_a_500(client, headers, record_jobs, monkeypatch):
+    await _connect(client, headers)
+    async def none(*_a, **_k):
+        return None
+    monkeypatch.setattr(repository, "find", none)  # the second request's check ran before the first insert
+    with respx.mock as router:
+        mock_connect(router)
+        resp = await client.post("/github/repos/connect", json={"repo_full_name": REPO}, headers=headers)
+    assert resp.status_code == 409, resp.json()

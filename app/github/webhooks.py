@@ -26,7 +26,6 @@ router = api_router(prefix="/webhooks", tags=["webhooks"])
 logger = structlog.get_logger("app.webhooks")
 
 INSTALLATION_STATUS = {"deleted": "revoked", "suspend": "revoked", "unsuspend": "active"}
-REPO_SELECTION_STATUS = {"removed": "revoked", "added": "active"}
 
 
 def verify_signature(raw_body: bytes, signature_header: str | None) -> bool:
@@ -50,7 +49,16 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
     if delivery_id and not await _first_delivery(delivery_id, event):
         return {"outcome": "duplicate_ignored"}
 
-    payload = json.loads(raw_body)
+    try:
+        return await _dispatch(event, json.loads(raw_body), background_tasks)
+    except Exception:
+        # forget the delivery so GitHub's redelivery is processed instead of ignored
+        if delivery_id:
+            await mongo.webhook_deliveries().delete_one({"delivery_id": delivery_id})
+        raise
+
+
+async def _dispatch(event: str, payload: dict, background_tasks: BackgroundTasks) -> dict:
     match event:
         case "push":
             return await _on_push(payload, background_tasks)
@@ -94,21 +102,34 @@ async def _reindex_in_turn(targets: list[tuple[str, str]]) -> None:
 
 
 async def _on_installation(payload: dict) -> dict:
-    status = INSTALLATION_STATUS.get(payload["action"])
-    if status is None:
-        return {"outcome": "ignored"}
-    updated = await repository.set_access_status(payload["installation"]["id"], status)
+    installation_id = payload["installation"]["id"]
+    if payload["action"] == "created":
+        # a reinstall gets a new installation id; repos connected through the old one move over
+        updated = await repository.reattach(installation_id, _repo_ids(payload.get("repositories")))
+    else:
+        status = INSTALLATION_STATUS.get(payload["action"])
+        if status is None:
+            return {"outcome": "ignored"}
+        updated = await repository.set_access_status(installation_id, status)
     logger.info("installation_access_changed", action=payload["action"], repos=updated)
     return {"outcome": "accepted", "repos": updated}
 
 
 async def _on_repo_selection(payload: dict) -> dict:
-    status = REPO_SELECTION_STATUS.get(payload["action"])
-    repo_ids = [repo["id"] for repo in payload.get(f"repositories_{payload['action']}", [])]
-    if status is None or not repo_ids:
+    action = payload["action"]
+    repo_ids = _repo_ids(payload.get(f"repositories_{action}"))
+    if action not in ("added", "removed") or not repo_ids:
         return {"outcome": "ignored"}
-    updated = await repository.set_access_status(payload["installation"]["id"], status, github_repo_ids=repo_ids)
+    installation_id = payload["installation"]["id"]
+    if action == "added":
+        updated = await repository.reattach(installation_id, repo_ids)
+    else:
+        updated = await repository.set_access_status(installation_id, "revoked", github_repo_ids=repo_ids)
     return {"outcome": "accepted", "repos": updated}
+
+
+def _repo_ids(repos: list[dict] | None) -> list[int]:
+    return [repo["id"] for repo in repos or []]
 
 
 async def _on_authorization(payload: dict) -> dict:

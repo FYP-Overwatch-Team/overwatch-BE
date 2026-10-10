@@ -5,7 +5,10 @@ can access *and* the App is installed on); the installation token is what the
 background jobs clone and fetch with.
 """
 
+from datetime import timedelta
+
 import structlog
+from pymongo.errors import DuplicateKeyError
 
 from app.core.config import get_settings
 from app.core.exceptions import ConflictError, NotFoundError
@@ -87,14 +90,18 @@ async def connect(user_id: str, repo_full_name: str) -> dict:
         "connected_at": now,
         "updated_at": now,
     }
-    await repository.insert(doc)
+    try:
+        await repository.insert(doc)
+    except DuplicateKeyError:  # a concurrent request connected it first
+        raise ConflictError("repository already connected", error_code="repo_already_connected")
     return doc
 
 
 async def request_index(user_id: str, repo_full_name: str) -> dict:
     """Retry a failed index. 409 while one is already queued or running."""
     await repository.get_connected(user_id, repo_full_name)
-    repo = await repository.mark_pending(user_id, repo_full_name)
+    stale_before = utcnow() - timedelta(minutes=get_settings().parse_lock_stale_minutes)
+    repo = await repository.mark_pending(user_id, repo_full_name, stale_before)
     if repo is None:
         raise ConflictError("repository indexing is already running", error_code="index_already_running")
     return repo

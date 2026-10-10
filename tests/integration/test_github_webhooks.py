@@ -144,3 +144,48 @@ async def test_revoked_authorization_marks_the_github_token_for_reauth(client):
 async def test_other_events_are_acknowledged_and_ignored(client):
     resp = await deliver(client, "ping", {"zen": "Keep it logically awesome."})
     assert resp.json()["data"] == {"outcome": "ignored", "repos": None, "event": "ping"}
+
+
+async def test_reinstalling_the_app_moves_repos_to_the_new_installation(client):
+    await connect("alice")
+    await mongo.repos().update_one({}, {"$set": {"access_status": "revoked"}})
+
+    resp = await deliver(client, "installation", {
+        "action": "created", "installation": {"id": 42}, "repositories": [{"id": 1, "full_name": REPO}],
+    })
+
+    repo = await mongo.repos().find_one({})
+    assert resp.json()["data"]["repos"] == 1
+    assert (repo["installation_id"], repo["access_status"]) == (42, "active")
+
+
+async def test_a_repo_added_through_a_new_installation_is_reattached(client):
+    await connect("alice")
+    await mongo.repos().update_one({}, {"$set": {"access_status": "revoked"}})
+
+    await deliver(client, "installation_repositories", {
+        "action": "added", "installation": {"id": 42}, "repositories_added": [{"id": 1, "full_name": REPO}],
+    })
+
+    repo = await mongo.repos().find_one({})
+    assert (repo["installation_id"], repo["access_status"]) == (42, "active")
+
+
+async def test_a_delivery_that_fails_can_be_redelivered(client, monkeypatch):
+    from app.github import repository
+
+    await connect("alice")
+    original = repository.set_access_status
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("mongo blip")
+
+    monkeypatch.setattr(repository, "set_access_status", broken)
+    payload = {"action": "deleted", "installation": {"id": 9}}
+    assert (await deliver(client, "installation", payload, delivery="d-1")).status_code == 500
+
+    monkeypatch.setattr(repository, "set_access_status", original)
+    resp = await deliver(client, "installation", payload, delivery="d-1")
+
+    assert resp.json()["data"]["outcome"] == "accepted"
+    assert await statuses() == {"alice": "revoked"}
