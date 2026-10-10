@@ -1,6 +1,7 @@
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.auth.repository import get_user
 from app.core.exceptions import NotFoundError, UnauthorizedError
 from app.core.repo_identity import validate_repo_full_name
 from app.core.security import TokenError, verify_access_token
@@ -21,7 +22,7 @@ async def get_current_user_id(
 
 
 async def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict:
-    user = await mongo.users().find_one({"_id": user_id})
+    user = await get_user(user_id)
     if user is None:
         raise UnauthorizedError("user not found", error_code="unknown_user")
     return user

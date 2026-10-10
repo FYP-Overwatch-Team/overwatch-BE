@@ -2,11 +2,11 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.deps import get_current_user
-from app.api.routes import auth, github, graph, jira, onboarding, query, tickets, webhooks
+from app.api.routes import github, graph, jira, onboarding, query, tickets, webhooks
+from app.auth.router import router as auth_router
 from app.workers import jobs
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -85,7 +85,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     )
     register_exception_handlers(app)
 
-    app.include_router(auth.router)
+    app.include_router(auth_router)
     app.include_router(github.router)
     app.include_router(jira.router)
     app.include_router(onboarding.router)
@@ -97,15 +97,6 @@ def create_app(manage_db: bool = True) -> FastAPI:
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok", "env": settings.app_env}
-
-    @app.get("/me")
-    async def me(user: dict = Depends(get_current_user)) -> dict:
-        return {
-            "id": user["_id"],
-            "github_login": user["github_login"],
-            "name": user.get("name"),
-            "avatar_url": user.get("avatar_url"),
-        }
 
     return app
 

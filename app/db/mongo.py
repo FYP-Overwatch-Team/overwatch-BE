@@ -80,6 +80,7 @@ async def ensure_indexes() -> None:
     # Session lookup on every /auth/refresh, plus family-wide revocation.
     await refresh_tokens().create_index("token_hash", unique=True)
     await refresh_tokens().create_index("family_id")
+    await refresh_tokens().create_index("user_id")  # logout-all
     await refresh_tokens().create_index("expires_at", expireAfterSeconds=0)
 
     await users().create_index("github_id", unique=True)

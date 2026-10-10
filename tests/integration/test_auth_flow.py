@@ -75,6 +75,24 @@ async def test_logout_invalidates_refresh(client):
     assert refresh.status_code == 401
 
 
+async def test_logout_all_revokes_every_session(client):
+    access = await login(client)
+    first_device = client.cookies["overwatch_refresh"]
+    await login(client)  # a second sign-in starts a second family
+
+    out = await client.post("/auth/logout-all", headers={"Authorization": f"Bearer {access}"})
+    assert out.status_code == 200
+
+    for raw in (first_device, client.cookies.get("overwatch_refresh")):
+        if raw:
+            client.cookies.set("overwatch_refresh", raw, path="/auth")
+        assert (await client.post("/auth/refresh")).status_code == 401
+
+
+async def test_logout_all_requires_bearer(client):
+    assert (await client.post("/auth/logout-all")).status_code == 401
+
+
 async def test_protected_route_rejects_bad_tokens(client):
     no_token = await client.get("/me")
     assert no_token.status_code == 401
