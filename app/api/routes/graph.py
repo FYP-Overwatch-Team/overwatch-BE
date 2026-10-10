@@ -12,11 +12,12 @@ it is served by the old pipeline or the new one.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import Depends, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import require_connected_repo
 from app.core.exceptions import NotFoundError
+from app.core.responses import WithMeta, api_router
 from app.knowledge_graph.build.model import EdgeType, NodeLabel
 from app.knowledge_graph.view.model import (
     VIEWABLE_EDGE_TYPES,
@@ -33,7 +34,7 @@ from app.services.knowledge_graph_store import (
     validate_depth,
 )
 
-router = APIRouter(prefix="/graph", tags=["graph"])
+router = api_router(prefix="/graph", tags=["graph"])
 
 #: Caps on what one request may pull back, so a crafted query cannot ask for
 #: an unbounded traversal.
@@ -53,21 +54,15 @@ ConnectedRepo = Annotated[dict, Depends(require_connected_repo)]
 
 
 @router.get("")
-async def get_graph(response: Response, repo: ConnectedRepo) -> dict:
+async def get_graph(repo: ConnectedRepo, response: Response) -> dict:
     """The module-level diagram, in the shape the dashboard already consumes."""
     repo_full_name = repo["repo_full_name"]
     graph = await get_knowledge_graph_store().module_view(repo_full_name)
 
-    # The graph only changes when the indexed commit changes, so polling can
-    # be answered from cache.
+    # the graph only changes when the indexed commit does, so polling can be answered from cache
     if version := repo.get("graph_version"):
         response.headers["ETag"] = f'W/"{version}"'
-
-    return {
-        "repo_full_name": repo_full_name,
-        "parse_status": repo["parse_status"],
-        **graph,
-    }
+    return {"repo_full_name": repo_full_name, "parse_status": repo["parse_status"], **graph}
 
 
 class GraphViewBody(BaseModel):
@@ -253,10 +248,10 @@ async def search_graph(
     repo: ConnectedRepo,
     q: Annotated[str, Query(min_length=MIN_SEARCH_TERM, max_length=200)],
     limit: Annotated[int, Query(ge=1, le=MAX_SEARCH_RESULTS)] = 20,
-) -> dict:
+) -> WithMeta[list[dict]]:
     """Find files and symbols by name."""
     results = await get_knowledge_graph_store().search(repo["repo_full_name"], q, limit=limit)
-    return {"results": results, "count": len(results)}
+    return WithMeta(results, {"count": len(results)})
 
 
 @router.get("/stats")
@@ -285,6 +280,6 @@ async def get_stats(repo: ConnectedRepo) -> dict:
 
 
 @router.get("/edge-types")
-async def list_edge_types() -> dict:
+async def list_edge_types() -> list[str]:
     """The relationship types a client may filter `/graph/neighbours` by."""
-    return {"edge_types": sorted(str(edge_type) for edge_type in EdgeType)}
+    return sorted(str(edge_type) for edge_type in EdgeType)

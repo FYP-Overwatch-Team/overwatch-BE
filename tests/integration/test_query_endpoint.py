@@ -15,7 +15,7 @@ async def authed(client) -> dict:
 async def seed_connected_repo_with_graph(user_id: str) -> None:
     await mongo.repos().insert_one({
         "user_id": user_id, "repo_full_name": REPO, "default_branch": "main",
-        "webhook_status": "created", "parse_status": "done",
+        "parse_status": "done",
         "parse_error": None, "connected_at": 1, "updated_at": 1,
     })
     await GraphSeed(REPO).modules("api", "services").depends("api", "services").apply(
@@ -38,7 +38,7 @@ async def test_ask_endpoint_filters_hallucinated_node(client, graph_store, fake_
         headers=headers,
     )
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["data"]
     assert set(body["highlighted_node_ids"]) == {module_id(REPO, "api"), module_id(REPO, "services")}
     assert "billing" not in str(body["highlighted_node_ids"])
 
@@ -55,7 +55,7 @@ async def test_flow_endpoint_returns_ordered_ids(client, graph_store, fake_gemin
         headers=headers,
     )
     assert resp.status_code == 200
-    assert resp.json()["step_node_ids"] == [module_id(REPO, "api"), module_id(REPO, "services")]
+    assert resp.json()["data"]["step_node_ids"] == [module_id(REPO, "api"), module_id(REPO, "services")]
 
 
 async def test_query_requires_connected_repo(client, graph_store, fake_gemini):
@@ -64,7 +64,7 @@ async def test_query_requires_connected_repo(client, graph_store, fake_gemini):
         "/query/ask", json={"repo_full_name": "nobody/nothing", "question": "q"}, headers=headers,
     )
     assert resp.status_code == 404
-    assert resp.json()["error_code"] == "repo_not_connected"
+    assert resp.json()["meta"]["error_code"] == "repo_not_connected"
 
 
 async def test_query_requires_auth(client):

@@ -119,7 +119,7 @@ async def view(client, headers, **body):
         f"/graph/view?repo_full_name={REPO}", json=body, headers=headers,
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    return response.json()["data"]
 
 
 def ids(body) -> list[str]:
@@ -281,7 +281,7 @@ async def test_every_node_says_whether_it_can_be_opened_and_whether_it_is(client
 async def test_the_filter_vocabulary_is_served_to_the_client(client, ready):
     response = await client.get("/graph/view/options", headers=ready)
 
-    body = response.json()
+    body = response.json()["data"]
     assert "IMPORTS" in body["edge_types"]
     # Containment builds the hierarchy and is never drawn as a dependency.
     assert "CONTAINS" not in body["edge_types"]

@@ -80,7 +80,7 @@ async def test_module_view_is_served_from_the_knowledge_graph(client, ready):
     response = await client.get(f"/graph?repo_full_name={REPO}", headers=ready)
 
     assert response.status_code == 200
-    body = response.json()
+    body = response.json()["data"]
     assert [node["name"] for node in body["nodes"]] == ["api"]
     assert body["parse_status"] == "done"
     assert response.headers["ETag"] == 'W/"sha-1"'
@@ -92,7 +92,7 @@ async def test_node_detail_lists_what_a_node_contains(client, ready):
     )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response.json()["data"]
     assert body["properties"]["path"] == "api/handlers.py"
     assert {child["name"] for child in body["children"]} == {"handle", "helper"}
 
@@ -105,7 +105,7 @@ async def test_neighbours_returns_the_subgraph_around_a_node(client, ready):
     )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response.json()["data"]
     assert any(edge["type"] == "CALLS" for edge in body["edges"])
     assert any(node["name"] == "helper" for node in body["nodes"])
 
@@ -114,16 +114,15 @@ async def test_search_finds_symbols_by_name(client, ready):
     response = await client.get(f"/graph/search?repo_full_name={REPO}&q=help", headers=ready)
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["count"] == 1
-    assert body["results"][0]["name"] == "helper"
+    assert response.json()["meta"] == {"count": 1}
+    assert response.json()["data"][0]["name"] == "helper"
 
 
 async def test_stats_report_contents_and_coverage(client, ready):
     response = await client.get(f"/graph/stats?repo_full_name={REPO}", headers=ready)
 
     assert response.status_code == 200
-    body = response.json()
+    body = response.json()["data"]
     assert body["nodes_by_label"]["Symbol"] == 2
     assert body["edges_by_type"]["CALLS"] == 1
     assert body["resolution"]["internal_import_resolution"] == 1.0
@@ -158,7 +157,7 @@ async def test_every_endpoint_refuses_a_repository_you_have_not_connected(
     response = await client.get(endpoint.format(repo=OTHER_REPO), headers=ready)
 
     assert response.status_code == 404
-    assert response.json()["error_code"] == "repo_not_connected"
+    assert response.json()["meta"]["error_code"] == "repo_not_connected"
 
 
 async def test_a_node_id_from_another_repository_is_not_readable(client, ready, graph):
@@ -171,7 +170,7 @@ async def test_a_node_id_from_another_repository_is_not_readable(client, ready, 
     )
 
     assert response.status_code == 404
-    assert response.json()["error_code"] == "node_not_found"
+    assert response.json()["meta"]["error_code"] == "node_not_found"
 
 
 async def test_neighbours_cannot_traverse_into_another_repository(client, ready, graph):
@@ -181,7 +180,7 @@ async def test_neighbours_cannot_traverse_into_another_repository(client, ready,
         f"/graph/neighbours?repo_full_name={REPO}&node_id={OTHER_REPO}:api", headers=ready,
     )
 
-    assert response.json() == {"nodes": [], "edges": []}
+    assert response.json()["data"] == {"nodes": [], "edges": []}
 
 
 # -- Bounds ----------------------------------------------------------------
