@@ -3,8 +3,8 @@
 import pytest
 
 from app.knowledge_graph.build.ids import module_id
-from app.services import llm_grounding_service as grounding
-from app.services.knowledge_graph_store import get_knowledge_graph_store
+from app.query import service as grounding
+from app.db.knowledge_graph_store import get_knowledge_graph_store
 from tests.graph_fixtures import GraphSeed
 
 pytestmark = pytest.mark.regression

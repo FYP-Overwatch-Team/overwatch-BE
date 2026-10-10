@@ -2,7 +2,7 @@
 
 `model` is the vocabulary, `hierarchy` works out where a node sits from its
 id, and `lod` renders a view. All three are pure; the service layer in
-`app/services/graph_view_service.py` supplies the data.
+`app/graph/view_service.py` supplies the data.
 """
 
 from app.knowledge_graph.view.hierarchy import (

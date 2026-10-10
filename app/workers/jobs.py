@@ -22,7 +22,7 @@ from app.integrations.github_app import InstallationGone, get_github_app
 from app.knowledge_graph.build import GRAPH_BUILD_VERSION
 from app.knowledge_graph.pipeline import IndexingPipeline
 from app.services.facts_repository import get_facts_store
-from app.services.knowledge_graph_store import get_knowledge_graph_store
+from app.db.knowledge_graph_store import get_knowledge_graph_store
 
 logger = structlog.get_logger("app.jobs")
 

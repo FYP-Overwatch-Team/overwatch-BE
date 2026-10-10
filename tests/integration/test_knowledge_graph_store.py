@@ -18,7 +18,7 @@ from app.knowledge_graph.build.model import (
     GraphNode,
     NodeLabel,
 )
-from app.services.knowledge_graph_store import (
+from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
     Neo4jKnowledgeGraphStore,
 )
@@ -303,7 +303,7 @@ async def test_counts_report_what_is_stored(store):
 
 
 def test_labels_and_types_are_rejected_unless_they_come_from_the_enums():
-    from app.services.knowledge_graph_store import _safe_label, _safe_type
+    from app.db.knowledge_graph_store import _safe_label, _safe_type
 
     assert _safe_label(NodeLabel.SYMBOL) == "Symbol"
     assert _safe_type(EdgeType.CALLS) == "CALLS"

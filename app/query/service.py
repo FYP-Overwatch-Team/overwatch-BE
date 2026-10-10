@@ -13,8 +13,8 @@ import structlog
 
 from app.core.exceptions import AppError, NotFoundError
 from app.integrations.gemini_client import get_gemini_client
-from app.services.graph_context import build_ask_context, build_flow_context
-from app.services.knowledge_graph_store import get_knowledge_graph_store
+from app.query.context import build_ask_context, build_flow_context
+from app.db.knowledge_graph_store import get_knowledge_graph_store
 
 logger = structlog.get_logger("app.llm")
 

@@ -6,7 +6,7 @@ import pytest
 
 from app.knowledge_graph.pipeline import IndexingPipeline
 from app.services.facts_repository import InMemoryFactsStore
-from app.services.knowledge_graph_store import InMemoryKnowledgeGraphStore
+from app.db.knowledge_graph_store import InMemoryKnowledgeGraphStore
 
 REPO = "octocat/hello-world"
 

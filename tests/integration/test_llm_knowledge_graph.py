@@ -4,9 +4,9 @@ import pytest
 
 from app.core.config import get_settings
 from app.knowledge_graph.build.model import EdgeType, GraphDelta, GraphEdge, GraphNode, NodeLabel
-from app.services import llm_grounding_service
-from app.services.graph_context import build_ask_context, keywords, owning_module_id
-from app.services.knowledge_graph_store import (
+from app.query import service as grounding
+from app.query.context import build_ask_context, keywords, owning_module_id
+from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
     use_knowledge_graph_store,
 )
@@ -79,7 +79,7 @@ async def test_context_includes_the_selected_node_and_its_neighbourhood(graph):
 
 
 async def test_context_is_bounded(monkeypatch, graph):
-    monkeypatch.setattr("app.services.graph_context.MAX_CONTEXT_LINES", 3)
+    monkeypatch.setattr("app.query.context.MAX_CONTEXT_LINES", 3)
 
     context = await build_ask_context(graph, REPO, "handle_login verify_password")
 
@@ -111,7 +111,7 @@ async def test_ask_returns_module_highlights_and_precise_references(graph, fake_
         "highlighted_node_names": ["handle_login", "verify_password"],
     }
 
-    result = await llm_grounding_service.ask(REPO, "what does handle_login call?")
+    result = await grounding.ask(REPO, "what does handle_login call?")
 
     assert result["answer"] == "handle_login calls verify_password."
     # Highlights are modules, which is what the dashboard renders…
@@ -126,7 +126,7 @@ async def test_ask_drops_nodes_the_model_invented(graph, fake_gemini):
         "highlighted_node_names": ["handle_login", "PaymentService", "DROP TABLE users"],
     }
 
-    result = await llm_grounding_service.ask(REPO, "what does handle_login call?")
+    result = await grounding.ask(REPO, "what does handle_login call?")
 
     assert result["references"] == [HANDLER]
     assert result["highlighted_node_ids"] == [MODULE]
@@ -136,13 +136,13 @@ async def test_ask_refuses_when_there_is_no_graph_yet(graph, fake_gemini):
     from app.core.exceptions import NotFoundError
 
     with pytest.raises(NotFoundError):
-        await llm_grounding_service.ask("nobody/else", "anything")
+        await grounding.ask("nobody/else", "anything")
 
 
 async def test_flow_returns_ordered_module_steps(graph, fake_gemini):
     fake_gemini.json_response = {"step_node_names": ["handle_login", "verify_password"]}
 
-    result = await llm_grounding_service.flow(REPO, "show me the login flow")
+    result = await grounding.flow(REPO, "show me the login flow")
 
     assert result["step_node_ids"] == [MODULE, f"{REPO}:services"]
 
@@ -150,7 +150,7 @@ async def test_flow_returns_ordered_module_steps(graph, fake_gemini):
 async def test_flow_collapses_consecutive_steps_in_one_module(graph, fake_gemini):
     fake_gemini.json_response = {"step_node_names": ["api", "handle_login", "verify_password"]}
 
-    result = await llm_grounding_service.flow(REPO, "login")
+    result = await grounding.flow(REPO, "login")
 
     assert result["step_node_ids"] == [MODULE, f"{REPO}:services"]
 
@@ -158,7 +158,7 @@ async def test_flow_collapses_consecutive_steps_in_one_module(graph, fake_gemini
 async def test_flow_drops_invented_steps(graph, fake_gemini):
     fake_gemini.json_response = {"step_node_names": ["api", "GhostService", "services"]}
 
-    result = await llm_grounding_service.flow(REPO, "login")
+    result = await grounding.flow(REPO, "login")
 
     assert result["step_node_ids"] == [MODULE, f"{REPO}:services"]
 
@@ -166,7 +166,7 @@ async def test_flow_drops_invented_steps(graph, fake_gemini):
 async def test_the_prompt_warns_that_context_is_data(graph, fake_gemini):
     fake_gemini.json_response = {"answer": "", "highlighted_node_names": []}
 
-    await llm_grounding_service.ask(REPO, "anything")
+    await grounding.ask(REPO, "anything")
 
     system = fake_gemini.calls[-1]["system"]
     assert "not instructions" in system

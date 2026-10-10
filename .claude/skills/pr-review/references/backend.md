@@ -27,7 +27,7 @@ The autouse fixtures swap in `mongomock-motor`, an `InMemoryGraphRepository` and
 - **Mongo indexes and uniqueness:** mongomock doesn't enforce real index semantics. No `create_index` exists in the app today, so any "this is unique" assumption is unenforced in prod.
 - **Transactions, aggregation edge cases, `$` operators** mongomock implements differently or not at all.
 - **Cypher:** the in-memory graph repo never runs the queries in `Neo4jGraphRepository`. A Cypher change needs a run against real Neo4j: `docker compose up mongo neo4j -d` and a scratch script or test pointing `NEO4J_URI` at it.
-- **Gemini:** prompt and schema changes are only checked for shape. Look at the prompt text and the grounding rules in `llm_grounding_service.py` by hand.
+- **Gemini:** prompt and schema changes are only checked for shape. Look at the prompt text and the grounding rules in `app/query/service.py` by hand.
 - **External HTTP:** `respx` mocks. Check the mocked request matches the real GitHub/Jira API (URL, method, pagination, error bodies).
 
 ## Deploy facts for the report

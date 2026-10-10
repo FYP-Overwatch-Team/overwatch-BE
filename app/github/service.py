@@ -119,7 +119,7 @@ async def disconnect(user_id: str, repo_full_name: str) -> None:
 
 async def _purge(repo_full_name: str) -> None:
     from app.services.facts_repository import get_facts_store
-    from app.services.knowledge_graph_store import get_knowledge_graph_store
+    from app.db.knowledge_graph_store import get_knowledge_graph_store
 
     await get_knowledge_graph_store().delete_repository(repo_full_name)
     await get_facts_store().delete_repo(repo_full_name)

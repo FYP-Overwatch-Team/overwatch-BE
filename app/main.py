@@ -5,20 +5,22 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import graph, query, tickets
+from app.api.routes import tickets
 from app.auth.router import router as auth_router
 from app.github import checkout
 from app.github.router import router as github_router
 from app.github.webhooks import router as webhooks_router
+from app.graph.router import router as graph_router
 from app.jira.router import router as jira_router
 from app.onboarding.router import router as onboarding_router
+from app.query.router import router as query_router
 from app.workers import jobs
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.responses import EnvelopeRoute
 from app.core.logging import RequestContextMiddleware, configure_logging
 from app.db import mongo
-from app.services.knowledge_graph_store import get_knowledge_graph_store
+from app.db.knowledge_graph_store import get_knowledge_graph_store
 
 
 async def _ticket_sync_loop(interval_seconds: int) -> None:
@@ -94,10 +96,10 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(github_router)
     app.include_router(jira_router)
     app.include_router(onboarding_router)
-    app.include_router(graph.router)
+    app.include_router(graph_router)
     app.include_router(webhooks_router)
     app.include_router(tickets.router)
-    app.include_router(query.router)
+    app.include_router(query_router)
 
     app.router.route_class = EnvelopeRoute  # app-level routes return the envelope too
 

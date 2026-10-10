@@ -7,7 +7,7 @@ import pytest
 from app.core.config import get_settings
 from app.db import mongo
 from app.knowledge_graph.build.model import EdgeType, GraphDelta, GraphEdge, GraphNode, NodeLabel
-from app.services.knowledge_graph_store import (
+from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
     use_knowledge_graph_store,
 )

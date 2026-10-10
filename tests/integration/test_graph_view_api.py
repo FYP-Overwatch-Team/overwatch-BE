@@ -13,7 +13,7 @@ from app.knowledge_graph.build.model import (
     GraphNode,
     NodeLabel,
 )
-from app.services.knowledge_graph_store import (
+from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
     use_knowledge_graph_store,
 )
@@ -290,6 +290,8 @@ async def test_the_filter_vocabulary_is_served_to_the_client(client, ready):
     assert body["granularities"] == ["module", "file", "symbol"]
     # The UI warns before a click using this, rather than repeating the number.
     assert body["page_size"] == PAGE
+    # Matches the request cap, so the UI can stop before the API would reject a view.
+    assert body["max_expanded"] == 64
 
 
 # -- Isolation and input handling -----------------------------------------

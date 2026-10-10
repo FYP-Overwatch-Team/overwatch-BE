@@ -10,7 +10,7 @@ from app.knowledge_graph.build.model import EdgeType, GraphDelta, GraphEdge, Gra
 from app.knowledge_graph.facts import FileFacts
 from app.github import checkout as checkouts
 from app.services.facts_repository import InMemoryFactsStore, use_facts_store
-from app.services.knowledge_graph_store import (
+from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
     use_knowledge_graph_store,
 )

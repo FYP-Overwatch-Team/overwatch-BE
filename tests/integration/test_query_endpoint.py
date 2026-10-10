@@ -1,6 +1,6 @@
 from app.db import mongo
 from app.knowledge_graph.build.ids import module_id
-from app.services.knowledge_graph_store import get_knowledge_graph_store
+from app.db.knowledge_graph_store import get_knowledge_graph_store
 from tests.graph_fixtures import GraphSeed
 from tests.integration.test_auth_flow import login
 

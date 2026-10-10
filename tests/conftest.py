@@ -11,7 +11,7 @@ from app.main import create_app
 from app.integrations import gemini_client, github_app
 from app.workers import jobs
 from app.services.facts_repository import InMemoryFactsStore, use_facts_store
-from app.services.knowledge_graph_store import (
+from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
     use_knowledge_graph_store,
 )
