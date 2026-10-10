@@ -146,6 +146,22 @@ def enqueue_initial_parse(background_tasks, user_id: str, repo_full_name: str) -
     background_tasks.add_task(run_initial_parse, user_id, repo_full_name)
 
 
+async def run_parse_retry(user_id: str, repo_full_name: str) -> None:
+    try:
+        token = await repo_service.get_github_token(user_id)
+        await repo_service.update_workdir(repo_full_name, token)
+    except Exception as exc:
+        logger.exception("parse_retry_checkout_failed", repo=repo_full_name)
+        await _set_parse_status(user_id, repo_full_name, "failed", error=f"checkout failed: {exc}")
+        return
+    await run_initial_parse(user_id, repo_full_name)
+
+
+def enqueue_parse_retry(background_tasks, user_id: str, repo_full_name: str) -> None:
+    enqueued_jobs.append({"job": "parse_retry", "user_id": user_id, "repo": repo_full_name})
+    background_tasks.add_task(run_parse_retry, user_id, repo_full_name)
+
+
 async def run_ticket_sync(user_id: str, project_key: str) -> None:
     """Full ticket pull for one project; sync_status acts as the overlap lock."""
     from app.services import ticket_service  # local import to avoid a cycle

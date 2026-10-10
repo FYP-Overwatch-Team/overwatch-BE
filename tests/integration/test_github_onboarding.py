@@ -7,7 +7,9 @@ from httpx import Response
 
 from app.core.config import get_settings
 from app.db import mongo
+from app.parsing.graph_builder import node_id
 from app.services import repo_service
+from app.services.graph_service import get_graph_repository
 from app.workers import jobs
 from tests.integration.test_auth_flow import login, mock_github
 
@@ -141,6 +143,113 @@ async def test_clone_failure_marks_parse_failed_but_webhook_ok(client, monkeypat
 
     doc = await mongo.repos().find_one({"repo_full_name": REPO})
     assert "clone failed" in doc["parse_error"]
+
+
+async def test_failed_parse_can_be_retried(client, fake_clone, tmp_path, monkeypatch):
+    monkeypatch.setenv("REPOS_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    headers = await authed(client)
+    with respx.mock as router:
+        router.get(f"{API}/repos/{REPO}").mock(return_value=Response(200, json=repo_payload()))
+        router.post(f"{API}/repos/{REPO}/hooks").mock(return_value=Response(201, json={"id": 782}))
+        await client.post("/github/repos/connect", json={"repo_full_name": REPO}, headers=headers)
+    await mongo.repos().update_one(
+        {"repo_full_name": REPO}, {"$set": {"parse_status": "failed", "parse_error": "old"}},
+    )
+
+    response = await client.post(
+        "/github/repos/parse/retry", json={"repo_full_name": REPO}, headers=headers,
+    )
+
+    assert response.status_code == 202
+    assert response.json()["parse_status"] == "pending"
+    assert jobs.enqueued_jobs[-1]["job"] == "parse_retry"
+    doc = await mongo.repos().find_one({"repo_full_name": REPO})
+    assert doc["parse_status"] == "done"
+    assert doc["parse_error"] is None
+
+
+async def test_parse_retry_rejected_while_running(client, fake_clone):
+    headers = await authed(client)
+    with respx.mock as router:
+        router.get(f"{API}/repos/{REPO}").mock(return_value=Response(200, json=repo_payload()))
+        router.post(f"{API}/repos/{REPO}/hooks").mock(return_value=Response(201, json={"id": 783}))
+        await client.post("/github/repos/connect", json={"repo_full_name": REPO}, headers=headers)
+    await mongo.repos().update_one(
+        {"repo_full_name": REPO}, {"$set": {"parse_status": "in_progress"}},
+    )
+
+    response = await client.post(
+        "/github/repos/parse/retry", json={"repo_full_name": REPO}, headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "parse_already_running"
+
+
+async def test_disconnect_removes_webhook_and_last_repo_artifacts(client, fake_clone, tmp_path, monkeypatch):
+    monkeypatch.setenv("REPOS_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    headers = await authed(client)
+    with respx.mock as router:
+        router.get(f"{API}/repos/{REPO}").mock(return_value=Response(200, json=repo_payload()))
+        router.post(f"{API}/repos/{REPO}/hooks").mock(return_value=Response(201, json={"id": 784}))
+        await client.post("/github/repos/connect", json={"repo_full_name": REPO}, headers=headers)
+    await mongo.repos().update_one({"repo_full_name": REPO}, {"$set": {"parse_status": "done"}})
+    await mongo.file_parses().insert_one({"repo_full_name": REPO, "path": "api/main.py"})
+    await get_graph_repository().upsert_graph(REPO, {
+        "nodes": [{"id": node_id(REPO, "api"), "name": "api", "kind": "module", "file_count": 1, "definition_count": 1}],
+        "edges": [],
+    })
+
+    with respx.mock as router:
+        deleted = router.delete(f"{API}/repos/{REPO}/hooks/784").mock(return_value=Response(204))
+        response = await client.request(
+            "DELETE", "/github/repos/connection", json={"repo_full_name": REPO}, headers=headers,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["webhook_removed"] is True
+    assert deleted.called
+    assert await mongo.repos().count_documents({"repo_full_name": REPO}) == 0
+    assert await mongo.file_parses().count_documents({"repo_full_name": REPO}) == 0
+    assert await get_graph_repository().fetch_graph(REPO) == {"nodes": [], "edges": []}
+    graph_response = await client.get(f"/graph?repo_full_name={REPO}", headers=headers)
+    query_response = await client.post(
+        "/query/ask", json={"repo_full_name": REPO, "question": "q"}, headers=headers,
+    )
+    assert graph_response.status_code == 404
+    assert query_response.status_code == 404
+
+
+async def test_disconnect_keeps_shared_graph_for_another_connection(client, fake_clone):
+    headers = await authed(client)
+    with respx.mock as router:
+        router.get(f"{API}/repos/{REPO}").mock(return_value=Response(200, json=repo_payload()))
+        router.post(f"{API}/repos/{REPO}/hooks").mock(return_value=Response(201, json={"id": 785}))
+        await client.post("/github/repos/connect", json={"repo_full_name": REPO}, headers=headers)
+    first_user = await mongo.users().find_one({})
+    await mongo.repos().update_one({"user_id": first_user["_id"]}, {"$set": {"parse_status": "done"}})
+    await mongo.repos().insert_one({
+        "user_id": "another-user", "repo_full_name": REPO, "default_branch": "main",
+        "webhook_status": "created", "parse_status": "done", "connected_at": 1,
+    })
+    await get_graph_repository().upsert_graph(REPO, {
+        "nodes": [{"id": node_id(REPO, "api"), "name": "api", "kind": "module", "file_count": 1, "definition_count": 1}],
+        "edges": [],
+    })
+
+    with respx.mock as router:
+        router.delete(f"{API}/repos/{REPO}/hooks/785").mock(return_value=Response(500))
+        response = await client.request(
+            "DELETE", "/github/repos/connection", json={"repo_full_name": REPO}, headers=headers,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["webhook_removed"] is False
+    assert await mongo.repos().count_documents({"repo_full_name": REPO}) == 1
+    graph = await get_graph_repository().fetch_graph(REPO)
+    assert [node["name"] for node in graph["nodes"]] == ["api"]
 
 
 async def test_duplicate_connect_conflicts(client, fake_clone):

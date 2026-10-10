@@ -50,6 +50,7 @@ async def test_initial_parse_job_builds_graph(client, graph_repo, monkeypatch, t
     assert resp.status_code == 200
     body = resp.json()
     assert body["parse_status"] == "done"
+    assert body["parse_error"] is None
     names = [n["name"] for n in body["nodes"]]
     assert "api" in names and "services" in names and "utils" in names
     assert any(e["type"] == "DEPENDS_ON" for e in body["edges"])

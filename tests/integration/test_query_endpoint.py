@@ -37,6 +37,9 @@ async def test_ask_endpoint_filters_hallucinated_node(client, graph_repo, fake_g
     fake_gemini.json_response = {
         "answer": "api calls services and also the fake billing module.",
         "highlighted_node_names": ["api", "services", "billing"],
+        "evidence_edges": [
+            {"source_node_name": "api", "target_node_name": "services", "type": "DEPENDS_ON"},
+        ],
     }
     resp = await client.post(
         "/query/ask",
@@ -47,6 +50,8 @@ async def test_ask_endpoint_filters_hallucinated_node(client, graph_repo, fake_g
     body = resp.json()
     assert set(body["highlighted_node_ids"]) == {node_id(REPO, "api"), node_id(REPO, "services")}
     assert "billing" not in str(body["highlighted_node_ids"])
+    assert body["answer"] == "This cannot be determined from the parsed repository graph."
+    assert body["evidence"][0]["type"] == "DEPENDS_ON"
 
 
 async def test_flow_endpoint_returns_ordered_ids(client, graph_repo, fake_gemini):

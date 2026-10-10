@@ -18,5 +18,6 @@ async def get_graph(repo_full_name: str, user_id: str = Depends(get_current_user
     return {
         "repo_full_name": repo_full_name,
         "parse_status": repo["parse_status"],
+        "parse_error": repo.get("parse_error"),
         **graph,
     }

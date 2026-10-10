@@ -36,8 +36,20 @@ ASK_RESPONSE_SCHEMA = {
     "properties": {
         "answer": {"type": "string"},
         "highlighted_node_names": {"type": "array", "items": {"type": "string"}},
+        "evidence_edges": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source_node_name": {"type": "string"},
+                    "target_node_name": {"type": "string"},
+                    "type": {"type": "string"},
+                },
+                "required": ["source_node_name", "target_node_name", "type"],
+            },
+        },
     },
-    "required": ["answer", "highlighted_node_names"],
+    "required": ["answer", "highlighted_node_names", "evidence_edges"],
 }
 
 FLOW_RESPONSE_SCHEMA = {
@@ -54,7 +66,15 @@ def _name_index(nodes: list[dict]) -> dict[str, str]:
 
 
 def _format_nodes(nodes: list[dict]) -> str:
-    return "\n".join(f"- {n['name']} (kind: {n['kind']})" for n in nodes) or "(no nodes)"
+    lines = []
+    for node in nodes:
+        details = [f"kind: {node['kind']}"]
+        if node.get("file_count") is not None:
+            details.append(f"files: {node['file_count']}")
+        if node.get("definition_count") is not None:
+            details.append(f"definitions: {node['definition_count']}")
+        lines.append(f"- {node['name']} ({', '.join(details)})")
+    return "\n".join(lines) or "(no nodes)"
 
 
 def _format_edges(edges: list[dict], nodes_by_id: dict[str, dict]) -> str:
@@ -74,15 +94,14 @@ async def _load_full_graph_summary(repo_full_name: str) -> dict:
 
 
 async def _load_context_graph(repo_full_name: str, focused_node_id: str | None) -> dict:
+    full_graph = await _load_full_graph_summary(repo_full_name)
     if focused_node_id is None:
-        # No focus: a lightweight summary (names + edge types only) keeps the prompt small and cheap.
-        return await _load_full_graph_summary(repo_full_name)
+        return full_graph
 
-    graph_repo = get_graph_repository()
-    existing = await graph_repo.existing_node_ids([focused_node_id])
-    if not existing:
+    repo_node_ids = {node["id"] for node in full_graph["nodes"]}
+    if focused_node_id not in repo_node_ids:
         raise NotFoundError("focused node not found in graph", error_code="node_not_found")
-    return await graph_repo.neighborhood(focused_node_id, hops=2)
+    return await get_graph_repository().neighborhood(focused_node_id, hops=2)
 
 
 def _parse_json_response(raw: str) -> dict:
@@ -102,18 +121,60 @@ async def ask(repo_full_name: str, question: str, focused_node_id: str | None = 
     prompt = (
         f"Graph nodes:\n{_format_nodes(context['nodes'])}\n\n"
         f"Graph edges:\n{_format_edges(context['edges'], nodes_by_id)}\n\n"
+        "List every graph relationship used by the answer in evidence_edges. "
+        "If the graph cannot answer the question, return an empty answer and no evidence.\n\n"
         f"Question: {question}"
     )
     raw = await get_gemini_client().generate_json(ASK_SYSTEM_INSTRUCTION, prompt, ASK_RESPONSE_SCHEMA)
     parsed = _parse_json_response(raw)
 
     claimed_names = parsed.get("highlighted_node_names", [])
-    resolved_ids = [name_to_id[name] for name in claimed_names if name in name_to_id]
-    dropped = set(claimed_names) - set(name_to_id)
-    if dropped:
-        logger.warning("llm_hallucinated_nodes_dropped", repo=repo_full_name, names=sorted(dropped))
+    resolved_ids = list(dict.fromkeys(name_to_id[name] for name in claimed_names if name in name_to_id))
+    if focused_node_id and focused_node_id not in resolved_ids:
+        # The validated focus itself is node-level evidence even when the answer
+        # does not make a relationship claim requiring an evidence edge.
+        resolved_ids.insert(0, focused_node_id)
+    dropped_names = set(claimed_names) - set(name_to_id)
+    edge_index = {
+        (edge["source"], edge["target"], edge["type"]): edge
+        for edge in context["edges"]
+    }
+    evidence = []
+    dropped_edges = []
+    for claim in parsed.get("evidence_edges", []):
+        if not isinstance(claim, dict):
+            dropped_edges.append(claim)
+            continue
+        source = name_to_id.get(claim.get("source_node_name"))
+        target = name_to_id.get(claim.get("target_node_name"))
+        edge = edge_index.get((source, target, claim.get("type")))
+        if edge is None:
+            dropped_edges.append(claim)
+            continue
+        evidence.append({
+            "source": edge["source"], "target": edge["target"],
+            "type": edge["type"], "weight": edge.get("weight", 0),
+        })
+        for node_id in (edge["source"], edge["target"]):
+            if node_id not in resolved_ids:
+                resolved_ids.append(node_id)
 
-    return {"answer": parsed.get("answer", ""), "highlighted_node_ids": resolved_ids}
+    if dropped_names or dropped_edges:
+        logger.warning(
+            "llm_unsupported_graph_claims_dropped", repo=repo_full_name,
+            node_names=sorted(dropped_names), edge_count=len(dropped_edges),
+        )
+
+    answer = parsed.get("answer", "").strip()
+    if not answer or (not resolved_ids and not evidence) or dropped_names or dropped_edges:
+        answer = "This cannot be determined from the parsed repository graph."
+
+    return {
+        "answer": answer,
+        "focused_node_id": focused_node_id,
+        "highlighted_node_ids": resolved_ids,
+        "evidence": evidence,
+    }
 
 
 async def flow(repo_full_name: str, question: str) -> dict:

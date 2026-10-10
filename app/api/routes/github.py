@@ -50,6 +50,26 @@ async def connect_repo(
     }
 
 
+@router.post("/repos/parse/retry", status_code=202)
+async def retry_parse(
+    body: ConnectRepoRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    await repo_service.request_parse_retry(user_id, body.repo_full_name)
+    jobs.enqueue_parse_retry(background_tasks, user_id, body.repo_full_name)
+    return {"repo_full_name": body.repo_full_name, "parse_status": "pending"}
+
+
+@router.delete("/repos/connection")
+async def disconnect_repo(
+    body: ConnectRepoRequest,
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    result = await repo_service.disconnect_repo(user_id, body.repo_full_name)
+    return {"disconnected": True, **result}
+
+
 @router.post("/repos/webhook/retry")
 async def retry_webhook(
     body: ConnectRepoRequest,

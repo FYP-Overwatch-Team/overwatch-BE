@@ -30,10 +30,15 @@ async def test_ask_resolves_valid_node_names_to_ids(graph_repo, fake_gemini):
     fake_gemini.json_response = {
         "answer": "The api module depends on services.",
         "highlighted_node_names": ["api", "services"],
+        "evidence_edges": [
+            {"source_node_name": "api", "target_node_name": "services", "type": "DEPENDS_ON"},
+        ],
     }
     result = await grounding.ask(REPO, "what does api depend on?")
     assert result["answer"] == "The api module depends on services."
     assert set(result["highlighted_node_ids"]) == {node_id(REPO, "api"), node_id(REPO, "services")}
+    assert result["focused_node_id"] is None
+    assert result["evidence"][0]["type"] == "DEPENDS_ON"
 
 
 async def test_ask_drops_hallucinated_node_names(graph_repo, fake_gemini):
@@ -41,9 +46,11 @@ async def test_ask_drops_hallucinated_node_names(graph_repo, fake_gemini):
     fake_gemini.json_response = {
         "answer": "The payments service handles this.",
         "highlighted_node_names": ["api", "payments"],  # "payments" doesn't exist
+        "evidence_edges": [],
     }
     result = await grounding.ask(REPO, "who handles payments?")
     assert result["highlighted_node_ids"] == [node_id(REPO, "api")]
+    assert result["answer"] == "This cannot be determined from the parsed repository graph."
 
 
 async def test_ask_with_no_graph_raises_not_found(graph_repo, fake_gemini):
@@ -54,10 +61,42 @@ async def test_ask_with_no_graph_raises_not_found(graph_repo, fake_gemini):
 
 async def test_ask_focused_node_uses_neighborhood(graph_repo, fake_gemini):
     await seed_graph()
-    fake_gemini.json_response = {"answer": "ok", "highlighted_node_names": []}
-    await grounding.ask(REPO, "what connects to api?", focused_node_id=node_id(REPO, "api"))
+    fake_gemini.json_response = {"answer": "The api module has two files.", "highlighted_node_names": [], "evidence_edges": []}
+    result = await grounding.ask(REPO, "what is this module?", focused_node_id=node_id(REPO, "api"))
     prompt = fake_gemini.calls[0]["prompt"]
     assert "api" in prompt and "services" in prompt
+    assert "files: 2" in prompt and "definitions: 3" in prompt
+    assert result["answer"] == "The api module has two files."
+    assert result["highlighted_node_ids"] == [node_id(REPO, "api")]
+
+
+async def test_ask_drops_invented_edge_and_uses_grounded_fallback(graph_repo, fake_gemini):
+    await seed_graph()
+    fake_gemini.json_response = {
+        "answer": "Services depends on api.",
+        "highlighted_node_names": ["api", "services"],
+        "evidence_edges": [
+            {"source_node_name": "services", "target_node_name": "api", "type": "DEPENDS_ON"},
+        ],
+    }
+    result = await grounding.ask(REPO, "what depends on api?")
+    assert result["evidence"] == []
+    assert result["answer"] == "This cannot be determined from the parsed repository graph."
+
+
+async def test_ask_rejects_focused_node_from_another_repo(graph_repo, fake_gemini):
+    await seed_graph()
+    other_repo = "other/private"
+    await get_graph_repository().upsert_graph(other_repo, {
+        "nodes": [{
+            "id": node_id(other_repo, "api"), "name": "api", "kind": "module",
+            "file_count": 1, "definition_count": 1,
+        }],
+        "edges": [],
+    })
+    with pytest.raises(NotFoundError) as exc:
+        await grounding.ask(REPO, "q", focused_node_id=node_id(other_repo, "api"))
+    assert exc.value.error_code == "node_not_found"
 
 
 async def test_ask_unknown_focused_node_raises(graph_repo, fake_gemini):

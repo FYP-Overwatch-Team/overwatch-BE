@@ -72,6 +72,13 @@ class GitHubClient:
         self._log_call("POST", path, resp)
         return self._checked(resp)
 
+    async def api_delete(self, token: str, path: str) -> httpx.Response:
+        resp = await self._http.delete(
+            f"{GITHUB_API_BASE}{path}", headers=self._auth_headers(token),
+        )
+        self._log_call("DELETE", path, resp)
+        return self._checked(resp)
+
     async def get_profile(self, token: str) -> dict:
         resp = await self.api_get(token, "/user")
         return resp.json()
@@ -115,6 +122,13 @@ class GitHubClient:
                 message = f"{message}: {detail}"
             raise ExternalServiceError(message, error_code="webhook_create_failed")
         return resp.json()["id"]
+
+    async def delete_webhook(self, token: str, repo_full_name: str, webhook_id: int) -> None:
+        resp = await self.api_delete(token, f"/repos/{repo_full_name}/hooks/{webhook_id}")
+        if resp.status_code not in (204, 404):
+            raise ExternalServiceError(
+                "webhook deletion failed", error_code="webhook_delete_failed",
+            )
 
     @staticmethod
     def _auth_headers(token: str) -> dict:

@@ -92,6 +92,7 @@ class Neo4jGraphRepository:
             UNWIND ns AS n
             OPTIONAL MATCH (n)-[r]->(t:Service) WHERE t IN ns
             RETURN DISTINCT n.id AS id, n.name AS name, n.kind AS kind,
+                   n.file_count AS file_count, n.definition_count AS definition_count,
                    t.id AS target, r.type AS edge_type, r.weight AS weight
             """ % hops,
             id=node_id,
@@ -99,7 +100,13 @@ class Neo4jGraphRepository:
         nodes: dict[str, dict] = {}
         edges = []
         for row in rows:
-            nodes.setdefault(row["id"], {"id": row["id"], "name": row["name"], "kind": row["kind"]})
+            nodes.setdefault(row["id"], {
+                "id": row["id"],
+                "name": row["name"],
+                "kind": row["kind"],
+                "file_count": row.get("file_count"),
+                "definition_count": row.get("definition_count"),
+            })
             if row.get("target"):
                 edges.append({
                     "source": row["id"], "target": row["target"],
@@ -160,8 +167,13 @@ class InMemoryGraphRepository:
                 if e["target"] in reachable:
                     reachable.add(e["source"])
         nodes = sorted(
-            ({"id": n["id"], "name": n["name"], "kind": n["kind"]}
-             for nid, n in self.nodes.items() if nid in reachable),
+            ({
+                "id": n["id"],
+                "name": n["name"],
+                "kind": n["kind"],
+                "file_count": n.get("file_count"),
+                "definition_count": n.get("definition_count"),
+            } for nid, n in self.nodes.items() if nid in reachable),
             key=lambda n: n["id"],
         )
         edges = sorted(

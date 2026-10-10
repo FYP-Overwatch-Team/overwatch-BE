@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, UnauthorizedError
 from app.db import mongo
 from app.integrations.github_client import get_github_client
+from app.services.graph_service import get_graph_repository
 
 logger = structlog.get_logger("app.repos")
 
@@ -153,6 +154,83 @@ async def connect_repo(user_id: str, repo_full_name: str) -> dict:
         })
 
     return await mongo.repos().find_one({"user_id": user_id, "repo_full_name": repo_full_name})
+
+
+async def request_parse_retry(user_id: str, repo_full_name: str) -> dict:
+    doc = await mongo.repos().find_one_and_update(
+        {
+            "user_id": user_id,
+            "repo_full_name": repo_full_name,
+            "parse_status": {"$nin": ["pending", "in_progress"]},
+        },
+        {"$set": {
+            "parse_status": "pending",
+            "parse_error": None,
+            "updated_at": _now(),
+        }},
+    )
+    if doc is not None:
+        return doc
+    existing = await mongo.repos().find_one({
+        "user_id": user_id, "repo_full_name": repo_full_name,
+    })
+    if existing is None:
+        raise NotFoundError("repository is not connected", error_code="repo_not_connected")
+    raise ConflictError("repository parsing is already running", error_code="parse_already_running")
+
+
+async def disconnect_repo(user_id: str, repo_full_name: str) -> dict:
+    doc = await mongo.repos().find_one({
+        "user_id": user_id, "repo_full_name": repo_full_name,
+    })
+    if doc is None:
+        raise NotFoundError("repository is not connected", error_code="repo_not_connected")
+    if doc.get("parse_status") in ("pending", "in_progress"):
+        raise ConflictError(
+            "wait for repository parsing to finish before disconnecting",
+            error_code="parse_in_progress",
+        )
+
+    webhook_removed = not bool(doc.get("webhook_id"))
+    if doc.get("webhook_id"):
+        try:
+            token = await get_github_token(user_id)
+            await get_github_client().delete_webhook(
+                token, repo_full_name, doc["webhook_id"],
+            )
+            webhook_removed = True
+        except Exception as exc:
+            logger.warning(
+                "webhook_delete_failed_during_disconnect",
+                repo=repo_full_name,
+                error=str(exc),
+            )
+
+    await mongo.repos().delete_one({"_id": doc["_id"]})
+    remaining = await mongo.repos().count_documents({"repo_full_name": repo_full_name})
+    artifacts_removed = False
+    if remaining == 0:
+        try:
+            graph = await get_graph_repository().fetch_graph(repo_full_name)
+            await get_graph_repository().delete_nodes([node["id"] for node in graph["nodes"]])
+            await mongo.file_parses().delete_many({"repo_full_name": repo_full_name})
+            workdir = repo_workdir(repo_full_name)
+            if workdir.exists():
+                await asyncio.to_thread(_rmtree, workdir)
+            artifacts_removed = True
+        except Exception as exc:
+            logger.exception(
+                "repo_artifact_cleanup_failed",
+                repo=repo_full_name,
+                error=str(exc),
+            )
+
+    return {
+        "repo_full_name": repo_full_name,
+        "webhook_removed": webhook_removed,
+        "artifacts_removed": artifacts_removed,
+        "shared_artifacts_retained": remaining > 0,
+    }
 
 
 async def _update_repo(user_id: str, repo_full_name: str, fields: dict) -> None:
