@@ -115,7 +115,11 @@ Use `git push --no-verify` only for exceptional, intentional bypasses.
    - `FRONTEND_ORIGIN` (your deployed frontend URL — CORS is locked to exactly this origin)
 5. Moving from the old GitHub OAuth app: delete the old per-repo webhooks, then run
    `uv run python scripts/migrate_github_app.py` (dry run) and again with `--apply`.
-6. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
+6. Moving to workspaces: stop the API, run `uv run python scripts/migrate_workspaces.py`
+   (dry run) and again with `--apply`, then deploy the backend, then the frontend. The new
+   unique indexes can't be built while data is still keyed by user, and that failure is
+   only logged at boot.
+7. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
 
 **Note on ticket freshness:** Jira tickets sync on a polling loop
 (`ticket_sync_interval_seconds`, default 5 min) rather than via Jira webhooks —
