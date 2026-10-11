@@ -1,6 +1,6 @@
 # Overwatch Backend 
 
-FastAPI backend for Overwatch: GitHub/Jira connectors, AST-based architecture graph (tree-sitter → Neo4j), Jira ticket viewer, and Gemini-grounded diagram Q&A.
+FastAPI backend for Overwatch: GitHub/Jira connectors, AST-based architecture graph (tree-sitter → Neo4j), a work-item board mirrored two-way with Jira, and Gemini-grounded diagram Q&A.
 
 **Stack:** FastAPI · MongoDB (motor) · Neo4j · tree-sitter · Gemini · GitHub App · Jira OAuth 2.0 (3LO)
 
@@ -50,7 +50,7 @@ put its URL (plus `/webhooks/github`) in the App's webhook settings.
 ### Jira
 
 Create an OAuth 2.0 (3LO) app in the Atlassian developer console with callback
-`http://localhost:8000/jira/callback` and scopes `read:jira-work`, `read:jira-user`, `offline_access`,
+`http://localhost:8000/jira/callback` and scopes `read:jira-work`, `write:jira-work`, `read:jira-user`, `offline_access`,
 then set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`.
 
 ## API responses
@@ -119,8 +119,14 @@ Use `git push --no-verify` only for exceptional, intentional bypasses.
    (dry run) and again with `--apply`, then deploy the backend, then the frontend. The new
    unique indexes can't be built while data is still keyed by user, and that failure is
    only logged at boot.
-7. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
+7. Moving to connectors and the board: add the `write:jira-work` scope to the Atlassian app,
+   stop the API, run `uv run python scripts/migrate_connectors.py` (dry run) and again with
+   `--apply`, then deploy the backend, then the frontend. Existing Jira connections keep
+   syncing but must be reconnected once before board changes can be written back.
+   Once the board looks right, `--apply --drop-legacy` removes `jira_projects` and `tickets`.
+8. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
 
-**Note on ticket freshness:** Jira tickets sync on a polling loop
-(`ticket_sync_interval_seconds`, default 5 min) rather than via Jira webhooks —
-real-time sync would need more Atlassian app configuration than eval 1 warrants.
+**Note on ticket freshness:** Jira issues sync on a polling loop
+(`ticket_sync_interval_seconds`, default 5 min) rather than via Jira webhooks, which need a
+public URL and expire every 30 days. Most runs only read issues updated since the last one;
+a full run, which also drops issues deleted in Jira, happens hourly or from "Sync now".
