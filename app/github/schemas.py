@@ -3,6 +3,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.core.constants import AccessStatus, JobStatus
 from app.core.repo_identity import REPO_FULL_NAME_PATTERN
 
 
@@ -37,8 +38,8 @@ class AvailableRepo(BaseModel):
 class ConnectedRepo(BaseModel):
     repo_full_name: str
     default_branch: str
-    access_status: str = "active"  # active | revoked | needs_install
-    parse_status: str  # pending | in_progress | done | failed
+    access_status: AccessStatus = AccessStatus.ACTIVE
+    parse_status: JobStatus
     parse_error: str | None = None
     indexed_at: datetime | None = None
     graph_stats: dict[str, Any] | None = None

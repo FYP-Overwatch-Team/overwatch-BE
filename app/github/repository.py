@@ -8,6 +8,7 @@ from datetime import datetime
 
 from pymongo import ReturnDocument
 
+from app.core.constants import AccessStatus, JobStatus
 from app.core.exceptions import ForbiddenError, NotFoundError
 from app.core.repo_identity import validate_repo_full_name
 from app.core.time import utcnow
@@ -29,7 +30,7 @@ async def get_connected(workspace_id: str, repo_full_name: str) -> dict:
 async def get_readable(workspace_id: str, repo_full_name: str) -> dict:
     """A connected repo whose GitHub access still stands; its graph is not served after a revoke."""
     repo = await get_connected(workspace_id, repo_full_name)
-    if repo.get("access_status", "active") != "active":
+    if repo.get("access_status", AccessStatus.ACTIVE) != AccessStatus.ACTIVE:
         raise ForbiddenError("GitHub access to this repository was revoked", error_code="repo_access_revoked")
     return repo
 
@@ -60,12 +61,12 @@ async def mark_pending(workspace_id: str, repo_full_name: str, stale_before: dat
             "workspace_id": workspace_id,
             "repo_full_name": repo_full_name,
             "$or": [
-                {"parse_status": {"$nin": ["pending", "in_progress"]}},
-                {"parse_status": "pending", "updated_at": {"$lt": stale_before}},
-                {"parse_status": "in_progress", "parse_started_at": {"$not": {"$gte": stale_before}}},
+                {"parse_status": {"$nin": [JobStatus.PENDING, JobStatus.IN_PROGRESS]}},
+                {"parse_status": JobStatus.PENDING, "updated_at": {"$lt": stale_before}},
+                {"parse_status": JobStatus.IN_PROGRESS, "parse_started_at": {"$not": {"$gte": stale_before}}},
             ],
         },
-        {"$set": {"parse_status": "pending", "parse_error": None, "updated_at": utcnow()}},
+        {"$set": {"parse_status": JobStatus.PENDING, "parse_error": None, "updated_at": utcnow()}},
         return_document=ReturnDocument.AFTER,
     )
 
@@ -102,7 +103,7 @@ async def reattach(installation_id: int, github_repo_ids: list[int]) -> int:
     """Point repos at a (new) installation that can read them again, e.g. after the App is reinstalled."""
     result = await mongo.repos().update_many(
         {"github_repo_id": {"$in": github_repo_ids}},
-        {"$set": {"installation_id": installation_id, "access_status": "active", "updated_at": utcnow()}},
+        {"$set": {"installation_id": installation_id, "access_status": AccessStatus.ACTIVE, "updated_at": utcnow()}},
     )
     return result.modified_count
 

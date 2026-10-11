@@ -12,23 +12,23 @@ from datetime import timedelta
 from app.auth.repository import get_user
 from app.core import security
 from app.core.config import get_settings
+from app.core.constants import Role
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from app.core.time import utcnow
 from app.workspaces import repository
 
-ROLES = ("member", "admin", "owner")
 INVITE_TTL = timedelta(days=7)
 
 
 def rank(role: str) -> int:
-    return ROLES.index(role)
+    return list(Role).index(role)
 
 
 def to_workspace(workspace: dict, membership: dict) -> dict:
     return {"id": workspace["_id"], "name": workspace["name"], "personal": workspace["personal"], "role": membership["role"]}
 
 
-async def require_member(workspace_id: str, user_id: str, min_role: str = "member") -> dict:
+async def require_member(workspace_id: str, user_id: str, min_role: str = Role.MEMBER) -> dict:
     """The caller's membership; 404 to non-members so a workspace's existence never leaks."""
     workspace = await repository.get(workspace_id)
     membership = await repository.membership(workspace_id, user_id) if workspace else None
@@ -45,7 +45,7 @@ async def list_workspaces(user_id: str) -> list[dict]:
 
 async def create(user_id: str, name: str) -> dict:
     workspace = await repository.create(name, user_id)
-    return to_workspace(workspace, {"role": "owner"})
+    return to_workspace(workspace, {"role": Role.OWNER})
 
 
 async def rename(member: dict, name: str) -> dict:
@@ -80,7 +80,7 @@ async def _target(workspace_id: str, user_id: str) -> dict:
 
 
 async def _keep_an_owner(workspace_id: str, target: dict) -> None:
-    if target["role"] == "owner" and await repository.count_owners(workspace_id) <= 1:
+    if target["role"] == Role.OWNER and await repository.count_owners(workspace_id) <= 1:
         raise ConflictError("a workspace needs at least one owner", error_code="last_owner")
 
 
@@ -89,7 +89,7 @@ async def set_role(actor: dict, user_id: str, role: str) -> None:
     target = await _target(workspace_id, user_id)
     if max(rank(role), rank(target["role"])) > rank(actor["role"]):
         raise ForbiddenError("can't change a role above your own", error_code="insufficient_role")
-    if role != "owner":
+    if role != Role.OWNER:
         await _keep_an_owner(workspace_id, target)
     await repository.set_role(workspace_id, user_id, role)
 
@@ -99,7 +99,7 @@ async def remove_member(actor: dict, user_id: str) -> None:
     workspace_id = actor["workspace_id"]
     target = await _target(workspace_id, user_id)
     leaving = user_id == actor["user_id"]
-    if not leaving and (rank(actor["role"]) < rank("admin") or rank(target["role"]) > rank(actor["role"])):
+    if not leaving and (rank(actor["role"]) < rank(Role.ADMIN) or rank(target["role"]) > rank(actor["role"])):
         raise ForbiddenError("can't remove this member", error_code="insufficient_role")
     if actor["workspace"]["personal"] and user_id == actor["workspace"]["created_by"]:
         raise ConflictError("you can't leave your personal workspace", error_code="personal_workspace")

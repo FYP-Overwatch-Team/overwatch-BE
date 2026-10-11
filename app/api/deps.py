@@ -4,6 +4,7 @@ from fastapi import Depends, Header
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.auth.repository import get_user
+from app.core.constants import Role
 from app.core.exceptions import AppError, UnauthorizedError
 from app.core.security import TokenError, verify_access_token
 from app.github.repository import get_readable
@@ -30,7 +31,7 @@ async def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict:
     return user
 
 
-def workspace_member(min_role: str = "member") -> Callable[..., Awaitable[dict]]:
+def workspace_member(min_role: str = Role.MEMBER) -> Callable[..., Awaitable[dict]]:
     """The caller's membership of the workspace named by the X-Workspace-Id header."""
 
     async def dependency(
@@ -43,7 +44,7 @@ def workspace_member(min_role: str = "member") -> Callable[..., Awaitable[dict]]
     return dependency
 
 
-def workspace_member_by_path(min_role: str = "member") -> Callable[..., Awaitable[dict]]:
+def workspace_member_by_path(min_role: str = Role.MEMBER) -> Callable[..., Awaitable[dict]]:
     """Same check for /workspaces/{workspace_id}/... routes, where the workspace is the resource."""
 
     async def dependency(workspace_id: str, user_id: str = Depends(get_current_user_id)) -> dict:

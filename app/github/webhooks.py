@@ -14,6 +14,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.auth.repository import find_user_by_github_id
 from app.core.config import get_settings
+from app.core.constants import AccessStatus, ConnectionStatus, Provider
 from app.core.exceptions import UnauthorizedError
 from app.core.responses import api_router
 from app.core.time import utcnow
@@ -25,7 +26,7 @@ from app.workers import jobs
 router = api_router(prefix="/webhooks", tags=["webhooks"])
 logger = structlog.get_logger("app.webhooks")
 
-INSTALLATION_STATUS = {"deleted": "revoked", "suspend": "revoked", "unsuspend": "active"}
+INSTALLATION_STATUS = {"deleted": AccessStatus.REVOKED, "suspend": AccessStatus.REVOKED, "unsuspend": AccessStatus.ACTIVE}
 
 
 def verify_signature(raw_body: bytes, signature_header: str | None) -> bool:
@@ -120,7 +121,7 @@ async def _on_repo_selection(payload: dict) -> dict:
     if action == "added":
         updated = await repository.reattach(installation_id, repo_ids)
     else:
-        updated = await repository.set_access_status(installation_id, "revoked", github_repo_ids=repo_ids)
+        updated = await repository.set_access_status(installation_id, AccessStatus.REVOKED, github_repo_ids=repo_ids)
     return {"outcome": "accepted", "repos": updated}
 
 
@@ -130,9 +131,9 @@ def _repo_ids(repos: list[dict] | None) -> list[int]:
 
 async def _on_authorization(payload: dict) -> dict:
     """The user revoked the App's access to their account: their GitHub token is dead."""
-    if payload["action"] != "revoked":
+    if payload["action"] != AccessStatus.REVOKED:
         return {"outcome": "ignored"}
     user = await find_user_by_github_id(payload["sender"]["id"])
     if user:
-        await oauth_tokens.set_status(user["_id"], "github", "needs_reauth")
+        await oauth_tokens.set_status(user["_id"], Provider.GITHUB, ConnectionStatus.NEEDS_REAUTH)
     return {"outcome": "accepted"}

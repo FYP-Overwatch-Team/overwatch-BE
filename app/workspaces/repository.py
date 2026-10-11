@@ -8,6 +8,7 @@ from datetime import datetime
 
 from pymongo import ReturnDocument
 
+from app.core.constants import Role
 from app.core.time import utcnow
 from app.db import mongo
 
@@ -29,7 +30,7 @@ async def ensure_personal(user: dict) -> None:
         }},
         upsert=True,
     )
-    await add_member(user["_id"], user["_id"], "owner")
+    await add_member(user["_id"], user["_id"], Role.OWNER)
 
 
 async def create(name: str, created_by: str) -> dict:
@@ -39,7 +40,7 @@ async def create(name: str, created_by: str) -> dict:
         "created_at": now, "updated_at": now, "deleted_at": None,
     }
     await mongo.workspaces().insert_one(doc)
-    await add_member(doc["_id"], created_by, "owner")
+    await add_member(doc["_id"], created_by, Role.OWNER)
     return doc
 
 
@@ -84,7 +85,7 @@ async def list_members(workspace_id: str) -> list[dict]:
 
 
 async def count_owners(workspace_id: str) -> int:
-    return await mongo.workspace_members().count_documents({"workspace_id": workspace_id, "role": "owner"})
+    return await mongo.workspace_members().count_documents({"workspace_id": workspace_id, "role": Role.OWNER})
 
 
 async def set_role(workspace_id: str, user_id: str, role: str) -> None:

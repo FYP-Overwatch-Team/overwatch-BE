@@ -1,6 +1,7 @@
 from fastapi import Depends
 
 from app.api.deps import get_current_user, get_current_user_id, workspace_member_by_path
+from app.core.constants import Role
 from app.core.responses import api_router
 from app.workspaces import service
 from app.workspaces.schemas import (
@@ -17,8 +18,8 @@ from app.workspaces.schemas import (
 router = api_router(tags=["workspaces"])
 
 member = workspace_member_by_path()
-admin = workspace_member_by_path("admin")
-owner = workspace_member_by_path("owner")
+admin = workspace_member_by_path(Role.ADMIN)
+owner = workspace_member_by_path(Role.OWNER)
 
 
 @router.get("/workspaces")

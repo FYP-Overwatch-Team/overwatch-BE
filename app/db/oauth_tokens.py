@@ -13,6 +13,7 @@ from datetime import timedelta
 import structlog
 
 from app.core import security
+from app.core.constants import ConnectionStatus
 from app.core.exceptions import UnauthorizedError
 from app.core.time import utcnow
 from app.db import mongo
@@ -34,7 +35,7 @@ async def save(owner_id: str, provider: str, token_response: dict, **extra) -> N
     fields = {
         "access_token_encrypted": security.encrypt_secret(token_response["access_token"]),
         "expires_at": _expiry(token_response.get("expires_in")),
-        "status": "active",
+        "status": ConnectionStatus.ACTIVE,
         "updated_at": now,
         **extra,
     }
@@ -60,7 +61,7 @@ async def set_status(owner_id: str, provider: str, status: str) -> None:
 async def get_fresh_access_token(owner_id: str, provider: str, refresh: Refresher) -> str:
     """The decrypted access token, refreshed first if it's about to expire."""
     doc = await get(owner_id, provider)
-    if doc is None or doc.get("status") != "active":
+    if doc is None or doc.get("status") != ConnectionStatus.ACTIVE:
         raise _needs_reauth(provider)
 
     expires_at = doc.get("expires_at")
@@ -71,7 +72,7 @@ async def get_fresh_access_token(owner_id: str, provider: str, refresh: Refreshe
 
 async def _refresh(owner_id: str, provider: str, doc: dict, refresh: Refresher) -> dict:
     if not doc.get("refresh_token_encrypted"):
-        await set_status(owner_id, provider, "needs_reauth")
+        await set_status(owner_id, provider, ConnectionStatus.NEEDS_REAUTH)
         raise _needs_reauth(provider)
     try:
         token_response = await refresh(security.decrypt_secret(doc["refresh_token_encrypted"]))
@@ -80,7 +81,7 @@ async def _refresh(owner_id: str, provider: str, doc: dict, refresh: Refresher) 
         latest = await get(owner_id, provider)
         if latest and latest.get("refresh_token_encrypted") != doc["refresh_token_encrypted"]:
             return latest
-        await set_status(owner_id, provider, "needs_reauth")
+        await set_status(owner_id, provider, ConnectionStatus.NEEDS_REAUTH)
         raise
     await save(owner_id, provider, token_response)
     logger.info("oauth_token_refreshed", provider=provider, owner_id=owner_id)

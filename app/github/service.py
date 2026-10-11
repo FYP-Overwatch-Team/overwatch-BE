@@ -12,6 +12,7 @@ import structlog
 from pymongo.errors import DuplicateKeyError
 
 from app.core.config import get_settings
+from app.core.constants import AccessStatus, JobStatus, Provider
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.repo_identity import validate_repo_full_name
 from app.core.time import utcnow
@@ -23,7 +24,7 @@ logger = structlog.get_logger("app.repos")
 
 
 async def user_token(user_id: str) -> str:
-    return await oauth_tokens.get_fresh_access_token(user_id, "github", get_github_app().refresh_user_token)
+    return await oauth_tokens.get_fresh_access_token(user_id, Provider.GITHUB, get_github_app().refresh_user_token)
 
 
 async def list_installations(user_id: str) -> dict:
@@ -93,8 +94,8 @@ async def connect(user_id: str, workspace_id: str, repo_full_name: str) -> dict:
         "installation_id": installation["id"],
         "default_branch": repo.get("default_branch") or "main",
         "private": repo.get("private", False),
-        "access_status": "active",
-        "parse_status": "pending",
+        "access_status": AccessStatus.ACTIVE,
+        "parse_status": JobStatus.PENDING,
         "parse_error": None,
         "connected_at": now,
         "updated_at": now,

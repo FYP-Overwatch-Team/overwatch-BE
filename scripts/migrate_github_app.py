@@ -17,12 +17,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.core.constants import AccessStatus, ConnectionStatus, Provider  # noqa: E402
 from app.db import mongo  # noqa: E402
 
 STEPS = [
-    ("oauth_tokens", {"provider": "github", "refresh_token_encrypted": {"$exists": False}}, {"$set": {"status": "needs_reauth"}}),
+    ("oauth_tokens", {"provider": Provider.GITHUB, "refresh_token_encrypted": {"$exists": False}}, {"$set": {"status": ConnectionStatus.NEEDS_REAUTH}}),
     ("repos", {"webhook_status": {"$exists": True}}, {"$unset": {"webhook_id": "", "webhook_secret_encrypted": "", "webhook_status": "", "webhook_error": ""}}),
-    ("repos", {"installation_id": {"$exists": False}}, {"$set": {"access_status": "needs_install"}}),
+    ("repos", {"installation_id": {"$exists": False}}, {"$set": {"access_status": AccessStatus.NEEDS_INSTALL}}),
 ]
 
 

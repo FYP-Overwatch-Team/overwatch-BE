@@ -3,8 +3,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-Role = Literal["owner", "admin", "member"]
-InviteRole = Literal["admin", "member"]
+from app.core.constants import Role
+
+InviteRole = Literal[Role.ADMIN, Role.MEMBER]
 
 
 class WorkspaceName(BaseModel):
@@ -32,7 +33,7 @@ class UpdateMemberRequest(BaseModel):
 
 
 class CreateInviteRequest(BaseModel):
-    role: InviteRole = "member"
+    role: InviteRole = Role.MEMBER
     # only this GitHub account may accept, when set
     github_login: str | None = Field(default=None, pattern=r"^[A-Za-z0-9-]{1,39}$")
 

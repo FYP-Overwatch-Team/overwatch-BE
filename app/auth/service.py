@@ -13,6 +13,7 @@ import structlog
 
 from app.auth import repository
 from app.core import security
+from app.core.constants import Provider
 from app.core.exceptions import UnauthorizedError
 from app.core.time import utcnow
 from app.db import oauth_tokens
@@ -26,7 +27,7 @@ REFRESH_TOKEN_TTL = timedelta(days=30)
 async def sign_in_with_github(profile: dict, github_tokens: dict) -> str:
     """Upsert the user, keep their GitHub user token, start a session. Returns the raw refresh token."""
     user = await repository.upsert_github_user(profile)
-    await oauth_tokens.save(user["_id"], "github", github_tokens)
+    await oauth_tokens.save(user["_id"], Provider.GITHUB, github_tokens)
     await workspaces.ensure_personal(user)
     return await create_session(user["_id"])
 

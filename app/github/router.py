@@ -1,6 +1,7 @@
 from fastapi import BackgroundTasks, Depends
 
 from app.api.deps import get_current_user_id, workspace_member
+from app.core.constants import Role
 from app.core.responses import api_router
 from app.github import repository, service
 from app.github.schemas import AvailableRepo, ConnectedRepo, ConnectRepoRequest, Installations
@@ -21,7 +22,7 @@ async def list_repos(member: dict = Depends(workspace_member())) -> list[Availab
 
 @router.post("/repos/connect", status_code=201)
 async def connect_repo(
-    body: ConnectRepoRequest, background_tasks: BackgroundTasks, member: dict = Depends(workspace_member("admin")),
+    body: ConnectRepoRequest, background_tasks: BackgroundTasks, member: dict = Depends(workspace_member(Role.ADMIN)),
 ) -> ConnectedRepo:
     repo = await service.connect(member["user_id"], member["workspace_id"], body.repo_full_name)
     background_tasks.add_task(jobs.run_index, repo["repo_full_name"], full=True)
@@ -43,5 +44,5 @@ async def reindex_repo(
 
 
 @router.delete("/repos/{owner}/{name}")
-async def disconnect_repo(owner: str, name: str, member: dict = Depends(workspace_member("admin"))) -> None:
+async def disconnect_repo(owner: str, name: str, member: dict = Depends(workspace_member(Role.ADMIN))) -> None:
     await service.disconnect(member["workspace_id"], f"{owner}/{name}")
