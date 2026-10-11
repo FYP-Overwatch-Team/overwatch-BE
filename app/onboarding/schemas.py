@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.workspaces.schemas import Role
+from app.core.constants import AccessStatus, Role
 
 
 class OnboardingRepo(BaseModel):
@@ -10,7 +10,7 @@ class OnboardingRepo(BaseModel):
     graph_stats: dict[str, Any] | None = None
     parse_status: str
     parse_error: str | None = None
-    access_status: str = "active"
+    access_status: AccessStatus = AccessStatus.ACTIVE
 
 
 class GithubStatus(BaseModel):

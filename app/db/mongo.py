@@ -57,11 +57,28 @@ def index_locks():
     return get_db()["index_locks"]
 
 
+def connections():
+    """One per workspace and provider (Jira, ...): how it's authorised and by whom."""
+    return get_db()["connections"]
+
+
+def sync_targets():
+    """The projects (lists, channels) a connection syncs."""
+    return get_db()["sync_targets"]
+
+
+def work_items():
+    """Board items: mirrored from a tracker (`source` = provider) or created here (`native`)."""
+    return get_db()["work_items"]
+
+
 def jira_projects():
+    """Legacy: replaced by sync_targets; read only by migration scripts."""
     return get_db()["jira_projects"]
 
 
 def tickets():
+    """Legacy: replaced by work_items; read only by migration scripts."""
     return get_db()["tickets"]
 
 
@@ -111,11 +128,14 @@ async def ensure_indexes() -> None:
     # webhook routing: push events carry the repo id, installation events the installation id
     await repos().create_index("github_repo_id")
     await repos().create_index("installation_id")
-    await jira_projects().create_index([("workspace_id", 1), ("project_key", 1)], unique=True)
-    # Must match the sync upsert filter exactly — that keys on ticket_key alone,
-    # so a ticket moved between projects updates rather than duplicating.
-    await tickets().create_index([("workspace_id", 1), ("ticket_key", 1)], unique=True)
-    await tickets().create_index([("workspace_id", 1), ("project_key", 1)])
+    await connections().create_index([("workspace_id", 1), ("provider", 1)], unique=True)
+    await sync_targets().create_index([("workspace_id", 1), ("provider", 1), ("key", 1)], unique=True)
+    await sync_targets().create_index("status")
+    # Must match the sync upsert filter: keyed on the provider's stable id, so an issue
+    # moved between projects (which changes its key) updates rather than duplicating.
+    await work_items().create_index([("workspace_id", 1), ("source", 1), ("external_id", 1)], unique=True)
+    await work_items().create_index([("workspace_id", 1), ("status_category", 1), ("rank", 1)])
+    await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1)])
 
     # Extraction cache: read on every sync to decide what changed, and always
     # scoped to one repository.

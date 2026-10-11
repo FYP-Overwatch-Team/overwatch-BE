@@ -39,15 +39,18 @@ async def connect_jira(client, headers) -> None:
     assert cb.headers["location"].endswith(f"/onboarding/jira?jira=connected&w={headers['X-Workspace-Id']}")
 
 
-async def test_jira_oauth_flow_stores_cloud_id(client):
+async def test_jira_oauth_flow_stores_the_connection(client):
     access = await login(client)
     headers = auth_headers(access)
     await connect_jira(client, headers)
 
-    doc = await mongo.oauth_tokens().find_one({"provider": "jira"})
-    assert doc is not None
-    assert doc["cloud_id"] == "cloud-1"
-    assert doc["status"] == "active"
+    token = await mongo.oauth_tokens().find_one({"provider": "jira"})
+    conn = await mongo.connections().find_one({"provider": "jira"})
+    assert token["status"] == "active"
+    assert conn["external_account"] == {"id": "cloud-1", "name": "acme", "url": "https://acme.atlassian.net"}
+    assert (conn["workspace_id"], conn["connected_by"], conn["auth_backend"]) == (headers["X-Workspace-Id"],) * 2 + ("native_oauth",)
+    # no `scope` in the token response: the requested scopes were granted
+    assert "write:jira-work" in conn["scopes"]
 
 
 async def test_jira_state_mismatch_rejected(client):
@@ -115,22 +118,23 @@ async def test_disconnect_soft_deletes_connection_and_allows_reconnect(client):
     )
     assert connected.status_code == 201
     user = await mongo.users().find_one({})
-    await mongo.tickets().insert_one({
-        "workspace_id": user["_id"], "project_key": "OVR", "ticket_key": "OVR-1",
+    await mongo.work_items().insert_one({
+        "workspace_id": user["_id"], "source": "jira", "target_key": "OVR", "external_id": "1", "key": "OVR-1",
     })
 
     response = await client.delete("/jira/connection", headers=headers)
 
     assert response.status_code == 200
     token = await mongo.oauth_tokens().find_one({"owner_id": user["_id"], "provider": "jira"})
-    project = await mongo.jira_projects().find_one({"workspace_id": user["_id"], "project_key": "OVR"})
+    project = await mongo.sync_targets().find_one({"workspace_id": user["_id"], "key": "OVR"})
     assert token["status"] == "disconnected"
     assert project["status"] == "disconnected"
     assert project["disconnected_at"] is not None
-    assert await mongo.tickets().count_documents({"workspace_id": user["_id"]}) == 1
+    assert (await mongo.connections().find_one({"provider": "jira"}))["status"] == "disconnected"
+    assert await mongo.work_items().count_documents({"workspace_id": user["_id"]}) == 1
 
-    tickets = await client.get("/tickets", headers=headers)
-    assert tickets.json()["data"] == []
+    items = await client.get("/work-items", headers=headers)
+    assert items.json()["data"] == []
 
     await connect_jira(client, headers)
     reconnected = await client.post(
@@ -139,7 +143,7 @@ async def test_disconnect_soft_deletes_connection_and_allows_reconnect(client):
         headers=headers,
     )
     assert reconnected.status_code == 201
-    project = await mongo.jira_projects().find_one({"workspace_id": user["_id"], "project_key": "OVR"})
+    project = await mongo.sync_targets().find_one({"workspace_id": user["_id"], "key": "OVR"})
     assert project["status"] == "active"
     assert project["disconnected_at"] is None
 
@@ -157,9 +161,8 @@ async def test_connect_project_enqueues_sync(client, scheduled):
     assert resp.status_code == 201
     assert resp.json()["data"]["sync_status"] == "pending"
 
-    doc = await mongo.jira_projects().find_one({"project_key": "OVR"})
-    assert doc["cloud_id"] == "cloud-1"
-    assert ("ticket_sync", doc["workspace_id"], "OVR") in scheduled
+    assert resp.json()["data"]["cloud_id"] == "cloud-1"
+    assert ("sync", headers["X-Workspace-Id"], "jira", "OVR") in scheduled
 
     dup = await client.post(
         "/jira/projects/connect",

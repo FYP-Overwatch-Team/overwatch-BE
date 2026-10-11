@@ -5,8 +5,8 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import tickets
 from app.auth.router import router as auth_router
+from app.connectors.router import router as connections_router
 from app.github import checkout
 from app.github.router import router as github_router
 from app.github.webhooks import router as webhooks_router
@@ -14,6 +14,7 @@ from app.graph.router import router as graph_router
 from app.jira.router import router as jira_router
 from app.onboarding.router import router as onboarding_router
 from app.query.router import router as query_router
+from app.work_items.router import router as work_items_router
 from app.workspaces.router import router as workspaces_router
 from app.workers import jobs
 from app.core.config import get_settings
@@ -24,13 +25,13 @@ from app.db import mongo
 from app.db.knowledge_graph_store import get_knowledge_graph_store
 
 
-async def _ticket_sync_loop(interval_seconds: int) -> None:
+async def _tracker_sync_loop(interval_seconds: int) -> None:
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            await jobs.resync_all_projects()
+            await jobs.resync_all_targets()
         except Exception:
-            structlog.get_logger("app.jobs").exception("ticket_sync_loop_error")
+            structlog.get_logger("app.jobs").exception("tracker_sync_loop_error")
 
 
 @asynccontextmanager
@@ -68,7 +69,7 @@ async def lifespan(app: FastAPI):
         structlog.get_logger("app.knowledge_graph").exception("ensure_schema_failed")
 
     sync_task = asyncio.create_task(
-        _ticket_sync_loop(get_settings().ticket_sync_interval_seconds)
+        _tracker_sync_loop(get_settings().ticket_sync_interval_seconds)
     )
     yield
     sync_task.cancel()
@@ -99,7 +100,8 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(onboarding_router)
     app.include_router(graph_router)
     app.include_router(webhooks_router)
-    app.include_router(tickets.router)
+    app.include_router(connections_router)
+    app.include_router(work_items_router)
     app.include_router(query_router)
     app.include_router(workspaces_router)
 

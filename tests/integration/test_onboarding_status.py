@@ -36,8 +36,8 @@ async def test_full_setup_reports_repos_and_project(client):
     headers, user_id = await authed(client)
     await add_repo(user_id, "octocat/hello-world", "in_progress")
     await oauth_tokens.save(user_id, "jira", JIRA_TOKENS, cloud_id="c1")
-    await mongo.jira_projects().insert_one({
-        "workspace_id": user_id, "project_key": "OVR", "sync_status": "done", "status": "active", "connected_at": 1,
+    await mongo.sync_targets().insert_one({
+        "workspace_id": user_id, "provider": "jira", "key": "OVR", "sync_status": "done", "status": "active", "connected_at": 1,
     })
 
     body = (await client.get("/onboarding/status", headers=headers)).json()["data"]
@@ -64,8 +64,8 @@ async def test_ready_once_a_reachable_repo_is_indexed(client):
 
 async def test_disconnected_jira_projects_are_not_reported(client):
     headers, user_id = await authed(client)
-    await mongo.jira_projects().insert_one({
-        "workspace_id": user_id, "project_key": "OLD", "sync_status": "done", "status": "disconnected", "connected_at": 1,
+    await mongo.sync_targets().insert_one({
+        "workspace_id": user_id, "provider": "jira", "key": "OLD", "sync_status": "done", "status": "disconnected", "connected_at": 1,
     })
     assert (await client.get("/onboarding/status", headers=headers)).json()["data"]["jira"]["project"] is None
 

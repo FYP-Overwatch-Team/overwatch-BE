@@ -1,4 +1,4 @@
-"""Background jobs: repository indexing and Jira ticket sync.
+"""Background jobs: repository indexing and tracker (Jira) sync.
 
 Indexing runs under a per-repo lock held in Mongo (`index_locks`), shared by every
 workspace that connected the repo:
@@ -15,7 +15,9 @@ from datetime import timedelta
 import structlog
 from pymongo.errors import DuplicateKeyError
 
+from app.connectors import repository as connectors, sync
 from app.core.config import get_settings
+from app.core.constants import JobStatus
 from app.core.time import utcnow
 from app.db import mongo
 from app.github import checkout, repository
@@ -53,10 +55,10 @@ async def run_index(repo_full_name: str, *, full: bool = False) -> None:
             await _index(repo_full_name, full=pending_full)
         else:
             logger.warning("index_followups_exhausted", repo=repo_full_name)
-        await _release(repo_full_name, "done")
+        await _release(repo_full_name, JobStatus.DONE)
     except Exception as exc:
         logger.exception("index_failed", repo=repo_full_name)
-        await _release(repo_full_name, "failed", error=str(exc))
+        await _release(repo_full_name, JobStatus.FAILED, error=str(exc))
 
 
 async def _index(repo_full_name: str, *, full: bool) -> None:
@@ -101,7 +103,7 @@ async def _claim(repo_full_name: str) -> bool:
         )
     except DuplicateKeyError:
         return False
-    await repository.update_all(repo_full_name, {"parse_status": "in_progress", "parse_started_at": now})
+    await repository.update_all(repo_full_name, {"parse_status": JobStatus.IN_PROGRESS, "parse_started_at": now})
     return True
 
 
@@ -128,50 +130,12 @@ async def _take_pending(repo_full_name: str) -> bool | None:
     return None if doc is None else bool(doc.get("pending_full"))
 
 
-async def run_ticket_sync(workspace_id: str, project_key: str) -> None:
-    """Full ticket pull for one project; sync_status acts as the overlap lock."""
-    from app.services import ticket_service  # local import to avoid a cycle
-
-    claimed = await mongo.jira_projects().find_one_and_update(
-        {
-            "workspace_id": workspace_id,
-            "project_key": project_key,
-            "status": {"$ne": "disconnected"},
-            "sync_status": {"$ne": "in_progress"},
-        },
-        {"$set": {"sync_status": "in_progress", "updated_at": utcnow()}},
-    )
-    if claimed is None:
-        logger.info("ticket_sync_skipped_already_running", project=project_key)
-        return
-
-    try:
-        count = await ticket_service.sync_project(workspace_id, project_key)
-        await mongo.jira_projects().update_one(
-            {"workspace_id": workspace_id, "project_key": project_key},
-            {"$set": {
-                "sync_status": "done",
-                "sync_error": None,
-                "last_synced_at": utcnow(),
-                "updated_at": utcnow(),
-            }},
-        )
-        logger.info("ticket_sync_done", project=project_key, tickets=count)
-    except Exception as exc:
-        logger.exception("ticket_sync_failed", project=project_key)
-        await mongo.jira_projects().update_one(
-            {"workspace_id": workspace_id, "project_key": project_key},
-            {"$set": {
-                "sync_status": "failed",
-                "sync_error": str(exc),
-                "updated_at": utcnow(),
-            }},
-        )
+async def run_connector_sync(workspace_id: str, provider: str, target_key: str) -> None:
+    """Sync one tracker target (a Jira project) into work_items."""
+    await sync.run_work_item_sync(workspace_id, provider, target_key)
 
 
-async def resync_all_projects() -> None:
-    """One polling pass over every connected project (eval-1 choice: polling
-    instead of Jira webhooks — say so if asked why tickets aren't real-time)."""
-    async for project in mongo.jira_projects().find({"status": {"$ne": "disconnected"}}):
-        await run_ticket_sync(project["workspace_id"], project["project_key"])
-
+async def resync_all_targets() -> None:
+    """One polling pass over every connected target (polling, not webhooks: see app/connectors/sync.py)."""
+    async for target in connectors.all_targets():
+        await run_connector_sync(target["workspace_id"], target["provider"], target["key"])

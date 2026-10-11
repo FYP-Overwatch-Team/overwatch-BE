@@ -1,33 +1,75 @@
 {
   "issues": [
     {
+      "id": "10001",
       "key": "OVR-1",
       "fields": {
         "summary": "Set up CI pipeline",
-        "status": {"name": "Done"},
-        "assignee": {"displayName": "Alex Doe"},
-        "priority": {"name": "High"},
-        "updated": "2026-07-10T12:00:00.000+0000"
+        "status": {
+          "name": "Done",
+          "statusCategory": {
+            "key": "done"
+          }
+        },
+        "assignee": {
+          "accountId": "acc-alex",
+          "displayName": "Alex Doe"
+        },
+        "priority": {
+          "name": "High"
+        },
+        "updated": "2026-07-10T12:00:00.000+0000",
+        "issuetype": {
+          "name": "Task"
+        },
+        "created": "2026-07-01T09:00:00.000+0000"
       }
     },
     {
+      "id": "10002",
       "key": "OVR-2",
       "fields": {
         "summary": "Fix login redirect loop",
-        "status": {"name": "In Progress"},
-        "assignee": {"displayName": "Sam Lee"},
-        "priority": {"name": "Highest"},
-        "updated": "2026-07-15T09:30:00.000+0000"
+        "status": {
+          "name": "In Progress",
+          "statusCategory": {
+            "key": "indeterminate"
+          }
+        },
+        "assignee": {
+          "accountId": "acc-sam",
+          "displayName": "Sam Lee"
+        },
+        "priority": {
+          "name": "Highest"
+        },
+        "updated": "2026-07-15T09:30:00.000+0000",
+        "issuetype": {
+          "name": "Task"
+        },
+        "created": "2026-07-02T09:00:00.000+0000"
       }
     },
     {
+      "id": "10003",
       "key": "OVR-3",
       "fields": {
         "summary": "Add graph tooltip",
-        "status": {"name": "To Do"},
+        "status": {
+          "name": "To Do",
+          "statusCategory": {
+            "key": "new"
+          }
+        },
         "assignee": null,
-        "priority": {"name": "Low"},
-        "updated": "2026-07-18T16:45:00.000+0000"
+        "priority": {
+          "name": "Low"
+        },
+        "updated": "2026-07-18T16:45:00.000+0000",
+        "issuetype": {
+          "name": "Task"
+        },
+        "created": "2026-07-03T09:00:00.000+0000"
       }
     }
   ]
