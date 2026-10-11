@@ -45,7 +45,7 @@ async def test_rotated_refresh_token_overwrites_stored_one():
         }))
         await jira_service.access_token("user-1")
 
-    doc = await mongo.oauth_tokens().find_one({"user_id": "user-1", "provider": "jira"})
+    doc = await mongo.oauth_tokens().find_one({"owner_id": "user-1", "provider": "jira"})
     assert security.decrypt_secret(doc["refresh_token_encrypted"]) == "rotated-refresh"
     assert security.decrypt_secret(doc["access_token_encrypted"]) == "new-access"
 
@@ -58,7 +58,7 @@ async def test_rejected_refresh_marks_needs_reauth():
             await jira_service.access_token("user-1")
     assert exc.value.error_code == "jira_needs_reauth"
 
-    doc = await mongo.oauth_tokens().find_one({"user_id": "user-1", "provider": "jira"})
+    doc = await mongo.oauth_tokens().find_one({"owner_id": "user-1", "provider": "jira"})
     assert doc["status"] == "needs_reauth"
 
     # subsequent calls fail fast without hitting Atlassian
@@ -75,6 +75,6 @@ async def test_no_connection_raises_needs_reauth():
 
 async def test_tokens_stored_encrypted():
     await seed_tokens(expires_in_seconds=3600)
-    doc = await mongo.oauth_tokens().find_one({"user_id": "user-1", "provider": "jira"})
+    doc = await mongo.oauth_tokens().find_one({"owner_id": "user-1", "provider": "jira"})
     assert "old-access" not in str(doc)
     assert "old-refresh" not in str(doc)

@@ -8,7 +8,7 @@ from httpx import Response
 from app.db import mongo
 from app.db import oauth_tokens
 from app.workers import jobs
-from tests.integration.test_auth_flow import login
+from tests.integration.test_auth_flow import auth_headers, login
 
 FIXTURES = Path(__file__).parent.parent / "regression" / "fixtures"
 SEARCH_URL = "https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/search/jql"
@@ -29,7 +29,7 @@ async def jira_connected():
         cloud_id="cloud-1",
     )
     await mongo.jira_projects().insert_one({
-        "user_id": USER, "cloud_id": "cloud-1", "project_key": "OVR",
+        "workspace_id": USER, "cloud_id": "cloud-1", "project_key": "OVR",
         "sync_status": "pending", "sync_error": None, "last_synced_at": None,
         "connected_at": 1, "updated_at": 1,
     })
@@ -110,7 +110,7 @@ async def test_sync_lock_prevents_overlap(jira_connected):
 
 async def seed_tickets_for(user_id: str) -> None:
     await mongo.jira_projects().insert_one({
-        "user_id": user_id,
+        "workspace_id": user_id,
         "project_key": "OVR",
         "status": "active",
         "sync_status": "done",
@@ -123,7 +123,7 @@ async def seed_tickets_for(user_id: str) -> None:
 
 async def test_ticket_list_filters_sort_and_pagination(client):
     access = await login(client)
-    headers = {"Authorization": f"Bearer {access}"}
+    headers = auth_headers(access)
     user = await mongo.users().find_one({})
     await seed_tickets_for(user["_id"])
 
@@ -145,7 +145,7 @@ async def test_ticket_list_filters_sort_and_pagination(client):
 
 async def test_tickets_scoped_to_user(client):
     access = await login(client)
-    headers = {"Authorization": f"Bearer {access}"}
+    headers = auth_headers(access)
     await seed_tickets_for("someone-else")
 
     resp = await client.get("/tickets", headers=headers)
@@ -154,7 +154,7 @@ async def test_tickets_scoped_to_user(client):
 
 async def test_resync_all_projects_covers_every_connection(jira_connected):
     await mongo.jira_projects().insert_one({
-        "user_id": "user-2", "cloud_id": "cloud-1", "project_key": "OTHER",
+        "workspace_id": "user-2", "cloud_id": "cloud-1", "project_key": "OTHER",
         "sync_status": "pending", "sync_error": None, "last_synced_at": None,
         "connected_at": 1, "updated_at": 1,
     })

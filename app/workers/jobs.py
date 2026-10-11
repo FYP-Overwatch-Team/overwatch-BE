@@ -1,6 +1,7 @@
 """Background jobs: repository indexing and Jira ticket sync.
 
-Indexing runs under a per-repo lock held in Mongo:
+Indexing runs under a per-repo lock held in Mongo (`index_locks`), shared by every
+workspace that connected the repo:
 - one index per repo at a time, so two runs never write conflicting graphs
 - a lock left by a crashed process is reclaimable after `parse_lock_stale_minutes`
 - a push that arrives mid-index is recorded and run before the lock is released
@@ -12,6 +13,7 @@ owns when it runs and what happens if it fails.
 from datetime import timedelta
 
 import structlog
+from pymongo.errors import DuplicateKeyError
 
 from app.core.config import get_settings
 from app.core.time import utcnow
@@ -30,36 +32,37 @@ logger = structlog.get_logger("app.jobs")
 MAX_FOLLOW_UP_SYNCS = 3
 
 
-async def run_index(user_id: str, repo_full_name: str, *, full: bool = False) -> None:
+async def run_index(repo_full_name: str, *, full: bool = False) -> None:
     """Index a repo: `full` rebuilds from scratch, otherwise only changed files are re-read.
 
+    The graph is shared by every workspace that connected the repo, so this runs once per repo.
     If another index holds the lock, the request is recorded and run by that holder.
     """
-    if not await _claim(user_id, repo_full_name):
-        await _record_pending(user_id, repo_full_name, full)
+    if not await _claim(repo_full_name):
+        await _record_pending(repo_full_name, full)
         logger.info("index_deferred_lock_held", repo=repo_full_name)
         return
 
     try:
-        await _index(user_id, repo_full_name, full=full)
+        await _index(repo_full_name, full=full)
         for _ in range(MAX_FOLLOW_UP_SYNCS):
-            pending_full = await _take_pending(user_id, repo_full_name)
+            pending_full = await _take_pending(repo_full_name)
             if pending_full is None:
                 break
             logger.info("index_draining_pending", repo=repo_full_name, full=pending_full)
-            await _index(user_id, repo_full_name, full=pending_full)
+            await _index(repo_full_name, full=pending_full)
         else:
             logger.warning("index_followups_exhausted", repo=repo_full_name)
-        await _release(user_id, repo_full_name, "done")
+        await _release(repo_full_name, "done")
     except Exception as exc:
         logger.exception("index_failed", repo=repo_full_name)
-        await _release(user_id, repo_full_name, "failed", error=str(exc))
+        await _release(repo_full_name, "failed", error=str(exc))
 
 
-async def _index(user_id: str, repo_full_name: str, *, full: bool) -> None:
-    repo = await repository.find(user_id, repo_full_name)
+async def _index(repo_full_name: str, *, full: bool) -> None:
+    repo = await repository.find_any(repo_full_name)
     if repo is None:
-        return  # disconnected while queued
+        return  # disconnected everywhere while queued
 
     # a graph written by an older builder has a different shape that an incremental diff would keep
     if repo.get("graph_build_version") != GRAPH_BUILD_VERSION and not full:
@@ -69,7 +72,7 @@ async def _index(user_id: str, repo_full_name: str, *, full: bool) -> None:
     try:
         token = await get_github_app().installation_token(repo["installation_id"])
     except InstallationGone:
-        await repository.update(user_id, repo_full_name, {"access_status": "revoked"})
+        await repository.update_all(repo_full_name, {"access_status": "revoked"}, installation_id=repo["installation_id"])
         raise
     workdir = await checkout.update(repo_full_name, token)
     version = await git_cli.current_commit(workdir)
@@ -77,7 +80,7 @@ async def _index(user_id: str, repo_full_name: str, *, full: bool) -> None:
     pipeline = IndexingPipeline(get_facts_store(), get_knowledge_graph_store())
     result = await pipeline.index(repo_full_name, workdir, version, full=full)
 
-    await repository.update(user_id, repo_full_name, {
+    await repository.update_all(repo_full_name, {
         "graph_version": result.version,
         "graph_build_version": result.build_version,
         "graph_stats": result.as_stats_document(),
@@ -85,55 +88,53 @@ async def _index(user_id: str, repo_full_name: str, *, full: bool) -> None:
     })
 
 
-async def _claim(user_id: str, repo_full_name: str) -> bool:
-    """Take the indexing lock, reclaiming one abandoned by a crashed run."""
+async def _claim(repo_full_name: str) -> bool:
+    """Take the repo's indexing lock, reclaiming one abandoned by a crashed run."""
     now = utcnow()
     stale_before = now - timedelta(minutes=get_settings().parse_lock_stale_minutes)
-    claimed = await mongo.repos().find_one_and_update(
-        {
-            "user_id": user_id,
-            "repo_full_name": repo_full_name,
-            "$or": [
-                {"parse_status": {"$ne": "in_progress"}},
-                {"parse_started_at": {"$lt": stale_before}},
-                # held by a version that didn't record a start time: treat as abandoned
-                {"parse_started_at": None},
-            ],
-        },
-        {"$set": {"parse_status": "in_progress", "parse_started_at": now, "updated_at": now}},
-    )
-    return claimed is not None
+    try:
+        # a held lock doesn't match, so the upsert collides with it on _id
+        await mongo.index_locks().update_one(
+            {"_id": repo_full_name, "$or": [{"started_at": None}, {"started_at": {"$lt": stale_before}}]},
+            {"$set": {"started_at": now}},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        return False
+    await repository.update_all(repo_full_name, {"parse_status": "in_progress", "parse_started_at": now})
+    return True
 
 
-async def _release(user_id: str, repo_full_name: str, status: str, error: str | None = None) -> None:
-    await repository.update(user_id, repo_full_name, {
+async def _release(repo_full_name: str, status: str, error: str | None = None) -> None:
+    await repository.update_all(repo_full_name, {
         "parse_status": status, "parse_error": error, "parse_started_at": None,
     })
+    await mongo.index_locks().update_one({"_id": repo_full_name}, {"$set": {"started_at": None}})
 
 
-async def _record_pending(user_id: str, repo_full_name: str, full: bool) -> None:
+async def _record_pending(repo_full_name: str, full: bool) -> None:
     fields = {"sync_requested_at": utcnow()}
     if full:
         fields["pending_full"] = True  # never downgraded by a later incremental request
-    await mongo.repos().update_one({"user_id": user_id, "repo_full_name": repo_full_name}, {"$set": fields})
+    await mongo.index_locks().update_one({"_id": repo_full_name}, {"$set": fields})
 
 
-async def _take_pending(user_id: str, repo_full_name: str) -> bool | None:
+async def _take_pending(repo_full_name: str) -> bool | None:
     """Atomically claim and clear queued work. Returns whether it's a full index, or None."""
-    doc = await mongo.repos().find_one_and_update(
-        {"user_id": user_id, "repo_full_name": repo_full_name, "sync_requested_at": {"$ne": None}},
+    doc = await mongo.index_locks().find_one_and_update(
+        {"_id": repo_full_name, "sync_requested_at": {"$ne": None}},
         {"$set": {"sync_requested_at": None, "pending_full": False}},
     )
     return None if doc is None else bool(doc.get("pending_full"))
 
 
-async def run_ticket_sync(user_id: str, project_key: str) -> None:
+async def run_ticket_sync(workspace_id: str, project_key: str) -> None:
     """Full ticket pull for one project; sync_status acts as the overlap lock."""
     from app.services import ticket_service  # local import to avoid a cycle
 
     claimed = await mongo.jira_projects().find_one_and_update(
         {
-            "user_id": user_id,
+            "workspace_id": workspace_id,
             "project_key": project_key,
             "status": {"$ne": "disconnected"},
             "sync_status": {"$ne": "in_progress"},
@@ -145,9 +146,9 @@ async def run_ticket_sync(user_id: str, project_key: str) -> None:
         return
 
     try:
-        count = await ticket_service.sync_project(user_id, project_key)
+        count = await ticket_service.sync_project(workspace_id, project_key)
         await mongo.jira_projects().update_one(
-            {"user_id": user_id, "project_key": project_key},
+            {"workspace_id": workspace_id, "project_key": project_key},
             {"$set": {
                 "sync_status": "done",
                 "sync_error": None,
@@ -159,7 +160,7 @@ async def run_ticket_sync(user_id: str, project_key: str) -> None:
     except Exception as exc:
         logger.exception("ticket_sync_failed", project=project_key)
         await mongo.jira_projects().update_one(
-            {"user_id": user_id, "project_key": project_key},
+            {"workspace_id": workspace_id, "project_key": project_key},
             {"$set": {
                 "sync_status": "failed",
                 "sync_error": str(exc),
@@ -172,5 +173,5 @@ async def resync_all_projects() -> None:
     """One polling pass over every connected project (eval-1 choice: polling
     instead of Jira webhooks — say so if asked why tickets aren't real-time)."""
     async for project in mongo.jira_projects().find({"status": {"$ne": "disconnected"}}):
-        await run_ticket_sync(project["user_id"], project["project_key"])
+        await run_ticket_sync(project["workspace_id"], project["project_key"])
 

@@ -16,6 +16,7 @@ from app.core import security
 from app.core.exceptions import UnauthorizedError
 from app.core.time import utcnow
 from app.db import oauth_tokens
+from app.workspaces import repository as workspaces
 
 logger = structlog.get_logger("app.auth")
 
@@ -26,6 +27,7 @@ async def sign_in_with_github(profile: dict, github_tokens: dict) -> str:
     """Upsert the user, keep their GitHub user token, start a session. Returns the raw refresh token."""
     user = await repository.upsert_github_user(profile)
     await oauth_tokens.save(user["_id"], "github", github_tokens)
+    await workspaces.ensure_personal(user)
     return await create_session(user["_id"])
 
 

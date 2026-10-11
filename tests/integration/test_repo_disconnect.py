@@ -14,7 +14,7 @@ from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
     use_knowledge_graph_store,
 )
-from tests.integration.test_auth_flow import login
+from tests.integration.test_auth_flow import auth_headers, login
 
 REPO = "octocat/hello-world"
 
@@ -32,7 +32,7 @@ def stores():
 async def seed_everything(user_id: str, facts, graph, checkout_root) -> None:
     now = datetime.now(timezone.utc)
     await mongo.repos().insert_one({
-        "user_id": user_id, "repo_full_name": REPO, "default_branch": "main",
+        "workspace_id": user_id, "repo_full_name": REPO, "default_branch": "main",
         "installation_id": 9, "access_status": "active", "parse_status": "done",
         "connected_at": now, "updated_at": now,
     })
@@ -66,7 +66,7 @@ async def test_disconnect_removes_every_trace(client, stores, checkout_root):
     assert checkout.exists()
 
     response = await client.delete(
-        f"/github/repos/{REPO}", headers={"Authorization": f"Bearer {access}"},
+        f"/github/repos/{REPO}", headers=auth_headers(access),
     )
 
     assert response.status_code == 200
@@ -82,7 +82,7 @@ async def test_disconnecting_an_unconnected_repository_is_a_404(client, stores, 
 
     response = await client.delete(
         "/github/repos/someone/never-connected",
-        headers={"Authorization": f"Bearer {access}"},
+        headers=auth_headers(access),
     )
 
     assert response.status_code == 404
@@ -96,12 +96,12 @@ async def test_one_user_cannot_disconnect_another_users_repository(client, store
     await seed_everything("someone-else", facts, graph, checkout_root)
 
     response = await client.delete(
-        f"/github/repos/{REPO}", headers={"Authorization": f"Bearer {access}"},
+        f"/github/repos/{REPO}", headers=auth_headers(access),
     )
 
     assert response.status_code == 404
     # The other user's connection and data are untouched.
-    assert await mongo.repos().find_one({"user_id": "someone-else"}) is not None
+    assert await mongo.repos().find_one({"workspace_id": "someone-else"}) is not None
     assert await graph.node_ids(REPO) != set()
 
 
@@ -114,23 +114,23 @@ async def test_shared_repositories_keep_their_data_until_the_last_user_leaves(
     await seed_everything(user["_id"], facts, graph, checkout_root)
     now = datetime.now(timezone.utc)
     await mongo.repos().insert_one({
-        "user_id": "other-user", "repo_full_name": REPO, "default_branch": "main",
+        "workspace_id": "other-user", "repo_full_name": REPO, "default_branch": "main",
         "installation_id": 9, "access_status": "active", "parse_status": "done",
         "connected_at": now, "updated_at": now,
     })
 
-    await client.delete(f"/github/repos/{REPO}", headers={"Authorization": f"Bearer {access}"})
+    await client.delete(f"/github/repos/{REPO}", headers=auth_headers(access))
 
     # The graph and facts are shared; the other user still has it connected.
     assert await graph.node_ids(REPO) != set()
     assert await facts.load_all(REPO) != {}
-    assert await mongo.repos().find_one({"user_id": "other-user"}) is not None
+    assert await mongo.repos().find_one({"workspace_id": "other-user"}) is not None
 
 
 @pytest.mark.parametrize("path", ["/github/repos/../../etc/passwd", "/github/repos/owner/..%2F.."])
 async def test_disconnect_rejects_path_traversal(client, stores, checkout_root, path):
     access = await login(client)
 
-    response = await client.delete(path, headers={"Authorization": f"Bearer {access}"})
+    response = await client.delete(path, headers=auth_headers(access))
 
     assert response.status_code in (400, 404, 422)

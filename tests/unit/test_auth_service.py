@@ -26,7 +26,7 @@ async def test_sign_in_creates_then_updates_user():
 
 async def test_github_token_stored_encrypted():
     user = await _sign_in(token="ghu_supersecret")
-    doc = await mongo.oauth_tokens().find_one({"user_id": user["_id"], "provider": "github"})
+    doc = await mongo.oauth_tokens().find_one({"owner_id": user["_id"], "provider": "github"})
     assert "ghu_supersecret" not in str(doc) and "ghr_token" not in str(doc)
     assert security.decrypt_secret(doc["access_token_encrypted"]) == "ghu_supersecret"
     assert doc["expires_at"] is not None

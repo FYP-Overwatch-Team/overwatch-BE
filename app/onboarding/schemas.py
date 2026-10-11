@@ -2,6 +2,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from app.workspaces.schemas import Role
+
 
 class OnboardingRepo(BaseModel):
     repo_full_name: str
@@ -30,6 +32,7 @@ class JiraStatus(BaseModel):
 
 
 class OnboardingStatus(BaseModel):
+    role: Role  # only admins connect repos and Jira
     github: GithubStatus
     jira: JiraStatus
     ready: bool  # at least one reachable repo is indexed; Jira is optional

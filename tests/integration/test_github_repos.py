@@ -9,7 +9,7 @@ from httpx import Response
 from app.core.time import utcnow
 from app.db import mongo
 from app.github import repository
-from tests.integration.test_auth_flow import login
+from tests.integration.test_auth_flow import auth_headers, login
 
 REPO = "octocat/hello-world"
 API = "https://api.github.com"
@@ -22,7 +22,7 @@ def repo_payload(full_name: str = REPO, repo_id: int = 1) -> dict:
 
 @pytest.fixture
 async def headers(client) -> dict:
-    return {"Authorization": f"Bearer {await login(client)}"}
+    return auth_headers(await login(client))
 
 
 def mock_connect(router, *, repo=200, installation=200):
@@ -120,7 +120,7 @@ async def test_connect_records_the_installation_and_queues_a_full_index(client, 
     assert resp.json()["data"]["parse_status"] == "pending"
     doc = await mongo.repos().find_one({"repo_full_name": REPO})
     assert (doc["installation_id"], doc["github_repo_id"], doc["access_status"]) == (9, 1, "active")
-    assert record_jobs == [("index", doc["user_id"], REPO, True)]
+    assert record_jobs == [("index", REPO, True)]
 
     # the installation lookup is an app-level call, signed with the App's private key
     app_jwt = installation_route.calls.last.request.headers["authorization"].removeprefix("Bearer ")

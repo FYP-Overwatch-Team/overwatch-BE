@@ -42,11 +42,11 @@ async def list_installations(user_id: str) -> dict:
     }
 
 
-async def list_repos(user_id: str) -> list[dict]:
+async def list_repos(user_id: str, workspace_id: str) -> list[dict]:
     """Every repo the user could connect, across all their installations."""
     github = get_github_app()
     token = await user_token(user_id)
-    connected = {repo["repo_full_name"] for repo in await repository.list_for_user(user_id)}
+    connected = {repo["repo_full_name"] for repo in await repository.list_for_workspace(workspace_id)}
 
     installations = await github.list_user_installations(token)
     # one request chain per installation, run side by side; any failure fails the whole list
@@ -66,10 +66,13 @@ async def list_repos(user_id: str) -> list[dict]:
     return sorted(repos, key=lambda repo: repo["full_name"].lower())
 
 
-async def connect(user_id: str, repo_full_name: str) -> dict:
-    """Record the repo; the background index clones it, so this returns quickly."""
+async def connect(user_id: str, workspace_id: str, repo_full_name: str) -> dict:
+    """Record the repo; the background index clones it, so this returns quickly.
+
+    The user's own token decides what they may connect; the workspace then owns the connection.
+    """
     validate_repo_full_name(repo_full_name)
-    if await repository.find(user_id, repo_full_name):
+    if await repository.find(workspace_id, repo_full_name):
         raise ConflictError("repository already connected", error_code="repo_already_connected")
 
     github = get_github_app()
@@ -83,7 +86,8 @@ async def connect(user_id: str, repo_full_name: str) -> dict:
 
     now = utcnow()
     doc = {
-        "user_id": user_id,
+        "workspace_id": workspace_id,
+        "connected_by": user_id,
         "repo_full_name": repo["full_name"],
         "github_repo_id": repo["id"],
         "installation_id": installation["id"],
@@ -102,21 +106,21 @@ async def connect(user_id: str, repo_full_name: str) -> dict:
     return doc
 
 
-async def request_index(user_id: str, repo_full_name: str) -> dict:
+async def request_index(workspace_id: str, repo_full_name: str) -> dict:
     """Retry a failed index. 409 while one is already queued or running."""
-    await repository.get_connected(user_id, repo_full_name)
+    await repository.get_connected(workspace_id, repo_full_name)
     stale_before = utcnow() - timedelta(minutes=get_settings().parse_lock_stale_minutes)
-    repo = await repository.mark_pending(user_id, repo_full_name, stale_before)
+    repo = await repository.mark_pending(workspace_id, repo_full_name, stale_before)
     if repo is None:
         raise ConflictError("repository indexing is already running", error_code="index_already_running")
     return repo
 
 
-async def disconnect(user_id: str, repo_full_name: str) -> None:
-    """Forget the repo; its checkout, facts and graph go once no other user has it connected."""
-    await repository.get_connected(user_id, repo_full_name)
-    shared = await repository.connected_by_others(repo_full_name, user_id)
-    await repository.delete(user_id, repo_full_name)
+async def disconnect(workspace_id: str, repo_full_name: str) -> None:
+    """Forget the repo; its checkout, facts and graph go once no other workspace has it connected."""
+    await repository.get_connected(workspace_id, repo_full_name)
+    shared = await repository.connected_elsewhere(repo_full_name, workspace_id)
+    await repository.delete(workspace_id, repo_full_name)
     if not shared:
         await _purge(repo_full_name)
     logger.info("repo_disconnected", repo=repo_full_name, purged=not shared)

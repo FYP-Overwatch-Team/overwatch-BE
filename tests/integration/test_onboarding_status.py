@@ -1,7 +1,7 @@
 import respx
 
 from app.db import mongo, oauth_tokens
-from tests.integration.test_auth_flow import login
+from tests.integration.test_auth_flow import auth_headers, login
 
 JIRA_TOKENS = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
 
@@ -9,12 +9,12 @@ JIRA_TOKENS = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
 async def authed(client) -> tuple[dict, str]:
     access = await login(client)
     user = await mongo.users().find_one({})
-    return {"Authorization": f"Bearer {access}"}, user["_id"]
+    return auth_headers(access), user["_id"]
 
 
-async def add_repo(user_id: str, name: str, parse_status: str, access_status: str = "active") -> None:
+async def add_repo(workspace_id: str, name: str, parse_status: str, access_status: str = "active") -> None:
     await mongo.repos().insert_one({
-        "user_id": user_id, "repo_full_name": name, "parse_status": parse_status,
+        "workspace_id": workspace_id, "repo_full_name": name, "parse_status": parse_status,
         "access_status": access_status, "connected_at": len(name),
     })
 
@@ -25,6 +25,7 @@ async def test_signed_in_user_has_nothing_connected(client):
         body = (await client.get("/onboarding/status", headers=headers)).json()["data"]
 
     assert body == {
+        "role": "owner",
         "github": {"authorized": True, "needs_reauth": False, "repos": []},
         "jira": {"connected": False, "needs_reauth": False, "project": None},
         "ready": False,
@@ -36,7 +37,7 @@ async def test_full_setup_reports_repos_and_project(client):
     await add_repo(user_id, "octocat/hello-world", "in_progress")
     await oauth_tokens.save(user_id, "jira", JIRA_TOKENS, cloud_id="c1")
     await mongo.jira_projects().insert_one({
-        "user_id": user_id, "project_key": "OVR", "sync_status": "done", "status": "active", "connected_at": 1,
+        "workspace_id": user_id, "project_key": "OVR", "sync_status": "done", "status": "active", "connected_at": 1,
     })
 
     body = (await client.get("/onboarding/status", headers=headers)).json()["data"]
@@ -64,7 +65,7 @@ async def test_ready_once_a_reachable_repo_is_indexed(client):
 async def test_disconnected_jira_projects_are_not_reported(client):
     headers, user_id = await authed(client)
     await mongo.jira_projects().insert_one({
-        "user_id": user_id, "project_key": "OLD", "sync_status": "done", "status": "disconnected", "connected_at": 1,
+        "workspace_id": user_id, "project_key": "OLD", "sync_status": "done", "status": "disconnected", "connected_at": 1,
     })
     assert (await client.get("/onboarding/status", headers=headers)).json()["data"]["jira"]["project"] is None
 

@@ -1,7 +1,7 @@
 """Connected repositories (the `repos` collection).
 
-A repo doc belongs to one user. Several users can connect the same repo; the
-checkout, facts and graph are keyed by repo name and shared between them.
+A repo doc belongs to one workspace. Several workspaces can connect the same repo;
+the checkout, facts and graph are keyed by repo name and shared between them.
 """
 
 from datetime import datetime
@@ -14,42 +14,42 @@ from app.core.time import utcnow
 from app.db import mongo
 
 
-async def find(user_id: str, repo_full_name: str) -> dict | None:
-    return await mongo.repos().find_one({"user_id": user_id, "repo_full_name": repo_full_name})
+async def find(workspace_id: str, repo_full_name: str) -> dict | None:
+    return await mongo.repos().find_one({"workspace_id": workspace_id, "repo_full_name": repo_full_name})
 
 
-async def get_connected(user_id: str, repo_full_name: str) -> dict:
+async def get_connected(workspace_id: str, repo_full_name: str) -> dict:
     validate_repo_full_name(repo_full_name)
-    repo = await find(user_id, repo_full_name)
+    repo = await find(workspace_id, repo_full_name)
     if repo is None:
         raise NotFoundError("repository is not connected", error_code="repo_not_connected")
     return repo
 
 
-async def get_readable(user_id: str, repo_full_name: str) -> dict:
+async def get_readable(workspace_id: str, repo_full_name: str) -> dict:
     """A connected repo whose GitHub access still stands; its graph is not served after a revoke."""
-    repo = await get_connected(user_id, repo_full_name)
+    repo = await get_connected(workspace_id, repo_full_name)
     if repo.get("access_status", "active") != "active":
         raise ForbiddenError("GitHub access to this repository was revoked", error_code="repo_access_revoked")
     return repo
 
 
-async def list_for_user(user_id: str) -> list[dict]:
-    return [doc async for doc in mongo.repos().find({"user_id": user_id}).sort("connected_at", 1)]
+async def list_for_workspace(workspace_id: str) -> list[dict]:
+    return [doc async for doc in mongo.repos().find({"workspace_id": workspace_id}).sort("connected_at", 1)]
 
 
 async def insert(doc: dict) -> None:
     await mongo.repos().insert_one(doc)
 
 
-async def update(user_id: str, repo_full_name: str, fields: dict) -> None:
+async def update(workspace_id: str, repo_full_name: str, fields: dict) -> None:
     await mongo.repos().update_one(
-        {"user_id": user_id, "repo_full_name": repo_full_name},
+        {"workspace_id": workspace_id, "repo_full_name": repo_full_name},
         {"$set": {**fields, "updated_at": utcnow()}},
     )
 
 
-async def mark_pending(user_id: str, repo_full_name: str, stale_before: datetime) -> dict | None:
+async def mark_pending(workspace_id: str, repo_full_name: str, stale_before: datetime) -> dict | None:
     """Queue a re-index unless one is already queued or running; returns None if it is.
 
     A queue or run older than `stale_before` was lost to a restart, so it can be retried; that's the
@@ -57,7 +57,7 @@ async def mark_pending(user_id: str, repo_full_name: str, stale_before: datetime
     """
     return await mongo.repos().find_one_and_update(
         {
-            "user_id": user_id,
+            "workspace_id": workspace_id,
             "repo_full_name": repo_full_name,
             "$or": [
                 {"parse_status": {"$nin": ["pending", "in_progress"]}},
@@ -70,18 +70,31 @@ async def mark_pending(user_id: str, repo_full_name: str, stale_before: datetime
     )
 
 
-async def delete(user_id: str, repo_full_name: str) -> None:
-    await mongo.repos().delete_one({"user_id": user_id, "repo_full_name": repo_full_name})
+async def delete(workspace_id: str, repo_full_name: str) -> None:
+    await mongo.repos().delete_one({"workspace_id": workspace_id, "repo_full_name": repo_full_name})
 
 
-async def connected_by_others(repo_full_name: str, user_id: str) -> bool:
+async def connected_elsewhere(repo_full_name: str, workspace_id: str) -> bool:
     return await mongo.repos().count_documents(
-        {"repo_full_name": repo_full_name, "user_id": {"$ne": user_id}}, limit=1,
+        {"repo_full_name": repo_full_name, "workspace_id": {"$ne": workspace_id}}, limit=1,
     ) > 0
 
 
+async def find_any(repo_full_name: str) -> dict | None:
+    """One connection of the repo, preferring one GitHub still lets us read."""
+    return await mongo.repos().find_one({"repo_full_name": repo_full_name}, sort=[("access_status", 1)])
+
+
+async def update_all(repo_full_name: str, fields: dict, *, installation_id: int | None = None) -> None:
+    """Every workspace's connection of the repo shares one index, so they're updated together."""
+    query: dict = {"repo_full_name": repo_full_name}
+    if installation_id is not None:
+        query["installation_id"] = installation_id
+    await mongo.repos().update_many(query, {"$set": {**fields, "updated_at": utcnow()}})
+
+
 async def find_by_github_repo(github_repo_id: int, installation_id: int) -> list[dict]:
-    """Every user's connection of one repo through one installation."""
+    """Every workspace's connection of one repo through one installation."""
     return [doc async for doc in mongo.repos().find({"github_repo_id": github_repo_id, "installation_id": installation_id})]
 
 

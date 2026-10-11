@@ -2,19 +2,19 @@ from app.db import mongo
 from app.knowledge_graph.build.ids import module_id
 from app.db.knowledge_graph_store import get_knowledge_graph_store
 from tests.graph_fixtures import GraphSeed
-from tests.integration.test_auth_flow import login
+from tests.integration.test_auth_flow import auth_headers, login
 
 REPO = "octocat/hello-world"
 
 
 async def authed(client) -> dict:
     access = await login(client)
-    return {"Authorization": f"Bearer {access}"}
+    return auth_headers(access)
 
 
 async def seed_connected_repo_with_graph(user_id: str) -> None:
     await mongo.repos().insert_one({
-        "user_id": user_id, "repo_full_name": REPO, "default_branch": "main",
+        "workspace_id": user_id, "repo_full_name": REPO, "default_branch": "main",
         "parse_status": "done",
         "parse_error": None, "connected_at": 1, "updated_at": 1,
     })

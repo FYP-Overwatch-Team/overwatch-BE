@@ -80,11 +80,11 @@ def record_jobs(monkeypatch):
     """Background jobs a request scheduled, recorded instead of run."""
     calls: list[tuple] = []
 
-    async def run_index(user_id, repo_full_name, *, full=False):
-        calls.append(("index", user_id, repo_full_name, full))
+    async def run_index(repo_full_name, *, full=False):
+        calls.append(("index", repo_full_name, full))
 
-    async def run_ticket_sync(user_id, project_key):
-        calls.append(("ticket_sync", user_id, project_key))
+    async def run_ticket_sync(workspace_id, project_key):
+        calls.append(("ticket_sync", workspace_id, project_key))
 
     monkeypatch.setattr(jobs, "run_index", run_index)
     monkeypatch.setattr(jobs, "run_ticket_sync", run_ticket_sync)

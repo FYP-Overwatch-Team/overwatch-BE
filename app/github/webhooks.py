@@ -84,21 +84,17 @@ async def _first_delivery(delivery_id: str, event: str) -> bool:
 
 async def _on_push(payload: dict, background_tasks: BackgroundTasks) -> dict:
     repos = await repository.find_by_github_repo(payload["repository"]["id"], payload["installation"]["id"])
-    targets = [
-        (repo["user_id"], repo["repo_full_name"])
+    # every workspace's connection shares one graph, so the repo is indexed once
+    targets = sorted({
+        repo["repo_full_name"]
         for repo in repos
         if payload.get("ref") == f"refs/heads/{repo['default_branch']}"
-    ]
+    })
     if not targets:
         return {"outcome": "ignored"}
-    # one task, run in turn: every target shares the repo's checkout and graph
-    background_tasks.add_task(_reindex_in_turn, targets)
+    for repo_full_name in targets:
+        background_tasks.add_task(jobs.run_index, repo_full_name)
     return {"outcome": "accepted", "repos": len(targets)}
-
-
-async def _reindex_in_turn(targets: list[tuple[str, str]]) -> None:
-    for user_id, repo_full_name in targets:
-        await jobs.run_index(user_id, repo_full_name)
 
 
 async def _on_installation(payload: dict) -> dict:

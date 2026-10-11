@@ -52,12 +52,29 @@ def repos():
     return get_db()["repos"]
 
 
+def index_locks():
+    """One doc per repo: the indexing lock and any work queued behind it."""
+    return get_db()["index_locks"]
+
+
 def jira_projects():
     return get_db()["jira_projects"]
 
 
 def tickets():
     return get_db()["tickets"]
+
+
+def workspaces():
+    return get_db()["workspaces"]
+
+
+def workspace_members():
+    return get_db()["workspace_members"]
+
+
+def workspace_invites():
+    return get_db()["workspace_invites"]
 
 
 def webhook_deliveries():
@@ -84,17 +101,21 @@ async def ensure_indexes() -> None:
     await refresh_tokens().create_index("expires_at", expireAfterSeconds=0)
 
     await users().create_index("github_id", unique=True)
-    await oauth_tokens().create_index([("user_id", 1), ("provider", 1)], unique=True)
-    await repos().create_index([("user_id", 1), ("repo_full_name", 1)], unique=True)
+    await workspace_members().create_index([("workspace_id", 1), ("user_id", 1)], unique=True)
+    await workspace_members().create_index("user_id")
+    await workspace_invites().create_index("token_hash", unique=True)
+    await workspace_invites().create_index("workspace_id")
+    await oauth_tokens().create_index([("owner_id", 1), ("provider", 1)], unique=True)
+    await repos().create_index([("workspace_id", 1), ("repo_full_name", 1)], unique=True)
     await repos().create_index("repo_full_name")
     # webhook routing: push events carry the repo id, installation events the installation id
     await repos().create_index("github_repo_id")
     await repos().create_index("installation_id")
-    await jira_projects().create_index([("user_id", 1), ("project_key", 1)], unique=True)
+    await jira_projects().create_index([("workspace_id", 1), ("project_key", 1)], unique=True)
     # Must match the sync upsert filter exactly — that keys on ticket_key alone,
     # so a ticket moved between projects updates rather than duplicating.
-    await tickets().create_index([("user_id", 1), ("ticket_key", 1)], unique=True)
-    await tickets().create_index([("user_id", 1), ("project_key", 1)])
+    await tickets().create_index([("workspace_id", 1), ("ticket_key", 1)], unique=True)
+    await tickets().create_index([("workspace_id", 1), ("project_key", 1)])
 
     # Extraction cache: read on every sync to decide what changed, and always
     # scoped to one repository.

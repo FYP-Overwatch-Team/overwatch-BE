@@ -17,7 +17,7 @@ from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
     use_knowledge_graph_store,
 )
-from tests.integration.test_auth_flow import login
+from tests.integration.test_auth_flow import auth_headers, login
 
 REPO = "octocat/hello-world"
 OTHER_REPO = "someone-else/private"
@@ -105,13 +105,13 @@ async def ready(client, graph):
     user = await mongo.users().find_one({})
     now = datetime.now(timezone.utc)
     await mongo.repos().insert_one({
-        "user_id": user["_id"], "repo_full_name": REPO, "default_branch": "main",
+        "workspace_id": user["_id"], "repo_full_name": REPO, "default_branch": "main",
         "parse_status": "done", "graph_version": "sha-1",
         "connected_at": now, "updated_at": now,
     })
     await graph.apply(seed_delta(REPO))
     await graph.apply(seed_delta(OTHER_REPO))
-    return {"Authorization": f"Bearer {access}"}
+    return auth_headers(access)
 
 
 async def view(client, headers, **body):

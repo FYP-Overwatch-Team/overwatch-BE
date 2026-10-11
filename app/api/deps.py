@@ -1,10 +1,13 @@
-from fastapi import Depends
+from collections.abc import Awaitable, Callable
+
+from fastapi import Depends, Header
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.auth.repository import get_user
-from app.core.exceptions import UnauthorizedError
+from app.core.exceptions import AppError, UnauthorizedError
 from app.core.security import TokenError, verify_access_token
 from app.github.repository import get_readable
+from app.workspaces.service import require_member
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -27,12 +30,32 @@ async def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict:
     return user
 
 
-async def require_connected_repo(
-    repo_full_name: str, user_id: str = Depends(get_current_user_id),
-) -> dict:
+def workspace_member(min_role: str = "member") -> Callable[..., Awaitable[dict]]:
+    """The caller's membership of the workspace named by the X-Workspace-Id header."""
+
+    async def dependency(
+        x_workspace_id: str | None = Header(default=None), user_id: str = Depends(get_current_user_id),
+    ) -> dict:
+        if not x_workspace_id:
+            raise AppError("X-Workspace-Id header is required", error_code="workspace_required")
+        return await require_member(x_workspace_id, user_id, min_role)
+
+    return dependency
+
+
+def workspace_member_by_path(min_role: str = "member") -> Callable[..., Awaitable[dict]]:
+    """Same check for /workspaces/{workspace_id}/... routes, where the workspace is the resource."""
+
+    async def dependency(workspace_id: str, user_id: str = Depends(get_current_user_id)) -> dict:
+        return await require_member(workspace_id, user_id, min_role)
+
+    return dependency
+
+
+async def require_connected_repo(repo_full_name: str, member: dict = Depends(workspace_member())) -> dict:
     """Authorise access to one repo's graph; every graph route depends on this.
 
     Node ids embed the repo name, so without one check in front of them a crafted
     id could read another tenant's subgraph.
     """
-    return await get_readable(user_id, repo_full_name)
+    return await get_readable(member["workspace_id"], repo_full_name)

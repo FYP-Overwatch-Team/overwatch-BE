@@ -15,9 +15,9 @@ def scheduled(record_jobs):
     return record_jobs
 
 
-async def connect(user_id: str, *, repo_id: int = 1, installation_id: int = 9, branch: str = "main") -> None:
+async def connect(workspace_id: str, *, repo_id: int = 1, installation_id: int = 9, branch: str = "main") -> None:
     await mongo.repos().insert_one({
-        "user_id": user_id, "repo_full_name": REPO, "github_repo_id": repo_id,
+        "workspace_id": workspace_id, "repo_full_name": REPO, "github_repo_id": repo_id,
         "installation_id": installation_id, "default_branch": branch,
         "access_status": "active", "parse_status": "done",
     })
@@ -45,17 +45,17 @@ async def deliver(client, event: str, payload: dict, *, secret: str = SECRET, de
 
 
 async def statuses() -> dict:
-    return {doc["user_id"]: doc["access_status"] async for doc in mongo.repos().find({})}
+    return {doc["workspace_id"]: doc["access_status"] async for doc in mongo.repos().find({})}
 
 
-async def test_push_reindexes_every_user_with_the_repo_connected(client, scheduled):
+async def test_push_reindexes_a_repo_once_however_many_workspaces_connected_it(client, scheduled):
     await connect("alice")
     await connect("bob")
 
     resp = await deliver(client, "push", push_payload())
 
-    assert resp.json()["data"] == {"outcome": "accepted", "repos": 2, "event": None}
-    assert sorted(scheduled) == [("index", "alice", REPO, False), ("index", "bob", REPO, False)]
+    assert resp.json()["data"] == {"outcome": "accepted", "repos": 1, "event": None}
+    assert scheduled == [("index", REPO, False)]
 
 
 async def test_push_to_another_branch_is_ignored(client, scheduled):

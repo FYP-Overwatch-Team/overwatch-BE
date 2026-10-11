@@ -1,7 +1,7 @@
 import pytest
 
 from app.core.exceptions import AppError, NotFoundError
-from tests.integration.test_auth_flow import login
+from tests.integration.test_auth_flow import auth_headers, login
 
 
 @pytest.fixture
@@ -45,7 +45,7 @@ async def test_custom_error_code_and_status(app_with_error_routes, client):
 
 async def test_validation_errors_use_the_envelope(client):
     access = await login(client)
-    resp = await client.get("/tickets?page=0", headers={"Authorization": f"Bearer {access}"})
+    resp = await client.get("/tickets?page=0", headers=auth_headers(access))
     assert resp.status_code == 422
     assert resp.json() == {
         "status": "error", "code": 422, "data": None,

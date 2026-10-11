@@ -5,6 +5,8 @@ from urllib.parse import parse_qs, urlparse
 import respx
 from httpx import Response
 
+from app.core.security import verify_access_token
+
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 USER_URL = "https://api.github.com/user"
 
@@ -40,6 +42,11 @@ async def login(client) -> str:
     refreshed = await client.post("/auth/refresh")
     assert refreshed.status_code == 200
     return refreshed.json()["data"]["access_token"]
+
+
+def auth_headers(access: str) -> dict:
+    """Bearer plus the signed-in user's personal workspace, which shares their id."""
+    return {"Authorization": f"Bearer {access}", "X-Workspace-Id": verify_access_token(access)}
 
 
 async def test_login_redirects_to_github_with_pkce(client):

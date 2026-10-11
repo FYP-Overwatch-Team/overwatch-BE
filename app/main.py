@@ -14,6 +14,7 @@ from app.graph.router import router as graph_router
 from app.jira.router import router as jira_router
 from app.onboarding.router import router as onboarding_router
 from app.query.router import router as query_router
+from app.workspaces.router import router as workspaces_router
 from app.workers import jobs
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -100,6 +101,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(webhooks_router)
     app.include_router(tickets.router)
     app.include_router(query_router)
+    app.include_router(workspaces_router)
 
     app.router.route_class = EnvelopeRoute  # app-level routes return the envelope too
 

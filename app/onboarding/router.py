@@ -1,6 +1,6 @@
 from fastapi import Depends
 
-from app.api.deps import get_current_user_id
+from app.api.deps import workspace_member
 from app.core.responses import api_router
 from app.db import oauth_tokens
 from app.github import repository as repos
@@ -11,14 +11,19 @@ router = api_router(prefix="/onboarding", tags=["onboarding"])
 
 
 @router.get("/status")
-async def onboarding_status(user_id: str = Depends(get_current_user_id)) -> OnboardingStatus:
-    """Cheap to poll: Mongo reads only, never GitHub, Jira or Neo4j."""
-    github_token = await oauth_tokens.get(user_id, "github")
-    jira_token = await oauth_tokens.get(user_id, "jira")
-    connected = await repos.list_for_user(user_id)
-    project = await jira_projects.latest_active(user_id)
+async def onboarding_status(member: dict = Depends(workspace_member())) -> OnboardingStatus:
+    """Cheap to poll: Mongo reads only, never GitHub, Jira or Neo4j.
+
+    GitHub sign-in is the user's; repos and Jira are the workspace's.
+    """
+    workspace_id = member["workspace_id"]
+    github_token = await oauth_tokens.get(member["user_id"], "github")
+    jira_token = await oauth_tokens.get(workspace_id, "jira")
+    connected = await repos.list_for_workspace(workspace_id)
+    project = await jira_projects.latest_active(workspace_id)
 
     return OnboardingStatus(
+        role=member["role"],
         github=GithubStatus(
             authorized=_status(github_token) == "active",
             needs_reauth=_status(github_token) == "needs_reauth",

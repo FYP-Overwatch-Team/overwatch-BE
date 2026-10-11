@@ -12,8 +12,8 @@ TICKET_FIELDS = "summary,status,assignee,priority,updated"
 
 
 
-async def fetch_all_tickets(user_id: str, project_key: str) -> list[dict]:
-    access_token, cloud_id = await jira_service.access_token(user_id)
+async def fetch_all_tickets(workspace_id: str, project_key: str) -> list[dict]:
+    access_token, cloud_id = await jira_service.access_token(workspace_id)
     client = get_jira_client()
     issues: list[dict] = []
     next_page_token: str | None = None
@@ -61,10 +61,10 @@ async def fetch_all_tickets(user_id: str, project_key: str) -> list[dict]:
         seen_tokens.add(next_page_token)
 
 
-def _to_doc(user_id: str, project_key: str, issue: dict) -> dict:
+def _to_doc(workspace_id: str, project_key: str, issue: dict) -> dict:
     fields = issue.get("fields", {})
     return {
-        "user_id": user_id,
+        "workspace_id": workspace_id,
         "project_key": project_key,
         "ticket_key": issue["key"],
         "summary": fields.get("summary"),
@@ -76,27 +76,27 @@ def _to_doc(user_id: str, project_key: str, issue: dict) -> dict:
     }
 
 
-async def sync_project(user_id: str, project_key: str) -> int:
+async def sync_project(workspace_id: str, project_key: str) -> int:
     """Pull every ticket for the project into Mongo. Stored mostly as-is (raw kept)."""
-    issues = await fetch_all_tickets(user_id, project_key)
+    issues = await fetch_all_tickets(workspace_id, project_key)
     seen_keys = []
     for issue in issues:
-        doc = _to_doc(user_id, project_key, issue)
+        doc = _to_doc(workspace_id, project_key, issue)
         seen_keys.append(doc["ticket_key"])
         await mongo.tickets().update_one(
-            {"user_id": user_id, "ticket_key": doc["ticket_key"]},
+            {"workspace_id": workspace_id, "ticket_key": doc["ticket_key"]},
             {"$set": doc},
             upsert=True,
         )
     # tickets deleted in Jira disappear on the next sync
     await mongo.tickets().delete_many({
-        "user_id": user_id, "project_key": project_key, "ticket_key": {"$nin": seen_keys},
+        "workspace_id": workspace_id, "project_key": project_key, "ticket_key": {"$nin": seen_keys},
     })
     return len(seen_keys)
 
 
 async def list_tickets(
-    user_id: str,
+    workspace_id: str,
     project_key: str | None = None,
     status: str | None = None,
     assignee: str | None = None,
@@ -106,7 +106,7 @@ async def list_tickets(
     active_project_keys = [
         project["project_key"]
         async for project in mongo.jira_projects().find({
-            "user_id": user_id,
+            "workspace_id": workspace_id,
             "status": {"$ne": "disconnected"},
         })
     ]
@@ -114,7 +114,7 @@ async def list_tickets(
         return {"tickets": [], "total": 0, "page": page, "page_size": page_size}
 
     query: dict = {
-        "user_id": user_id,
+        "workspace_id": workspace_id,
         "project_key": project_key if project_key else {"$in": active_project_keys},
     }
     if status:
