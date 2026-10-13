@@ -7,14 +7,19 @@ tracker, so the board shows exactly what the tracker now has.
 
 import re
 import uuid
+from datetime import timedelta
 
 from app.auth.repository import get_user
+from app.boards import repository as boards
+from app.boards import service as board_service
 from app.connectors import registry
 from app.connectors import repository as connectors
 from app.connectors.service import can_write
-from app.core.constants import NATIVE_SOURCE, Role, StatusCategory
+from app.core.constants import NATIVE_SOURCE, Role, SprintState, StatusCategory
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from app.core.time import utcnow
+from app.sprints import repository as sprints
+from app.sprints import service as sprint_service
 from app.work_items import repository
 from app.workspaces import repository as workspaces
 from app.workspaces.service import rank
@@ -24,7 +29,26 @@ MIN_RANK_GAP = 1e-6
 
 
 def to_work_item(doc: dict, writable: set[str]) -> dict:
-    return {**doc, "id": doc["_id"], "editable": doc["source"] == NATIVE_SOURCE or doc["source"] in writable}
+    return {
+        **doc,
+        "id": doc["_id"],
+        # items stored before boards sit in their category's default column
+        "column_id": doc.get("column_id", doc["status_category"]),
+        "sprint_id": doc.get("sprint_id"),
+        "editable": doc["source"] == NATIVE_SOURCE or doc["source"] in writable,
+    }
+
+
+def _scope(board: dict) -> dict:
+    """The items on a board."""
+    return {"workspace_id": board["workspace_id"], "source": board["source"], "target_key": board["target_key"]}
+
+
+def _column(board: dict, column_id: str) -> dict:
+    column = next((c for c in board["columns"] if c["id"] == column_id), None)
+    if column is None:
+        raise NotFoundError("no such column on this board", error_code="column_not_found")
+    return column
 
 
 async def _writable_sources(workspace_id: str) -> set[str]:
@@ -39,30 +63,106 @@ async def _visibility(workspace_id: str) -> dict:
     return {"$or": [{"source": NATIVE_SOURCE}, *({"source": p, "target_key": {"$in": keys}} for p, keys in by_provider.items())]}
 
 
-async def list_items(
-    workspace_id: str, *, source: str | None, status_category: str | None, target_key: str | None,
-    assignee_id: str | None, q: str | None, page: int, page_size: int, newest_first: bool = False,
-) -> tuple[list[dict], int]:
+#: the lane of items with no assignee (or no priority)
+NO_LANE = "none"
+LANE_FIELDS = {"assignee": "assignee.id", "priority": "priority"}
+
+
+async def _query(
+    workspace_id: str, *, board_id: str | None = None, column_id: str | None = None, sprint: str | None = None,
+    done_within_days: int | None = None, hide_epics: bool = False, open_only: bool = False, source: str | None = None,
+    status_category: str | None = None, target_key: str | None = None, assignee_id: str | None = None,
+    priority: str | None = None, q: str | None = None,
+) -> dict | None:
+    """The Mongo filter for a board's items; None when nothing can match (no active sprint for "current")."""
     query: dict = {"workspace_id": workspace_id, **await _visibility(workspace_id)}
-    filters = {"source": source, "status_category": status_category, "target_key": target_key, "assignee.id": assignee_id}
+    conditions: list[dict] = []
+    if board_id:
+        board = await board_service.get_visible(workspace_id, board_id)
+        query.update(_scope(board))
+        if sprint:
+            sprint_id = await _sprint_filter(board, sprint)
+            if sprint_id is _NO_SPRINT:
+                return None
+            query["sprint_id"] = sprint_id
+    if done_within_days:
+        since = utcnow() - timedelta(days=done_within_days)
+        conditions.append({"$or": [{"status_category": {"$ne": StatusCategory.DONE}}, {"status_changed_at": {"$gte": since}}]})
+    if hide_epics:
+        query["issue_type"] = {"$ne": "Epic"}
+    if open_only:
+        conditions.append({"status_category": {"$ne": StatusCategory.DONE}})
+    filters = {"column_id": column_id, "source": source, "status_category": status_category, "target_key": target_key}
     query.update({k: v for k, v in filters.items() if v is not None})
+    # "none" is the lane of items with no assignee (or priority)
+    for field, value in ((LANE_FIELDS["assignee"], assignee_id), (LANE_FIELDS["priority"], priority)):
+        if value is None:
+            continue
+        if value != NO_LANE:
+            query[field] = value
+        else:
+            # no assignee is stored as `assignee: null`; match that as well as a missing id
+            parent = field.split(".")[0]
+            conditions.append({"$or": [{parent: None}, {field: None}]})
     if q:
-        query["$and"] = [{"$or": [
+        conditions.append({"$or": [
             {"title": {"$regex": re.escape(q), "$options": "i"}}, {"key": {"$regex": re.escape(q), "$options": "i"}},
-        ]}]
-    docs, total = await repository.page(query, (page - 1) * page_size, page_size, newest_first=newest_first)
+        ]})
+    if conditions:
+        query["$and"] = conditions
+    return query
+
+
+async def list_items(
+    workspace_id: str, *, page: int = 1, page_size: int = 100, offset: int | None = None, **filters,
+) -> tuple[list[dict], int]:
+    query = await _query(workspace_id, **filters)
+    if query is None:
+        return [], 0
+    skip = offset if offset is not None else (page - 1) * page_size
+    docs, total = await repository.page(query, skip, page_size)
     writable = await _writable_sources(workspace_id)
     return [to_work_item(d, writable) for d in docs], total
 
 
-async def _get_visible(workspace_id: str, item_id: str) -> dict:
+async def lanes(workspace_id: str, by: str, **filters) -> list[dict]:
+    """The swimlanes of a board view: each assignee (or priority) with items in it, and how many."""
+    query = await _query(workspace_id, **filters)
+    if query is None:
+        return []
+    field = LANE_FIELDS[by]
+    groups = await repository.group_counts(query, field, label_field="assignee.name" if by == "assignee" else None)
+    return [
+        {"key": group["_id"] or NO_LANE, "label": group.get("label") or group["_id"], "total": group["total"]}
+        for group in groups
+    ]
+
+
+# a board with no active sprint shows nothing for "current"
+_NO_SPRINT = object()
+
+
+async def _sprint_filter(board: dict, sprint: str):
+    """The `sprint_id` to match: "backlog" is none, "current" the active sprint's."""
+    if sprint == "backlog":
+        return None
+    if sprint == "current":
+        active = await sprints.active(board["_id"])
+        return active["_id"] if active else _NO_SPRINT
+    found = await sprints.get(board["workspace_id"], sprint)
+    if found is None or found["board_id"] != board["_id"]:
+        raise NotFoundError("sprint not found", error_code="sprint_not_found")
+    return found["_id"]
+
+
+async def get_visible(workspace_id: str, item_id: str) -> dict:
     item = await repository.get(workspace_id, item_id)
     if item and (item["source"] == NATIVE_SOURCE or await connectors.find_target(workspace_id, item["source"], item["target_key"])):
         return item
     raise NotFoundError("work item not found", error_code="work_item_not_found")
 
 
-async def _writable_connection(workspace_id: str, provider: str) -> dict:
+async def writable_connection(workspace_id: str, provider: str) -> dict:
     conn = await connectors.active_connection(workspace_id, provider)
     if conn is None:
         raise ConflictError(f"{provider} is not connected", error_code=f"{provider}_not_connected")
@@ -84,8 +184,10 @@ async def _assignee(workspace_id: str, user_id: str | None) -> dict | None:
 
 async def _refresh(workspace_id: str, conn: dict, target_key: str, external_id: str) -> dict:
     connector = registry.get(conn["provider"])
-    raw = await connector.adapter.fetch(registry.auth_for(conn), conn, external_id)
-    await repository.upsert_synced(workspace_id, connector.adapter.normalise(conn, target_key, raw))
+    board = await boards.ensure(workspace_id, conn["provider"], target_key)
+    raw = await connector.adapter.fetch(registry.auth_for(conn), conn, external_id, board)
+    fields = board_service.place(board, connector.adapter.normalise(conn, target_key, raw, board))
+    await repository.upsert_synced(workspace_id, await sprint_service.apply_tracker_sprint(board, fields))
     return await repository.find_external(workspace_id, conn["provider"], external_id)
 
 
@@ -95,18 +197,24 @@ async def _result(workspace_id: str, item_id: str) -> dict:
 
 async def create(member: dict, body) -> dict:
     workspace_id = member["workspace_id"]
-    if body.provider:
-        if not await connectors.find_target(workspace_id, body.provider, body.target_key):
-            raise NotFoundError("not connected", error_code="target_not_found")
-        conn = await _writable_connection(workspace_id, body.provider)
-        adapter, auth = registry.get(body.provider).adapter, registry.auth_for(conn)
+    board = await board_service.get_visible(workspace_id, body.board_id)
+    column = _column(board, body.column_id or board["columns"][0]["id"])
+    sprint = await _open_sprint(board, body.sprint_id)
+    if board["source"] != NATIVE_SOURCE:
+        conn = await writable_connection(workspace_id, board["source"])
+        adapter, auth = registry.get(board["source"]).adapter, registry.auth_for(conn)
         fields = {"title": body.title, "description": body.description}
         if body.assignee_id:
             fields["assignee_id"] = body.assignee_id
-        external_id = await adapter.create(auth, conn, body.target_key, fields)
-        if body.status_category != StatusCategory.TODO:
-            await adapter.move(auth, conn, external_id, body.status_category)
-        item = await _refresh(workspace_id, conn, body.target_key, external_id)
+        external_id = await adapter.create(auth, conn, board["target_key"], fields)
+        item = await _refresh(workspace_id, conn, board["target_key"], external_id)
+        # a new issue starts in the workflow's first status; move it if that's not the column asked for
+        if item.get("column_id") != column["id"]:
+            await adapter.move(auth, conn, external_id, column)
+            item = await _refresh(workspace_id, conn, board["target_key"], external_id)
+        if sprint:
+            await adapter.set_sprint(auth, conn, [external_id], sprint["external_id"])
+            item = await _refresh(workspace_id, conn, board["target_key"], external_id)
         await repository.update(item["_id"], {"created_by": member["user_id"]})
         return await _result(workspace_id, item["_id"])
 
@@ -115,7 +223,9 @@ async def create(member: dict, body) -> dict:
     doc = {
         "_id": uuid.uuid4().hex, "workspace_id": workspace_id, "source": NATIVE_SOURCE, "external_id": key, "key": key,
         "target_key": None, "title": body.title, "description": body.description, "status": None,
-        "status_category": body.status_category, "rank": now.timestamp(),
+        "status_category": column["status_category"], "column_id": column["id"], "rank": now.timestamp(),
+        "sprint_id": sprint and sprint["_id"], "status_changed_at": now, "description_md": body.description,
+        "reporter": await _assignee(workspace_id, member["user_id"]), "labels": [], "due_date": None, "story_points": None,
         "assignee": await _assignee(workspace_id, body.assignee_id), "priority": None, "issue_type": None,
         "external_url": None, "created_by": member["user_id"], "created_at": now, "updated_at": now,
     }
@@ -125,26 +235,43 @@ async def create(member: dict, body) -> dict:
 
 async def update(member: dict, item_id: str, body) -> dict:
     workspace_id = member["workspace_id"]
-    item = await _get_visible(workspace_id, item_id)
+    item = await get_visible(workspace_id, item_id)
     fields = body.model_dump(exclude_unset=True)
+    if fields.get("due_date"):
+        # Mongo has no date-only type, and trackers take the ISO date
+        fields["due_date"] = fields["due_date"].isoformat()
     if item["source"] == NATIVE_SOURCE:
         if "assignee_id" in fields:
             fields["assignee"] = await _assignee(workspace_id, fields.pop("assignee_id"))
+        if "description" in fields:
+            # native descriptions are written as Markdown, so they display as they were written
+            fields["description_md"] = fields["description"]
         await repository.update(item_id, fields)
     elif fields:
-        conn = await _writable_connection(workspace_id, item["source"])
-        await registry.get(item["source"]).adapter.update(registry.auth_for(conn), conn, item["external_id"], fields)
+        conn = await writable_connection(workspace_id, item["source"])
+        board = await boards.ensure(workspace_id, item["source"], item["target_key"])
+        await registry.get(item["source"]).adapter.update(registry.auth_for(conn), conn, item["external_id"], fields, board)
         await _refresh(workspace_id, conn, item["target_key"], item["external_id"])
     return await _result(workspace_id, item_id)
 
 
-async def _rank_between(workspace_id: str, category: str, before_id: str | None, after_id: str | None) -> float:
-    ranks = await repository.ranks(workspace_id, [i for i in (before_id, after_id) if i])
+async def _rank_between(scope: dict, column_id: str, before_id: str | None, after_id: str | None, item_id: str) -> float:
+    """A rank between the cards it was dropped between.
+
+    With one neighbour, the other is whatever actually follows (or precedes) it in the column,
+    not just what the board had loaded: a partly loaded or filtered column must not let a drop
+    jump past items the user couldn't see.
+    """
+    ranks = await repository.ranks(scope["workspace_id"], [i for i in (before_id, after_id) if i])
     before, after = ranks.get(before_id), ranks.get(after_id)
+    if before is not None and after is None:
+        after = await repository.adjacent_rank(scope, column_id, before, after=True, exclude_id=item_id)
+    elif after is not None and before is None:
+        before = await repository.adjacent_rank(scope, column_id, after, after=False, exclude_id=item_id)
     if before is not None and after is not None:
         if abs(after - before) < MIN_RANK_GAP:
-            await repository.renumber_column(workspace_id, category)
-            return await _rank_between(workspace_id, category, before_id, after_id)
+            await repository.renumber_column(scope, column_id)
+            return await _rank_between(scope, column_id, before_id, after_id, item_id)
         return (before + after) / 2
     if before is not None:
         return before + 1
@@ -155,23 +282,54 @@ async def _rank_between(workspace_id: str, category: str, before_id: str | None,
 
 async def move(member: dict, item_id: str, body) -> dict:
     workspace_id = member["workspace_id"]
-    item = await _get_visible(workspace_id, item_id)
-    if body.status_category != item["status_category"] and item["source"] != NATIVE_SOURCE:
-        conn = await _writable_connection(workspace_id, item["source"])
-        await registry.get(item["source"]).adapter.move(registry.auth_for(conn), conn, item["external_id"], body.status_category)
+    item = await get_visible(workspace_id, item_id)
+    board = await boards.ensure(workspace_id, item["source"], item["target_key"])
+    column = _column(board, body.column_id)
+    fields: dict = {}
+    if item["source"] == NATIVE_SOURCE:
+        fields = {"column_id": column["id"], "status_category": column["status_category"]}
+        if column["status_category"] != item["status_category"]:
+            fields["status_changed_at"] = utcnow()
+    elif column["id"] != to_work_item(item, set())["column_id"]:
+        conn = await writable_connection(workspace_id, item["source"])
+        await registry.get(item["source"]).adapter.move(registry.auth_for(conn), conn, item["external_id"], column)
+        # the column comes from the status the tracker now reports
         await _refresh(workspace_id, conn, item["target_key"], item["external_id"])
-    rank = await _rank_between(workspace_id, body.status_category, body.before_id, body.after_id)
-    await repository.update(item_id, {"status_category": body.status_category, "rank": rank})
+    fields["rank"] = await _rank_between(_scope(board), column["id"], body.before_id, body.after_id, item_id)
+    await repository.update(item_id, fields)
+    return await _result(workspace_id, item_id)
+
+
+async def _open_sprint(board: dict, sprint_id: str | None) -> dict | None:
+    if sprint_id is None:
+        return None
+    sprint = await sprints.get(board["workspace_id"], sprint_id)
+    if sprint is None or sprint["board_id"] != board["_id"] or sprint["state"] == SprintState.CLOSED:
+        raise NotFoundError("no such open sprint on this board", error_code="sprint_not_found")
+    return sprint
+
+
+async def set_sprint(member: dict, item_id: str, body) -> dict:
+    """Move an item into an open sprint of its board, or to the backlog; the tracker first."""
+    workspace_id = member["workspace_id"]
+    item = await get_visible(workspace_id, item_id)
+    board = await boards.ensure(workspace_id, item["source"], item["target_key"])
+    sprint = await _open_sprint(board, body.sprint_id)
+    if (sprint and sprint["_id"]) != item.get("sprint_id") and item["source"] != NATIVE_SOURCE:
+        adapter, auth, conn = await sprint_service.tracker_for(board)
+        await adapter.set_sprint(auth, conn, [item["external_id"]], sprint and sprint["external_id"])
+    rank = await _rank_between(_scope(board), to_work_item(item, set())["column_id"], body.before_id, body.after_id, item_id)
+    await repository.update(item_id, {"sprint_id": sprint and sprint["_id"], "rank": rank})
     return await _result(workspace_id, item_id)
 
 
 async def delete(member: dict, item_id: str) -> None:
     workspace_id = member["workspace_id"]
-    item = await _get_visible(workspace_id, item_id)
+    item = await get_visible(workspace_id, item_id)
     if item["source"] != NATIVE_SOURCE:
         # it's deleted in the tracker under the connecting admin's account, and can't be undone
         if rank(member["role"]) < rank(Role.ADMIN):
             raise ForbiddenError(f"only admins delete {item['source']} items", error_code="insufficient_role")
-        conn = await _writable_connection(workspace_id, item["source"])
+        conn = await writable_connection(workspace_id, item["source"])
         await registry.get(item["source"]).adapter.delete(registry.auth_for(conn), conn, item["external_id"])
     await repository.delete(item_id)

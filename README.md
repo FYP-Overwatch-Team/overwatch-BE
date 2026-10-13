@@ -51,7 +51,10 @@ put its URL (plus `/webhooks/github`) in the App's webhook settings.
 
 Create an OAuth 2.0 (3LO) app in the Atlassian developer console with callback
 `http://localhost:8000/jira/callback` and scopes `read:jira-work`, `write:jira-work`, `read:jira-user`, `offline_access`,
-then set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`.
+plus the Jira Software granular scopes that boards, their columns and sprints need (Jira Software accepts no classic
+scopes): `read:board-scope:jira-software`, `write:board-scope:jira-software`, `read:board-scope.admin:jira-software`,
+`read:sprint:jira-software`, `write:sprint:jira-software`, `read:issue:jira-software`.
+Then set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`.
 
 ## API responses
 
@@ -126,7 +129,11 @@ Use `git push --no-verify` only for exceptional, intentional bypasses.
    `--apply`, then deploy the backend, then the frontend. Existing Jira connections keep
    syncing but must be reconnected once before board changes can be written back.
    Once the board looks right, `--apply --drop-legacy` removes `jira_projects` and `tickets`.
-8. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
+8. Moving to boards: add the Jira Software scopes above to the Atlassian app, deploy, then run
+   `uv run python scripts/migrate_boards.py` (dry run) and again with `--apply`, and have an admin reconnect
+   Jira so its board columns and sprints can be read. Until they reconnect, columns are offered from the
+   project's statuses instead.
+9. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
 
 **Note on ticket freshness:** Jira issues sync on a polling loop
 (`ticket_sync_interval_seconds`, default 5 min) rather than via Jira webhooks, which need a

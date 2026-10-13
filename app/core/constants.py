@@ -60,3 +60,44 @@ class StatusCategory(StrEnum):
     TODO = "todo"
     IN_PROGRESS = "in_progress"
     DONE = "done"
+
+
+class BoardKind(StrEnum):
+    """`scrum` boards plan work in sprints; `kanban` boards are a continuous flow."""
+
+    SCRUM = "scrum"
+    KANBAN = "kanban"
+
+
+class ColumnMode(StrEnum):
+    """A board's columns: the three status categories, or the tracker's own columns."""
+
+    DEFAULT = "default"
+    TRACKER = "tracker"
+
+
+class ColumnPrompt(StrEnum):
+    """Whether the board asks an admin to import the tracker's columns."""
+
+    NONE = "none"
+    PENDING = "pending"
+    DISMISSED = "dismissed"
+
+
+class SprintState(StrEnum):
+    FUTURE = "future"
+    ACTIVE = "active"
+    CLOSED = "closed"
+
+
+class ColumnColor(StrEnum):
+    """A board column's color, chosen on the board; none means the default for its name and category."""
+
+    GRAY = "gray"
+    BLUE = "blue"
+    GREEN = "green"
+    RED = "red"
+    AMBER = "amber"
+    PURPLE = "purple"
+    ORANGE = "orange"
+    SLATE = "slate"

@@ -24,7 +24,13 @@ async def signed_in(client) -> dict:
     return auth_headers(await login(client))
 
 
+async def board_id(client, headers: dict, source: str = "native") -> str:
+    boards = (await client.get("/boards", headers=headers)).json()["data"]
+    return next(board["id"] for board in boards if board["source"] == source)
+
+
 async def create(client, headers: dict, **body) -> dict:
+    body.setdefault("board_id", await board_id(client, headers))
     resp = await client.post("/work-items", json={"title": "Task", **body}, headers=headers)
     assert resp.status_code == 201, resp.json()
     return resp.json()["data"]
@@ -49,8 +55,8 @@ async def test_list_filters_sorts_by_board_position_and_paginates(client):
     assert await keys(client, headers, "?q=LOGIN") == ["OVR-2"]
     assert await keys(client, headers, "?q=ovr-3") == ["OVR-3"]
     assert await keys(client, headers, "?page=2&page_size=2") == ["OVR-3"]
-    # a capped board column keeps its latest items
-    assert await keys(client, headers, "?newest_first=true&page_size=2") == ["OVR-3", "OVR-2"]
+    # an offset loads past a first batch of a different size
+    assert await keys(client, headers, "?offset=1&page_size=1") == ["OVR-2"]
 
 
 async def test_items_are_scoped_to_the_workspace(client):
@@ -78,13 +84,15 @@ async def test_native_items_get_workspace_keys_and_member_assignees(client):
     me = headers["X-Workspace-Id"]
 
     first = await create(client, headers, title="Write docs", description="All of them", assignee_id=me)
-    second = await create(client, headers, status_category="in_progress")
-    refused = await client.post("/work-items", json={"title": "x", "assignee_id": "stranger"}, headers=headers)
+    second = await create(client, headers, column_id="in_progress")
+    refused = await client.post(
+        "/work-items", json={"title": "x", "assignee_id": "stranger", "board_id": await board_id(client, headers)}, headers=headers,
+    )
 
     assert (first["key"], second["key"]) == ("OW-1", "OW-2")
     assert first["source"] == "native" and first["editable"]
     assert first["assignee"] == {"id": me, "name": "Octo Cat"}
-    assert second["status_category"] == "in_progress"
+    assert (second["status_category"], second["column_id"]) == ("in_progress", "in_progress")
     assert refused.json()["meta"]["error_code"] == "member_not_found"
 
 
@@ -106,7 +114,7 @@ async def test_moving_places_a_card_between_its_neighbours(client):
     a, b, c = [await create(client, headers, title=t) for t in "ABC"]
 
     async def move(item, category="todo", before=None, after=None):
-        body = {"status_category": category, "before_id": before and before["id"], "after_id": after and after["id"]}
+        body = {"column_id": category, "before_id": before and before["id"], "after_id": after and after["id"]}
         resp = await client.post(f"/work-items/{item['id']}/move", json=body, headers=headers)
         assert resp.status_code == 200
         return resp.json()["data"]
@@ -138,3 +146,38 @@ async def test_any_member_can_change_and_delete_items(client):
     assert edited.json()["data"]["title"] == "Bob's now"
     assert deleted.status_code == 200
     assert await mongo.work_items().count_documents({}) == 0
+
+
+async def test_a_drop_beside_one_card_lands_next_to_it_not_past_unseen_ones(client):
+    """A partly loaded column only knows one neighbour; the card still goes right beside it."""
+    headers = await signed_in(client)
+    a, b, c, d = [await create(client, headers, title=t) for t in "ABCD"]
+    for item, rank in ((a, 1.0), (b, 2.0), (c, 3.0), (d, 10.0)):
+        await mongo.work_items().update_one({"_id": item["id"]}, {"$set": {"rank": rank}})
+
+    async def move(item, **neighbours):
+        body = {"column_id": "todo", "before_id": None, "after_id": None, **neighbours}
+        return (await client.post(f"/work-items/{item['id']}/move", json=body, headers=headers)).json()["data"]
+
+    # after A, with B unseen: between A and B, not at A + 1 (which would be past B)
+    assert (await move(d, before_id=a["id"]))["rank"] == 1.5
+    # before C, with B unseen above it: between B and C
+    assert (await move(d, after_id=c["id"]))["rank"] == 2.5
+    # after the real last card: one past it
+    assert (await move(a, before_id=c["id"]))["rank"] == 4.0
+    assert await keys(client, headers, "?column_id=todo") == [b["key"], d["key"], c["key"], a["key"]]
+
+
+async def test_a_board_view_lists_its_lanes_and_filters_by_one(client):
+    headers = await signed_in(client)
+    await seed_jira(headers["X-Workspace-Id"])
+    board = await board_id(client, headers, "jira")
+
+    by_assignee = (await client.get(f"/work-items/lanes?board_id={board}&by=assignee", headers=headers)).json()["data"]
+    by_priority = (await client.get(f"/work-items/lanes?board_id={board}&by=priority", headers=headers)).json()["data"]
+
+    assert sorted((lane["key"], lane["total"]) for lane in by_assignee) == [("acc-alex", 1), ("acc-sam", 1), ("none", 1)]
+    assert {lane["key"] for lane in by_priority} == {"High", "Highest", "Low"}
+    assert next(lane for lane in by_assignee if lane["key"] == "acc-alex")["label"]
+    assert await keys(client, headers, f"?board_id={board}&assignee_id=none") == ["OVR-3"]
+    assert await keys(client, headers, f"?board_id={board}&priority=Highest") == ["OVR-2"]

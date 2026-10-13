@@ -19,6 +19,12 @@ def can_write(conn: dict | None) -> bool:
     return bool(write_scope and conn["status"] != ConnectionStatus.DISCONNECTED and write_scope in conn.get("scopes", []))
 
 
+def can_manage_sprints(conn: dict | None) -> bool:
+    """The grant reaches the tracker's boards and sprints (and can write back at all)."""
+    sprint_scope = conn and registry.get(conn["provider"]).sprint_scope
+    return bool(sprint_scope and can_write(conn) and sprint_scope in conn.get("scopes", []))
+
+
 async def catalog(workspace_id: str) -> list[dict]:
     """Every supported connector with this workspace's state for it."""
     connections = {c["provider"]: c for c in await repository.list_connections(workspace_id)}

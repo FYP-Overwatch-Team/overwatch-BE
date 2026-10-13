@@ -10,10 +10,14 @@ from datetime import timedelta
 
 import structlog
 
+from app.boards import repository as board_store
+from app.boards import service as boards
 from app.connectors import registry, repository
+from app.connectors.service import can_manage_sprints
 from app.core.constants import JobStatus
 from app.core.exceptions import ExternalServiceError
 from app.core.time import utcnow
+from app.sprints import service as sprints
 from app.work_items import repository as work_items
 
 logger = structlog.get_logger("app.connectors.sync")
@@ -51,13 +55,26 @@ async def _sync(workspace_id: str, provider: str, target_key: str, target: dict,
     adapter, auth = registry.get(provider).adapter, registry.auth_for(conn)
     since = None if full else math.ceil((utcnow() - target["last_synced_at"]).total_seconds() / 60) + OVERLAP_MINUTES
 
+    board = await board_store.ensure(workspace_id, provider, target_key, target.get("name"))
+    # columns, board details and sprints are extra: a tracker that won't share them still syncs its items
+    if full:
+        board = await _read_board(adapter, auth, conn, board)
+    if board.get("external_id") and can_manage_sprints(conn):
+        try:
+            # every run: starting or completing a sprint changes no issue, so issue syncs alone would miss it
+            await sprints.mirror(board, await adapter.list_sprints(auth, conn, board["external_id"]))
+        except Exception:
+            logger.warning("sprints_unavailable", provider=provider, target=target_key, exc_info=True)
+    sprint_ids: dict[str, str] = {}
+
     seen: list[str] = []
     seen_tokens: set[str] = set()
     token = None
     while True:
-        page = await adapter.fetch_page(auth, conn, target_key, since_minutes=since, page_token=token)
+        page = await adapter.fetch_page(auth, conn, target_key, since_minutes=since, page_token=token, board=board)
         for raw in page.items:
-            fields = adapter.normalise(conn, target_key, raw)
+            fields = boards.place(board, adapter.normalise(conn, target_key, raw, board))
+            fields = await sprints.apply_tracker_sprint(board, fields, sprint_ids)
             await work_items.upsert_synced(workspace_id, fields)
             seen.append(fields["external_id"])
         token = page.next_token
@@ -71,3 +88,19 @@ async def _sync(workspace_id: str, provider: str, target_key: str, target: dict,
         await work_items.sweep(workspace_id, provider, target_key, seen)
     return len(seen)
 
+
+async def _read_board(adapter, auth, conn: dict, board: dict) -> dict:
+    """The tracker's columns (offered or followed), board id, kind and field ids, on a full sync."""
+    provider, target_key = board["source"], board["target_key"]
+    try:
+        board = await boards.offer_columns(board, await adapter.board_columns(auth, conn, target_key))
+    except Exception:
+        logger.warning("board_columns_unavailable", provider=provider, target=target_key, exc_info=True)
+    try:
+        details = await adapter.board_details(auth, conn, target_key)
+    except Exception:
+        logger.warning("board_details_unavailable", provider=provider, target=target_key, exc_info=True)
+        return board
+    # a grant that can't see the board leaves its kind as the sprints found on items made it
+    changes = {"external_id": details["external_id"], "fields": details["fields"], **({"kind": details["kind"]} if details["kind"] else {})}
+    return await board_store.update(board["_id"], changes)

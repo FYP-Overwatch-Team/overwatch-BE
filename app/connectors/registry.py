@@ -18,6 +18,8 @@ class Connector:
     adapter: WorkItemSource
     # the scope that lets board changes be written back; older grants may lack it
     write_scope: str | None
+    # the scope that lets the tracker's boards and sprints be read and changed; None if it has no sprints
+    sprint_scope: str | None = None
     flow: OAuth2Flow = field(init=False)
     backends: dict[str, AuthBackend] = field(init=False)
 
@@ -28,7 +30,10 @@ class Connector:
 
 
 CONNECTORS = {
-    Provider.JIRA: Connector(provider=Provider.JIRA, name="Jira", oauth=jira.OAUTH, adapter=jira.JiraAdapter(), write_scope=jira.WRITE_SCOPE),
+    Provider.JIRA: Connector(
+        provider=Provider.JIRA, name="Jira", oauth=jira.OAUTH, adapter=jira.JiraAdapter(), write_scope=jira.WRITE_SCOPE,
+        sprint_scope=jira.AGILE_SCOPE,
+    ),
 }
 
 

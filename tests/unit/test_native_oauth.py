@@ -110,8 +110,11 @@ async def test_no_connection_needs_reauth():
     assert exc.value.error_code == "jira_needs_reauth"
 
 
-def test_the_authorize_url_asks_for_write_access_and_a_refresh_token():
+def test_the_authorize_url_asks_for_write_access_jira_software_and_a_refresh_token():
     params = parse_qs(urlparse(registry.get("jira").flow.authorize_url("s")).query)
-    assert params["scope"] == ["read:jira-work write:jira-work read:jira-user offline_access"]
+    scopes = params["scope"][0].split()
+    assert scopes[:3] == ["read:jira-work", "write:jira-work", "read:jira-user"] and scopes[-1] == "offline_access"
+    # boards, their columns and sprints only accept Jira Software's granular scopes
+    assert {"read:board-scope.admin:jira-software", "read:sprint:jira-software", "write:sprint:jira-software"} <= set(scopes)
     assert params["redirect_uri"] == ["http://localhost:8000/jira/callback"]
     assert (params["audience"], params["prompt"], params["state"]) == (["api.atlassian.com"], ["consent"], ["s"])

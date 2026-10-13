@@ -1,6 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 from app.core.config import get_settings
+from app.core.constants import NATIVE_SOURCE, SprintState
 
 _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
@@ -70,6 +71,21 @@ def sync_targets():
 def work_items():
     """Board items: mirrored from a tracker (`source` = provider) or created here (`native`)."""
     return get_db()["work_items"]
+
+
+def boards():
+    """One per tracker target (`source` = provider) plus one native board per workspace: columns, mode, prompt."""
+    return get_db()["boards"]
+
+
+def sprints():
+    """A board's sprints: native ones, and mirrors of the tracker's (`external_id` set)."""
+    return get_db()["sprints"]
+
+
+def work_item_comments():
+    """Comments on native items, and who in Overwatch wrote the tracker comments posted from here."""
+    return get_db()["work_item_comments"]
 
 
 def jira_projects():
@@ -145,7 +161,20 @@ async def ensure_indexes() -> None:
     # moved between projects (which changes its key) updates rather than duplicating.
     await work_items().create_index([("workspace_id", 1), ("source", 1), ("external_id", 1)], unique=True)
     await work_items().create_index([("workspace_id", 1), ("status_category", 1), ("rank", 1)])
-    await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1)])
+    await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1), ("column_id", 1), ("rank", 1)])
+    await boards().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1)], unique=True)
+    await sprints().create_index(
+        [("workspace_id", 1), ("source", 1), ("external_id", 1)], unique=True,
+        partialFilterExpression={"external_id": {"$type": "string"}},
+    )
+    await sprints().create_index([("board_id", 1), ("state", 1)])
+    # one active native sprint per board, even when two admins start sprints at once (Jira allows parallel ones)
+    await sprints().create_index(
+        "board_id", unique=True, name="one_active_native_sprint",
+        partialFilterExpression={"source": NATIVE_SOURCE, "state": SprintState.ACTIVE.value},
+    )
+    await work_item_comments().create_index([("workspace_id", 1), ("item_id", 1), ("created_at", 1)])
+    await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1), ("sprint_id", 1)])
 
     # Extraction cache: read on every sync to decide what changed, and always
     # scoped to one repository.

@@ -6,6 +6,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth.router import router as auth_router
+from app.boards.router import router as boards_router
+from app.comments.router import router as comments_router
+from app.sprints.router import router as sprints_router
 from app.chat.router import router as chat_router
 from app.connectors.router import router as connections_router
 from app.github import checkout
@@ -103,6 +106,9 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(webhooks_router)
     app.include_router(connections_router)
     app.include_router(work_items_router)
+    app.include_router(boards_router)
+    app.include_router(sprints_router)
+    app.include_router(comments_router)
     app.include_router(query_router)
     app.include_router(chat_router)
     app.include_router(workspaces_router)
