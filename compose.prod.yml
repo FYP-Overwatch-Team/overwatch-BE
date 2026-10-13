@@ -1,0 +1,30 @@
+services:
+  api:
+    image: ${BACKEND_IMAGE}:${IMAGE_TAG}
+    env_file:
+      - .env
+    restart: unless-stopped
+    expose:
+      - "8000"
+    volumes:
+      - repo-data:/srv/app/repos
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      API_DOMAIN: ${API_DOMAIN}
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  repo-data:
+  caddy-data:
+  caddy-config:

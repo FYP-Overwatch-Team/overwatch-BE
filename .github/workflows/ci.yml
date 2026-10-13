@@ -43,3 +43,81 @@ jobs:
         run: uv run pytest -q -m "not regression"
       - name: Regression suite
         run: uv run pytest -q -m regression
+
+  publish-and-deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: production-deployment
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.EC2_SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/overwatch-deploy
+          chmod 600 ~/.ssh/overwatch-deploy
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Upload deployment files
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_USER: ${{ vars.EC2_USER }}
+          EC2_APP_DIR: ${{ vars.EC2_APP_DIR }}
+        run: |
+          ssh -i ~/.ssh/overwatch-deploy "$EC2_USER@$EC2_HOST" \
+            "mkdir -p '$EC2_APP_DIR/scripts'"
+          scp -i ~/.ssh/overwatch-deploy \
+            compose.prod.yml Caddyfile scripts/deploy.sh \
+            "$EC2_USER@$EC2_HOST:$EC2_APP_DIR/"
+          ssh -i ~/.ssh/overwatch-deploy "$EC2_USER@$EC2_HOST" \
+            "mv '$EC2_APP_DIR/deploy.sh' '$EC2_APP_DIR/scripts/deploy.sh' && chmod 700 '$EC2_APP_DIR/scripts/deploy.sh'"
+
+      - name: Deploy and verify
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_USER: ${{ vars.EC2_USER }}
+          EC2_APP_DIR: ${{ vars.EC2_APP_DIR }}
+          HEALTH_URL: ${{ vars.HEALTH_URL }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/overwatch-deploy "$EC2_USER@$EC2_HOST" \
+            "docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+          ssh -i ~/.ssh/overwatch-deploy "$EC2_USER@$EC2_HOST" \
+            "'$EC2_APP_DIR/scripts/deploy.sh' '${{ github.sha }}' '$HEALTH_URL'"
