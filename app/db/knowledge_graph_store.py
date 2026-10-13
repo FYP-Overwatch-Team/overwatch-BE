@@ -58,6 +58,9 @@ CHILDREN_LIMIT = 500
 VIEW_PARENTS_LIMIT = 64
 VIEW_EDGE_LIMIT = 20_000
 NEIGHBOUR_LIMIT = 500
+#: How far down, and how many nodes, one subtree request may reach.
+SUBTREE_DEPTH = 4
+SUBTREE_LIMIT = 200
 SEARCH_LIMIT = 50
 #: Traversal depth is concatenated into the query, so it is allow-listed.
 ALLOWED_DEPTHS = (1, 2, 3)
@@ -91,6 +94,10 @@ def _type_pattern(edge_types) -> str:
     database can reuse its plan.
     """
     return "|".join(sorted(_safe_type(edge_type) for edge_type in edge_types))
+
+
+def _without_base_label(row: dict) -> dict:
+    return {**row, "labels": [label for label in row["labels"] if label != BASE_LABEL]}
 
 
 def _containment_pattern() -> str:
@@ -324,6 +331,48 @@ class Neo4jKnowledgeGraphStore:
             "children": [child for child in row["children"] if child.get("id")],
         }
 
+    async def subtree(
+        self, repo_full_name: str, root_ids: Sequence[str], *, limit: int = 100,
+    ) -> list[dict]:
+        """Each root (depth 0), then what it contains, one level per query.
+
+        A level only reads the children of what the previous level kept, and stops at the
+        limit, so opening a huge folder never walks everything beneath it.
+        """
+        limit = min(limit, SUBTREE_LIMIT)
+        fields = """n.id AS id, n.name AS name, n.kind AS kind, n.path AS path,
+                   properties(n)['file_path'] AS file_path, properties(n)['start_line'] AS start_line,
+                   properties(n)['end_line'] AS end_line, labels(n) AS labels"""
+        rows = await self._store.run(
+            f"""
+            MATCH (n:{BASE_LABEL} {{repo: $repo}}) WHERE n.id IN $roots
+            RETURN {fields}, null AS parent, 0 AS depth
+            ORDER BY id LIMIT $limit
+            """,
+            repo=repo_full_name, roots=list(root_ids), limit=limit,
+        )
+        found = [_without_base_label(row) for row in rows]
+        frontier = [row["id"] for row in found]
+        seen = set(frontier)
+        for depth in range(1, SUBTREE_DEPTH + 1):
+            if not frontier or len(found) >= limit:
+                break
+            rows = await self._store.run(
+                f"""
+                MATCH (p:{BASE_LABEL} {{repo: $repo}})-[:{_containment_pattern()}]->(n:{BASE_LABEL} {{repo: $repo}})
+                WHERE p.id IN $frontier AND NOT n.id IN $seen
+                WITH n, min(p.id) AS parent
+                RETURN {fields}, parent, $depth AS depth
+                ORDER BY id LIMIT $limit
+                """,
+                repo=repo_full_name, frontier=frontier, seen=list(seen), depth=depth, limit=limit - len(found),
+            )
+            level = [_without_base_label(row) for row in rows]
+            found.extend(level)
+            frontier = [row["id"] for row in level]
+            seen.update(frontier)
+        return found
+
     async def neighbours(
         self,
         repo_full_name: str,
@@ -372,10 +421,13 @@ class Neo4jKnowledgeGraphStore:
         rows = await self._store.run(
             f"""
             MATCH (n:{BASE_LABEL} {{repo: $repo}})
-            WHERE (n:{NodeLabel.SYMBOL} OR n:{NodeLabel.FILE})
-              AND toLower(coalesce(n.name, n.path, '')) CONTAINS toLower($term)
+            WHERE (n:{NodeLabel.SYMBOL} OR n:{NodeLabel.FILE} OR n:{NodeLabel.MODULE})
+              AND (toLower(coalesce(n.name, '')) CONTAINS toLower($term)
+                   OR toLower(coalesce(n.path, '')) CONTAINS toLower($term))
             RETURN n.id AS id, n.name AS name, n.kind AS kind, n.path AS path,
-                   n.file_path AS file_path, n.signature AS signature, labels(n) AS labels
+                   n.file_path AS file_path, n.signature AS signature,
+                   properties(n)['docstring'] AS docstring, properties(n)['start_line'] AS start_line,
+                   properties(n)['end_line'] AS end_line, labels(n) AS labels
             ORDER BY size(coalesce(n.name, n.path, '')), id
             LIMIT $limit
             """,
@@ -674,6 +726,37 @@ class InMemoryKnowledgeGraphStore:
             "children": children,
         }
 
+    async def subtree(
+        self, repo_full_name: str, root_ids: Sequence[str], *, limit: int = 100,
+    ) -> list[dict]:
+        wanted = {str(edge_type) for edge_type in CONTAINMENT_EDGE_TYPES}
+        children: dict[str, list[str]] = {}
+        for edge in self.edges.values():
+            if edge["repo"] == repo_full_name and edge["type"] in wanted:
+                children.setdefault(edge["source"], []).append(edge["target"])
+
+        def row(node_id: str, parent: str | None, depth: int) -> dict:
+            node = self.nodes[node_id]
+            return {
+                "id": node_id, "name": node.get("name"), "kind": node.get("kind"), "path": node.get("path"),
+                "file_path": node.get("file_path"), "start_line": node.get("start_line"),
+                "end_line": node.get("end_line"), "labels": [node["label"]], "parent": parent, "depth": depth,
+            }
+
+        frontier = sorted({root for root in root_ids if self.nodes.get(root, {}).get("repo") == repo_full_name})
+        found = {root: row(root, None, 0) for root in frontier}
+        for depth in range(1, SUBTREE_DEPTH + 1):
+            next_frontier = []
+            for parent in sorted(frontier):
+                for child in sorted(children.get(parent, [])):
+                    if child not in self.nodes or child in found:
+                        continue
+                    found[child] = row(child, parent, depth)
+                    next_frontier.append(child)
+            frontier = next_frontier
+        ordered = sorted(found.values(), key=lambda row: (row["depth"], row["id"]))
+        return ordered[:min(limit, SUBTREE_LIMIT)]
+
     async def neighbours(
         self,
         repo_full_name: str,
@@ -738,12 +821,14 @@ class InMemoryKnowledgeGraphStore:
             {
                 "id": node["id"], "name": node.get("name"), "kind": node.get("kind"),
                 "path": node.get("path"), "file_path": node.get("file_path"),
-                "signature": node.get("signature"), "labels": [node["label"]],
+                "signature": node.get("signature"), "docstring": node.get("docstring"),
+                "start_line": node.get("start_line"), "end_line": node.get("end_line"),
+                "labels": [node["label"]],
             }
             for node in self.nodes.values()
             if node["repo"] == repo_full_name
-            and node["label"] in (str(NodeLabel.SYMBOL), str(NodeLabel.FILE))
-            and needle in str(node.get("name") or node.get("path") or "").lower()
+            and node["label"] in (str(NodeLabel.SYMBOL), str(NodeLabel.FILE), str(NodeLabel.MODULE))
+            and (needle in str(node.get("name") or "").lower() or needle in str(node.get("path") or "").lower())
         ]
         matches.sort(key=lambda row: (len(str(row["name"] or row["path"] or "")), row["id"]))
         return matches[:min(limit, SEARCH_LIMIT)]

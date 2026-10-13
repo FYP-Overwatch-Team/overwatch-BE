@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     jira_client_secret: str = ""
 
     gemini_api_key: str = ""
+    # AI chat limits; keep the global budget below the Gemini project's daily quota
+    chat_user_hourly_limit: int = 30
+    chat_workspace_daily_limit: int = 200
+    chat_daily_budget: int = 500
 
     repos_dir: str = "./repos"
 

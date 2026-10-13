@@ -11,7 +11,8 @@ pytestmark = pytest.mark.regression
 
 REPO = "octocat/hello-world"
 
-FIXED_GEMINI_RESPONSE = {"step_node_names": ["api", "services", "hallucinated-cache", "db"]}
+# modules are referenced in name order: n1 api, n2 db, n3 services
+FIXED_GEMINI_RESPONSE = {"step_refs": ["n1", "n3", "[n99]", "n2"]}
 
 EXPECTED_ORDERED_IDS = [
     module_id(REPO, "api"),

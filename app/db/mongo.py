@@ -98,6 +98,16 @@ def webhook_deliveries():
     return get_db()["webhook_deliveries"]
 
 
+def chat_conversations():
+    """AI chat conversations, private to the member who started them; messages embedded."""
+    return get_db()["chat_conversations"]
+
+
+def usage_counters():
+    """Fixed-window request counters for rate limits; expire with their window."""
+    return get_db()["usage_counters"]
+
+
 def file_facts():
     """Knowledge-graph extraction facts, one document per file."""
     return get_db()["file_facts"]
@@ -142,5 +152,8 @@ async def ensure_indexes() -> None:
     await file_facts().create_index([("repo_full_name", 1), ("path", 1)], unique=True)
 
     # Webhook dedup: looked up on every delivery, expired 30 days after receipt.
+    await chat_conversations().create_index([("workspace_id", 1), ("user_id", 1), ("repo_full_name", 1), ("updated_at", -1)])
+    await chat_conversations().create_index("expires_at", expireAfterSeconds=0)
+    await usage_counters().create_index("expires_at", expireAfterSeconds=0)
     await webhook_deliveries().create_index("delivery_id", unique=True)
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)

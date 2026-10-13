@@ -287,6 +287,56 @@ async def test_search_matches_symbols_and_files_by_name(store):
     assert await store.search(REPO, "nothing-matches") == []
 
 
+async def test_search_finds_folders_and_matches_paths(store):
+    await store.apply(detail_delta())
+    await store.apply(GraphDelta(
+        repo_full_name=REPO, version="sha-2",
+        upserted_nodes=(module_node(REPO, "api/v1", path="api/v1"),),
+    ))
+
+    assert {row["name"] for row in await store.search(REPO, "v1")} == {"api/v1"}
+    # a file is found by a folder in its path, a symbol only by its own name
+    assert {row["id"] for row in await store.search(REPO, "api/hand")} == {f"{REPO}:api/handlers.py"}
+
+
+async def test_search_returns_a_symbols_line_range(store):
+    file = f"{REPO}:api/handlers.py"
+    await store.apply(GraphDelta(
+        repo_full_name=REPO, version="sha-1",
+        upserted_nodes=(GraphNode(f"{file}#login", NodeLabel.SYMBOL, {
+            "name": "login", "kind": "function", "file_path": "api/handlers.py", "start_line": 3, "end_line": 9,
+        }),),
+    ))
+
+    [row] = await store.search(REPO, "login")
+
+    assert (row["start_line"], row["end_line"]) == (3, 9)
+
+
+async def test_subtree_walks_down_from_the_roots_shallowest_first(store):
+    await store.apply(detail_delta())
+    module, file = module_id(REPO, "api"), f"{REPO}:api/handlers.py"
+
+    rows = await store.subtree(REPO, [module, file])
+
+    assert [(row["id"], row["parent"], row["depth"]) for row in rows] == [
+        (module, None, 0),
+        # the file is a root too, so it's listed once, as a root
+        (file, None, 0),
+        (f"{file}#handle", file, 1),
+        (f"{file}#helper", file, 1),
+    ]
+    rows = await store.subtree(REPO, [module], limit=3)
+    assert [(row["name"], row["depth"]) for row in rows] == [("api", 0), ("handlers.py", 1), ("handle", 2)]
+    assert "File" in rows[1]["labels"]
+
+
+async def test_subtree_stays_inside_the_repository(store):
+    await store.apply(detail_delta(OTHER_REPO))
+
+    assert await store.subtree(REPO, [module_id(OTHER_REPO, "api")]) == []
+
+
 async def test_search_does_not_cross_repositories(store):
     await store.apply(detail_delta(OTHER_REPO))
 

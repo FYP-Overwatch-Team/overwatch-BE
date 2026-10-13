@@ -88,6 +88,11 @@ class KnowledgeGraphStore(Protocol):
     async def node_detail(self, repo_full_name: str, node_id: str) -> dict | None:
         """One node and what it contains, or None if it is not in this repository."""
 
+    async def subtree(
+        self, repo_full_name: str, root_ids: Sequence[str], *, limit: int = 100,
+    ) -> list[dict]:
+        """These nodes (depth 0) and what they contain a few levels down, shallowest first; one query."""
+
     async def neighbours(
         self,
         repo_full_name: str,
@@ -103,7 +108,7 @@ class KnowledgeGraphStore(Protocol):
     async def search(
         self, repo_full_name: str, term: str, *, limit: int = 20,
     ) -> list[dict]:
-        """Files and symbols whose name matches, for jump-to and grounding."""
+        """Folders, files and symbols whose name (or a folder's or file's path) matches."""
 
     async def counts(self, repo_full_name: str) -> dict:
         """Live node and edge counts, by label and type."""

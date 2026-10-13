@@ -23,32 +23,13 @@ async def seed_connected_repo_with_graph(user_id: str) -> None:
     )
 
 
-async def test_ask_endpoint_filters_hallucinated_node(client, graph_store, fake_gemini):
-    headers = await authed(client)
-    user = await mongo.users().find_one({})
-    await seed_connected_repo_with_graph(user["_id"])
-
-    fake_gemini.json_response = {
-        "answer": "api calls services and also the fake billing module.",
-        "highlighted_node_names": ["api", "services", "billing"],
-    }
-    resp = await client.post(
-        "/query/ask",
-        json={"repo_full_name": REPO, "question": "what does api call?"},
-        headers=headers,
-    )
-    assert resp.status_code == 200
-    body = resp.json()["data"]
-    assert set(body["highlighted_node_ids"]) == {module_id(REPO, "api"), module_id(REPO, "services")}
-    assert "billing" not in str(body["highlighted_node_ids"])
-
-
 async def test_flow_endpoint_returns_ordered_ids(client, graph_store, fake_gemini):
     headers = await authed(client)
     user = await mongo.users().find_one({})
     await seed_connected_repo_with_graph(user["_id"])
 
-    fake_gemini.json_response = {"step_node_names": ["api", "services"]}
+    # modules are listed first, so they are n1 and n2
+    fake_gemini.json_response = {"step_refs": ["n1", "n2"]}
     resp = await client.post(
         "/query/flow",
         json={"repo_full_name": REPO, "question": "trace a request"},
@@ -61,7 +42,7 @@ async def test_flow_endpoint_returns_ordered_ids(client, graph_store, fake_gemin
 async def test_query_requires_connected_repo(client, graph_store, fake_gemini):
     headers = await authed(client)
     resp = await client.post(
-        "/query/ask", json={"repo_full_name": "nobody/nothing", "question": "q"}, headers=headers,
+        "/query/flow", json={"repo_full_name": "nobody/nothing", "question": "q"}, headers=headers,
     )
     assert resp.status_code == 404
     assert resp.json()["meta"]["error_code"] == "repo_not_connected"
@@ -81,5 +62,5 @@ async def test_query_refuses_a_revoked_repo(client, graph_store, fake_gemini):
 
 
 async def test_query_requires_auth(client):
-    resp = await client.post("/query/ask", json={"repo_full_name": REPO, "question": "q"})
+    resp = await client.post("/query/flow", json={"repo_full_name": REPO, "question": "q"})
     assert resp.status_code == 401
