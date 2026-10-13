@@ -1,0 +1,260 @@
+{
+  "api/handlers.py": {
+    "calls": [
+      {
+        "argument_count": 1,
+        "callee": "fmt",
+        "enclosing": "handle_request",
+        "is_construction": false,
+        "line": 11,
+        "receiver": null
+      },
+      {
+        "argument_count": 1,
+        "callee": "get_user",
+        "enclosing": "handle_request",
+        "is_construction": false,
+        "line": 11,
+        "receiver": null
+      },
+      {
+        "argument_count": 0,
+        "callee": "os.getpid",
+        "enclosing": "handle_request",
+        "is_construction": false,
+        "line": 11,
+        "receiver": "os"
+      },
+      {
+        "argument_count": 2,
+        "callee": "payload.get",
+        "enclosing": "handle_request",
+        "is_construction": false,
+        "line": 11,
+        "receiver": "payload"
+      }
+    ],
+    "content_hash": "61c093dcfb43e4345224357fbf1f6dea75db8eacaaca98f053ef641d2c74a09a",
+    "definitions": [
+      {
+        "docstring": null,
+        "end_line": 7,
+        "exported": true,
+        "kind": "class",
+        "name": "ApiHandler",
+        "parent": null,
+        "qualified_name": "ApiHandler",
+        "signature": "ApiHandler",
+        "start_line": 6
+      },
+      {
+        "docstring": null,
+        "end_line": 11,
+        "exported": true,
+        "kind": "function",
+        "name": "handle_request",
+        "parent": null,
+        "qualified_name": "handle_request",
+        "signature": "handle_request(payload)",
+        "start_line": 10
+      }
+    ],
+    "has_syntax_errors": false,
+    "http_calls": [],
+    "imports": [
+      {
+        "alias": null,
+        "is_type_only": false,
+        "is_wildcard": false,
+        "line": 1,
+        "names": [],
+        "specifier": "os"
+      },
+      {
+        "alias": null,
+        "is_type_only": false,
+        "is_wildcard": false,
+        "line": 2,
+        "names": [
+          "get_user"
+        ],
+        "specifier": "services.users"
+      },
+      {
+        "alias": null,
+        "is_type_only": false,
+        "is_wildcard": false,
+        "line": 3,
+        "names": [
+          "fmt"
+        ],
+        "specifier": "utils.helpers"
+      }
+    ],
+    "inheritance": [],
+    "language": "python",
+    "loc": 12,
+    "parser_version": 2,
+    "path": "api/handlers.py",
+    "renders": [],
+    "routes": [],
+    "truncated": false
+  },
+  "main.py": {
+    "calls": [
+      {
+        "argument_count": 1,
+        "callee": "handle_request",
+        "enclosing": "run",
+        "is_construction": false,
+        "line": 5,
+        "receiver": null
+      }
+    ],
+    "content_hash": "f0b42b0e62b5f9241415e25f07902eae56eb970ae6caae9418f7bd37a4fc66f0",
+    "definitions": [
+      {
+        "docstring": null,
+        "end_line": 5,
+        "exported": true,
+        "kind": "function",
+        "name": "run",
+        "parent": null,
+        "qualified_name": "run",
+        "signature": "run() -> None",
+        "start_line": 4
+      }
+    ],
+    "has_syntax_errors": false,
+    "http_calls": [],
+    "imports": [
+      {
+        "alias": null,
+        "is_type_only": false,
+        "is_wildcard": false,
+        "line": 1,
+        "names": [
+          "handle_request"
+        ],
+        "specifier": "api.handlers"
+      }
+    ],
+    "inheritance": [],
+    "language": "python",
+    "loc": 6,
+    "parser_version": 2,
+    "path": "main.py",
+    "renders": [],
+    "routes": [],
+    "truncated": false
+  },
+  "services/users.py": {
+    "calls": [
+      {
+        "argument_count": 1,
+        "callee": "fmt",
+        "enclosing": "get_user",
+        "is_construction": false,
+        "line": 7,
+        "receiver": null
+      },
+      {
+        "argument_count": 1,
+        "callee": "json.dumps",
+        "enclosing": "get_user",
+        "is_construction": false,
+        "line": 7,
+        "receiver": "json"
+      }
+    ],
+    "content_hash": "6e79390ce70606cfc6f4587029854fb126f2bb77a0948f760e5265555a39d2ee",
+    "definitions": [
+      {
+        "docstring": null,
+        "end_line": 7,
+        "exported": true,
+        "kind": "function",
+        "name": "get_user",
+        "parent": null,
+        "qualified_name": "get_user",
+        "signature": "get_user(user_id)",
+        "start_line": 6
+      }
+    ],
+    "has_syntax_errors": false,
+    "http_calls": [],
+    "imports": [
+      {
+        "alias": null,
+        "is_type_only": false,
+        "is_wildcard": false,
+        "line": 1,
+        "names": [],
+        "specifier": "json"
+      },
+      {
+        "alias": null,
+        "is_type_only": false,
+        "is_wildcard": false,
+        "line": 3,
+        "names": [
+          "fmt"
+        ],
+        "specifier": "utils.helpers"
+      }
+    ],
+    "inheritance": [],
+    "language": "python",
+    "loc": 8,
+    "parser_version": 2,
+    "path": "services/users.py",
+    "renders": [],
+    "routes": [],
+    "truncated": false
+  },
+  "utils/helpers.py": {
+    "calls": [
+      {
+        "argument_count": 1,
+        "callee": "str",
+        "enclosing": "fmt",
+        "is_construction": false,
+        "line": 2,
+        "receiver": null
+      },
+      {
+        "argument_count": 0,
+        "callee": "str(value).strip",
+        "enclosing": "fmt",
+        "is_construction": false,
+        "line": 2,
+        "receiver": "str(value)"
+      }
+    ],
+    "content_hash": "eea8ab05ad8b0153628f015a3e81873c507c362c0c45b11366aba15a9c4c06a8",
+    "definitions": [
+      {
+        "docstring": null,
+        "end_line": 2,
+        "exported": true,
+        "kind": "function",
+        "name": "fmt",
+        "parent": null,
+        "qualified_name": "fmt",
+        "signature": "fmt(value)",
+        "start_line": 1
+      }
+    ],
+    "has_syntax_errors": false,
+    "http_calls": [],
+    "imports": [],
+    "inheritance": [],
+    "language": "python",
+    "loc": 3,
+    "parser_version": 2,
+    "path": "utils/helpers.py",
+    "renders": [],
+    "routes": [],
+    "truncated": false
+  }
+}

@@ -1,72 +1,85 @@
 import respx
 
-from app.db import mongo
-from app.services import jira_service
-from tests.integration.test_auth_flow import login
+from app.db import mongo, oauth_tokens
+from tests.integration.test_auth_flow import auth_headers, login
+
+JIRA_TOKENS = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
 
 
-async def authed(client) -> dict:
+async def authed(client) -> tuple[dict, str]:
     access = await login(client)
-    return {"Authorization": f"Bearer {access}"}
-
-
-async def test_github_only_partial_setup(client):
-    headers = await authed(client)
-    with respx.mock:  # status endpoint must not make outbound calls
-        resp = await client.get("/onboarding/status", headers=headers)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["github"]["connected"] is True
-    assert body["github"]["repo_connected"] is False
-    assert body["github"]["repo_full_name"] is None
-    assert body["github"]["parse_status"] is None
-    assert body["jira"]["connected"] is False
-    assert body["jira"]["sync_status"] is None
-
-
-async def test_full_setup_reports_both_statuses(client):
-    headers = await authed(client)
     user = await mongo.users().find_one({})
+    return auth_headers(access), user["_id"]
+
+
+async def add_repo(workspace_id: str, name: str, parse_status: str, access_status: str = "active") -> None:
     await mongo.repos().insert_one({
-        "user_id": user["_id"], "repo_full_name": "octocat/hello-world",
-        "webhook_status": "created", "parse_status": "in_progress", "connected_at": 1,
-    })
-    await jira_service.store_tokens(
-        user["_id"], {"access_token": "a", "refresh_token": "r", "expires_in": 3600}, cloud_id="c1",
-    )
-    await mongo.jira_projects().insert_one({
-        "user_id": user["_id"], "project_key": "OVR", "sync_status": "done", "connected_at": 1,
+        "workspace_id": workspace_id, "repo_full_name": name, "parse_status": parse_status,
+        "access_status": access_status, "connected_at": len(name),
     })
 
-    resp = await client.get("/onboarding/status", headers=headers)
-    body = resp.json()
-    assert body["github"] == {
-        "connected": True, "needs_reauth": False, "repo_connected": True,
-        "repo_full_name": "octocat/hello-world", "parse_status": "in_progress",
-        "webhook_status": "created", "webhook_error": None,
+
+async def test_signed_in_user_has_nothing_connected(client):
+    headers, _ = await authed(client)
+    with respx.mock:  # the status endpoint must not make outbound calls
+        body = (await client.get("/onboarding/status", headers=headers)).json()["data"]
+
+    assert body == {
+        "role": "owner",
+        "github": {"authorized": True, "needs_reauth": False, "repos": []},
+        "jira": {"connected": False, "needs_reauth": False, "project": None},
+        "ready": False,
     }
+
+
+async def test_full_setup_reports_repos_and_project(client):
+    headers, user_id = await authed(client)
+    await add_repo(user_id, "octocat/hello-world", "in_progress")
+    await oauth_tokens.save(user_id, "jira", JIRA_TOKENS, cloud_id="c1")
+    await mongo.sync_targets().insert_one({
+        "workspace_id": user_id, "provider": "jira", "key": "OVR", "sync_status": "done", "status": "active", "connected_at": 1,
+    })
+
+    body = (await client.get("/onboarding/status", headers=headers)).json()["data"]
+
+    assert body["github"]["repos"] == [{
+        "repo_full_name": "octocat/hello-world", "graph_stats": None, "parse_status": "in_progress",
+        "parse_error": None, "access_status": "active",
+    }]
     assert body["jira"] == {
-        "connected": True, "needs_reauth": False, "project_connected": True, "sync_status": "done",
+        "connected": True, "needs_reauth": False,
+        "project": {"key": "OVR", "sync_status": "done", "sync_error": None},
     }
+    assert body["ready"] is False  # still indexing
+
+
+async def test_ready_once_a_reachable_repo_is_indexed(client):
+    headers, user_id = await authed(client)
+    await add_repo(user_id, "octocat/revoked", "done", access_status="revoked")
+    assert (await client.get("/onboarding/status", headers=headers)).json()["data"]["ready"] is False
+
+    await add_repo(user_id, "octocat/hello-world", "done")
+    assert (await client.get("/onboarding/status", headers=headers)).json()["data"]["ready"] is True
+
+
+async def test_disconnected_jira_projects_are_not_reported(client):
+    headers, user_id = await authed(client)
+    await mongo.sync_targets().insert_one({
+        "workspace_id": user_id, "provider": "jira", "key": "OLD", "sync_status": "done", "status": "disconnected", "connected_at": 1,
+    })
+    assert (await client.get("/onboarding/status", headers=headers)).json()["data"]["jira"]["project"] is None
 
 
 async def test_needs_reauth_surfaced_independently(client):
-    headers = await authed(client)
-    user = await mongo.users().find_one({})
-    await jira_service.store_tokens(
-        user["_id"], {"access_token": "a", "refresh_token": "r", "expires_in": 3600}, cloud_id="c1",
-    )
-    await mongo.oauth_tokens().update_one(
-        {"user_id": user["_id"], "provider": "jira"}, {"$set": {"status": "needs_reauth"}},
-    )
+    headers, user_id = await authed(client)
+    await oauth_tokens.save(user_id, "jira", JIRA_TOKENS, cloud_id="c1")
+    await oauth_tokens.set_status(user_id, "jira", "needs_reauth")
 
-    resp = await client.get("/onboarding/status", headers=headers)
-    body = resp.json()
+    body = (await client.get("/onboarding/status", headers=headers)).json()["data"]
     assert body["jira"]["connected"] is False
     assert body["jira"]["needs_reauth"] is True
-    assert body["github"]["connected"] is True  # unaffected
+    assert body["github"]["authorized"] is True  # unaffected
 
 
 async def test_status_requires_auth(client):
-    resp = await client.get("/onboarding/status")
-    assert resp.status_code == 401
+    assert (await client.get("/onboarding/status")).status_code == 401

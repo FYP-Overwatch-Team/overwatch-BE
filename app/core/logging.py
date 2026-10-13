@@ -11,6 +11,7 @@ from starlette.requests import Request
 SENSITIVE_KEYS = {
     "access_token", "refresh_token", "token", "authorization", "client_secret",
     "webhook_secret", "password", "api_key", "secret", "cookie", "set-cookie",
+    "code_verifier", "private_key",
 }
 _BEARER_RE = re.compile(r"(?i)(bearer\s+)\S+")
 

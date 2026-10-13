@@ -1,6 +1,7 @@
 import json
+from collections.abc import Sequence
 
-from app.integrations.gemini_client import GeminiClient
+from app.integrations.gemini_client import REQUEST_TIMEOUT_SECONDS, GeminiClient, Turn
 
 
 class FakeGeminiClient(GeminiClient):
@@ -15,6 +16,18 @@ class FakeGeminiClient(GeminiClient):
         self.calls.append({"mode": "text", "system": system_instruction, "prompt": prompt})
         return self.text_response
 
-    async def generate_json(self, system_instruction: str, prompt: str, response_schema: dict) -> str:
-        self.calls.append({"mode": "json", "system": system_instruction, "prompt": prompt, "schema": response_schema})
+    async def generate_json(
+        self,
+        system_instruction: str,
+        prompt: str,
+        response_schema: dict,
+        *,
+        history: Sequence[Turn] = (),
+        timeout: float = REQUEST_TIMEOUT_SECONDS,
+        think_briefly: bool = False,
+    ) -> str:
+        self.calls.append({
+            "mode": "json", "system": system_instruction, "prompt": prompt,
+            "schema": response_schema, "history": list(history),
+        })
         return json.dumps(self.json_response or {})

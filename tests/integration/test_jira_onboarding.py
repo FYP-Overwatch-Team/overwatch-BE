@@ -6,7 +6,7 @@ from httpx import Response
 
 from app.db import mongo
 from app.workers import jobs
-from tests.integration.test_auth_flow import login
+from tests.integration.test_auth_flow import auth_headers, login
 
 TOKEN_URL = "https://auth.atlassian.com/oauth/token"
 RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resources"
@@ -14,10 +14,8 @@ PROJECT_SEARCH = "https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/project/s
 
 
 @pytest.fixture(autouse=True)
-def clear_job_log():
-    jobs.enqueued_jobs.clear()
-    yield
-    jobs.enqueued_jobs.clear()
+def scheduled(record_jobs):
+    return record_jobs
 
 
 def mock_atlassian(router: respx.Router):
@@ -32,43 +30,61 @@ def mock_atlassian(router: respx.Router):
 async def connect_jira(client, headers) -> None:
     login_resp = await client.post("/jira/login", headers=headers)
     assert login_resp.status_code == 200
-    authorize_url = login_resp.json()["authorization_url"]
+    authorize_url = login_resp.json()["data"]["authorization_url"]
     state = parse_qs(urlparse(authorize_url).query)["state"][0]
     with respx.mock as router:
         mock_atlassian(router)
         cb = await client.get(f"/jira/callback?code=fake&state={state}")
     assert cb.status_code == 307
-    assert cb.headers["location"].endswith("/connect?jira=connected")
+    assert cb.headers["location"].endswith(f"/onboarding/jira?jira=connected&w={headers['X-Workspace-Id']}")
 
 
-async def test_jira_oauth_flow_stores_cloud_id(client):
+async def test_jira_oauth_flow_stores_the_connection(client):
     access = await login(client)
-    headers = {"Authorization": f"Bearer {access}"}
+    headers = auth_headers(access)
     await connect_jira(client, headers)
 
-    doc = await mongo.oauth_tokens().find_one({"provider": "jira"})
-    assert doc is not None
-    assert doc["cloud_id"] == "cloud-1"
-    assert doc["status"] == "active"
+    token = await mongo.oauth_tokens().find_one({"provider": "jira"})
+    conn = await mongo.connections().find_one({"provider": "jira"})
+    assert token["status"] == "active"
+    assert conn["external_account"] == {"id": "cloud-1", "name": "acme", "url": "https://acme.atlassian.net"}
+    assert (conn["workspace_id"], conn["connected_by"], conn["auth_backend"]) == (headers["X-Workspace-Id"],) * 2 + ("native_oauth",)
+    # no `scope` in the token response: the requested scopes were granted
+    assert "write:jira-work" in conn["scopes"]
 
 
 async def test_jira_state_mismatch_rejected(client):
     access = await login(client)
-    await client.post("/jira/login", headers={"Authorization": f"Bearer {access}"})
+    await client.post("/jira/login", headers=auth_headers(access))
     resp = await client.get("/jira/callback?code=x&state=user.wrong")
-    assert resp.status_code == 401
-    assert resp.json()["error_code"] == "oauth_state_mismatch"
+    assert resp.status_code == 307
+    assert resp.headers["location"].endswith("/onboarding/jira?jira=error")
 
 
 async def test_jira_denial_returns_to_connect(client):
     access = await login(client)
-    start = await client.post("/jira/login", headers={"Authorization": f"Bearer {access}"})
-    state = parse_qs(urlparse(start.json()["authorization_url"]).query)["state"][0]
+    start = await client.post("/jira/login", headers=auth_headers(access))
+    state = parse_qs(urlparse(start.json()["data"]["authorization_url"]).query)["state"][0]
 
     response = await client.get(f"/jira/callback?error=access_denied&state={state}")
 
     assert response.status_code == 307
-    assert response.headers["location"].endswith("/connect?jira=denied")
+    assert response.headers["location"].endswith(f"/onboarding/jira?jira=denied&w={auth_headers(access)['X-Workspace-Id']}")
+
+
+async def test_a_member_who_lost_the_admin_role_mid_flow_is_not_connected(client):
+    access = await login(client)
+    headers = auth_headers(access)
+    start = await client.post("/jira/login", headers=headers)
+    state = parse_qs(urlparse(start.json()["data"]["authorization_url"]).query)["state"][0]
+    await mongo.workspace_members().update_one({"workspace_id": headers["X-Workspace-Id"]}, {"$set": {"role": "member"}})
+
+    with respx.mock as router:
+        mock_atlassian(router)
+        cb = await client.get(f"/jira/callback?code=fake&state={state}")
+
+    assert cb.headers["location"].endswith("/onboarding/jira?jira=error")
+    assert await mongo.oauth_tokens().find_one({"provider": "jira"}) is None
 
 
 async def test_jira_login_requires_auth(client):
@@ -78,7 +94,7 @@ async def test_jira_login_requires_auth(client):
 
 async def test_list_projects(client):
     access = await login(client)
-    headers = {"Authorization": f"Bearer {access}"}
+    headers = auth_headers(access)
     await connect_jira(client, headers)
 
     with respx.mock as router:
@@ -88,12 +104,12 @@ async def test_list_projects(client):
         resp = await client.get("/jira/projects", headers=headers)
 
     assert resp.status_code == 200
-    assert resp.json()["projects"] == [{"key": "OVR", "name": "Overwatch", "id": "10001"}]
+    assert resp.json()["data"] == [{"key": "OVR", "name": "Overwatch", "id": "10001"}]
 
 
 async def test_disconnect_soft_deletes_connection_and_allows_reconnect(client):
     access = await login(client)
-    headers = {"Authorization": f"Bearer {access}"}
+    headers = auth_headers(access)
     await connect_jira(client, headers)
     connected = await client.post(
         "/jira/projects/connect",
@@ -102,22 +118,23 @@ async def test_disconnect_soft_deletes_connection_and_allows_reconnect(client):
     )
     assert connected.status_code == 201
     user = await mongo.users().find_one({})
-    await mongo.tickets().insert_one({
-        "user_id": user["_id"], "project_key": "OVR", "ticket_key": "OVR-1",
+    await mongo.work_items().insert_one({
+        "workspace_id": user["_id"], "source": "jira", "target_key": "OVR", "external_id": "1", "key": "OVR-1",
     })
 
     response = await client.delete("/jira/connection", headers=headers)
 
     assert response.status_code == 200
-    token = await mongo.oauth_tokens().find_one({"user_id": user["_id"], "provider": "jira"})
-    project = await mongo.jira_projects().find_one({"user_id": user["_id"], "project_key": "OVR"})
+    token = await mongo.oauth_tokens().find_one({"owner_id": user["_id"], "provider": "jira"})
+    project = await mongo.sync_targets().find_one({"workspace_id": user["_id"], "key": "OVR"})
     assert token["status"] == "disconnected"
     assert project["status"] == "disconnected"
     assert project["disconnected_at"] is not None
-    assert await mongo.tickets().count_documents({"user_id": user["_id"]}) == 1
+    assert (await mongo.connections().find_one({"provider": "jira"}))["status"] == "disconnected"
+    assert await mongo.work_items().count_documents({"workspace_id": user["_id"]}) == 1
 
-    tickets = await client.get("/tickets", headers=headers)
-    assert tickets.json()["tickets"] == []
+    items = await client.get("/work-items", headers=headers)
+    assert items.json()["data"] == []
 
     await connect_jira(client, headers)
     reconnected = await client.post(
@@ -126,14 +143,14 @@ async def test_disconnect_soft_deletes_connection_and_allows_reconnect(client):
         headers=headers,
     )
     assert reconnected.status_code == 201
-    project = await mongo.jira_projects().find_one({"user_id": user["_id"], "project_key": "OVR"})
+    project = await mongo.sync_targets().find_one({"workspace_id": user["_id"], "key": "OVR"})
     assert project["status"] == "active"
     assert project["disconnected_at"] is None
 
 
-async def test_connect_project_enqueues_sync(client):
+async def test_connect_project_enqueues_sync(client, scheduled):
     access = await login(client)
-    headers = {"Authorization": f"Bearer {access}"}
+    headers = auth_headers(access)
     await connect_jira(client, headers)
 
     resp = await client.post(
@@ -142,11 +159,10 @@ async def test_connect_project_enqueues_sync(client):
         headers=headers,
     )
     assert resp.status_code == 201
-    assert resp.json()["sync_status"] == "pending"
+    assert resp.json()["data"]["sync_status"] == "pending"
 
-    doc = await mongo.jira_projects().find_one({"project_key": "OVR"})
-    assert doc["cloud_id"] == "cloud-1"
-    assert {"job": "ticket_sync", "user_id": doc["user_id"], "project": "OVR"} in jobs.enqueued_jobs
+    assert resp.json()["data"]["cloud_id"] == "cloud-1"
+    assert ("sync", headers["X-Workspace-Id"], "jira", "OVR") in scheduled
 
     dup = await client.post(
         "/jira/projects/connect",
@@ -154,3 +170,38 @@ async def test_connect_project_enqueues_sync(client):
         headers=headers,
     )
     assert dup.status_code == 409
+
+
+async def test_an_account_with_no_jira_sites_lands_on_an_error(client):
+    headers = auth_headers(await login(client))
+    login_resp = await client.post("/jira/login", headers=headers)
+    state = parse_qs(urlparse(login_resp.json()["data"]["authorization_url"]).query)["state"][0]
+    with respx.mock as router:
+        mock_atlassian(router)
+        router.get(RESOURCES_URL).mock(return_value=Response(200, json=[]))
+        cb = await client.get(f"/jira/callback?code=fake&state={state}")
+
+    assert cb.headers["location"].endswith("/onboarding/jira?jira=error")
+    assert await mongo.oauth_tokens().find_one({"provider": "jira"}) is None
+
+
+async def test_malformed_project_keys_are_rejected(client):
+    headers = auth_headers(await login(client))
+    resp = await client.post("/jira/projects/connect", json={"project_key": "OVR OR 1=1"}, headers=headers)
+    assert resp.status_code == 422
+
+
+async def test_list_projects_reads_every_page(client):
+    headers = auth_headers(await login(client))
+    await connect_jira(client, headers)
+
+    with respx.mock as router:
+        router.get(PROJECT_SEARCH, params={"startAt": "0"}).mock(return_value=Response(200, json={
+            "values": [{"key": "OVR", "name": "Overwatch", "id": "1"}], "isLast": False,
+        }))
+        router.get(PROJECT_SEARCH, params={"startAt": "1"}).mock(return_value=Response(200, json={
+            "values": [{"key": "OPS", "name": "Ops", "id": "2"}], "isLast": True,
+        }))
+        resp = await client.get("/jira/projects", headers=headers)
+
+    assert [p["key"] for p in resp.json()["data"]] == ["OVR", "OPS"]

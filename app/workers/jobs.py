@@ -1,215 +1,141 @@
-from datetime import datetime, timezone
+"""Background jobs: repository indexing and tracker (Jira) sync.
+
+Indexing runs under a per-repo lock held in Mongo (`index_locks`), shared by every
+workspace that connected the repo:
+- one index per repo at a time, so two runs never write conflicting graphs
+- a lock left by a crashed process is reclaimable after `parse_lock_stale_minutes`
+- a push that arrives mid-index is recorded and run before the lock is released
+
+The indexing itself lives in `app/knowledge_graph/pipeline.py`; this module
+owns when it runs and what happens if it fails.
+"""
+
+from datetime import timedelta
 
 import structlog
+from pymongo.errors import DuplicateKeyError
 
+from app.connectors import repository as connectors, sync
+from app.core.config import get_settings
+from app.core.constants import JobStatus
+from app.core.time import utcnow
 from app.db import mongo
-from app.parsing import ast_service, graph_builder
-from app.services import repo_service
-from app.services.graph_service import get_graph_repository
+from app.github import checkout, repository
+from app.integrations import git_cli
+from app.integrations.github_app import InstallationGone, get_github_app
+from app.knowledge_graph.build import GRAPH_BUILD_VERSION
+from app.knowledge_graph.pipeline import IndexingPipeline
+from app.services.facts_repository import get_facts_store
+from app.db.knowledge_graph_store import get_knowledge_graph_store
 
 logger = structlog.get_logger("app.jobs")
 
-# In-memory record of enqueued jobs; also what tests assert against.
-# For eval 1 a single-instance BackgroundTasks runner is sufficient (see plan Phase 5).
-enqueued_jobs: list[dict] = []
+# follow-up syncs one lock holder drains before releasing, so a push storm can't pin a worker
+MAX_FOLLOW_UP_SYNCS = 3
 
 
-async def run_initial_parse(user_id: str, repo_full_name: str) -> None:
-    """Full-repo AST parse -> graph -> Neo4j upsert.
+async def run_index(repo_full_name: str, *, full: bool = False) -> None:
+    """Index a repo: `full` rebuilds from scratch, otherwise only changed files are re-read.
 
-    A find_one_and_update on parse_status acts as the lock: if another parse of
-    this repo is already in_progress (e.g. a webhook fired mid-onboarding), skip.
+    The graph is shared by every workspace that connected the repo, so this runs once per repo.
+    If another index holds the lock, the request is recorded and run by that holder.
     """
-    claimed = await mongo.repos().find_one_and_update(
-        {
-            "user_id": user_id,
-            "repo_full_name": repo_full_name,
-            "parse_status": {"$ne": "in_progress"},
-        },
-        {"$set": {"parse_status": "in_progress", "updated_at": datetime.now(timezone.utc)}},
-    )
-    if claimed is None:
-        logger.info("parse_skipped_already_running", repo=repo_full_name)
+    if not await _claim(repo_full_name):
+        await _record_pending(repo_full_name, full)
+        logger.info("index_deferred_lock_held", repo=repo_full_name)
         return
 
     try:
-        workdir = repo_service.repo_workdir(repo_full_name)
-        parses = ast_service.parse_repo(workdir)
-        # replace the per-file parse cache wholesale; incremental re-parse patches it
-        await mongo.file_parses().delete_many({"repo_full_name": repo_full_name})
-        if parses:
-            await mongo.file_parses().insert_many([
-                {
-                    "repo_full_name": repo_full_name,
-                    "path": p.path,
-                    "language": p.language,
-                    "imports": p.imports,
-                    "definitions": p.definitions,
-                }
-                for p in parses
-            ])
-        await _rebuild_and_store_graph(repo_full_name)
-        await _set_parse_status(user_id, repo_full_name, "done")
-        logger.info("parse_done", repo=repo_full_name, files=len(parses))
+        await _index(repo_full_name, full=full)
+        for _ in range(MAX_FOLLOW_UP_SYNCS):
+            pending_full = await _take_pending(repo_full_name)
+            if pending_full is None:
+                break
+            logger.info("index_draining_pending", repo=repo_full_name, full=pending_full)
+            await _index(repo_full_name, full=pending_full)
+        else:
+            logger.warning("index_followups_exhausted", repo=repo_full_name)
+        await _release(repo_full_name, JobStatus.DONE)
     except Exception as exc:
-        logger.exception("parse_failed", repo=repo_full_name)
-        await _set_parse_status(user_id, repo_full_name, "failed", error=str(exc))
+        logger.exception("index_failed", repo=repo_full_name)
+        await _release(repo_full_name, JobStatus.FAILED, error=str(exc))
 
 
-async def run_incremental_reparse(
-    user_id: str, repo_full_name: str, changed_files: list[str], removed_files: list[str],
-) -> None:
-    """Webhook-driven partial update: parse only the touched files, then rebuild
-    the (directory-level) graph from the per-file cache."""
-    claimed = await mongo.repos().find_one_and_update(
-        {
-            "user_id": user_id,
-            "repo_full_name": repo_full_name,
-            "parse_status": {"$ne": "in_progress"},
-        },
-        {"$set": {"parse_status": "in_progress", "updated_at": datetime.now(timezone.utc)}},
-    )
-    if claimed is None:
-        logger.info("reparse_skipped_already_running", repo=repo_full_name)
-        return
+async def _index(repo_full_name: str, *, full: bool) -> None:
+    repo = await repository.find_any(repo_full_name)
+    if repo is None:
+        return  # disconnected everywhere while queued
+
+    # a graph written by an older builder has a different shape that an incremental diff would keep
+    if repo.get("graph_build_version") != GRAPH_BUILD_VERSION and not full:
+        logger.info("graph_rebuild_forced", repo=repo_full_name, stored=repo.get("graph_build_version"))
+        full = True
 
     try:
-        token = await repo_service.get_github_token(user_id)
-        workdir = await repo_service.update_workdir(repo_full_name, token)
+        token = await get_github_app().installation_token(repo["installation_id"])
+    except InstallationGone:
+        await repository.update_all(repo_full_name, {"access_status": "revoked"}, installation_id=repo["installation_id"])
+        raise
+    workdir = await checkout.update(repo_full_name, token)
+    version = await git_cli.current_commit(workdir)
 
-        for rel_path in removed_files:
-            await mongo.file_parses().delete_one({"repo_full_name": repo_full_name, "path": rel_path})
+    pipeline = IndexingPipeline(get_facts_store(), get_knowledge_graph_store())
+    result = await pipeline.index(repo_full_name, workdir, version, full=full)
 
-        for rel_path in changed_files:
-            abs_path = workdir / rel_path
-            if abs_path.suffix not in ast_service.LANGUAGE_BY_EXT:
-                continue
-            if not abs_path.is_file():
-                await mongo.file_parses().delete_one({"repo_full_name": repo_full_name, "path": rel_path})
-                continue
-            parse = ast_service.parse_file(workdir, abs_path)
-            await mongo.file_parses().update_one(
-                {"repo_full_name": repo_full_name, "path": parse.path},
-                {"$set": {
-                    "language": parse.language,
-                    "imports": parse.imports,
-                    "definitions": parse.definitions,
-                }},
-                upsert=True,
-            )
-
-        await _rebuild_and_store_graph(repo_full_name)
-        await _set_parse_status(user_id, repo_full_name, "done")
-        logger.info("incremental_reparse_done", repo=repo_full_name,
-                    changed=len(changed_files), removed=len(removed_files))
-    except Exception as exc:
-        logger.exception("incremental_reparse_failed", repo=repo_full_name)
-        await _set_parse_status(user_id, repo_full_name, "failed", error=str(exc))
-
-
-def enqueue_incremental_reparse(
-    background_tasks, user_id: str, repo_full_name: str,
-    changed_files: list[str], removed_files: list[str],
-) -> None:
-    enqueued_jobs.append({
-        "job": "incremental_reparse", "user_id": user_id, "repo": repo_full_name,
-        "changed": changed_files, "removed": removed_files,
+    await repository.update_all(repo_full_name, {
+        "graph_version": result.version,
+        "graph_build_version": result.build_version,
+        "graph_stats": result.as_stats_document(),
+        "indexed_at": utcnow(),
     })
-    background_tasks.add_task(run_incremental_reparse, user_id, repo_full_name, changed_files, removed_files)
 
 
-async def _rebuild_and_store_graph(repo_full_name: str) -> None:
-    parses = [
-        ast_service.FileParse(
-            path=doc["path"], language=doc["language"],
-            imports=doc["imports"], definitions=doc["definitions"],
-        )
-        async for doc in mongo.file_parses().find({"repo_full_name": repo_full_name})
-    ]
-    graph = graph_builder.build_graph(repo_full_name, parses)
-    await get_graph_repository().upsert_graph(repo_full_name, graph)
-
-
-async def _set_parse_status(user_id: str, repo_full_name: str, status: str, error: str | None = None) -> None:
-    await mongo.repos().update_one(
-        {"user_id": user_id, "repo_full_name": repo_full_name},
-        {"$set": {
-            "parse_status": status,
-            "parse_error": error,
-            "updated_at": datetime.now(timezone.utc),
-        }},
-    )
-
-
-def enqueue_initial_parse(background_tasks, user_id: str, repo_full_name: str) -> None:
-    enqueued_jobs.append({"job": "initial_parse", "user_id": user_id, "repo": repo_full_name})
-    background_tasks.add_task(run_initial_parse, user_id, repo_full_name)
-
-
-async def run_parse_retry(user_id: str, repo_full_name: str) -> None:
+async def _claim(repo_full_name: str) -> bool:
+    """Take the repo's indexing lock, reclaiming one abandoned by a crashed run."""
+    now = utcnow()
+    stale_before = now - timedelta(minutes=get_settings().parse_lock_stale_minutes)
     try:
-        token = await repo_service.get_github_token(user_id)
-        await repo_service.update_workdir(repo_full_name, token)
-    except Exception as exc:
-        logger.exception("parse_retry_checkout_failed", repo=repo_full_name)
-        await _set_parse_status(user_id, repo_full_name, "failed", error=f"checkout failed: {exc}")
-        return
-    await run_initial_parse(user_id, repo_full_name)
+        # a held lock doesn't match, so the upsert collides with it on _id
+        await mongo.index_locks().update_one(
+            {"_id": repo_full_name, "$or": [{"started_at": None}, {"started_at": {"$lt": stale_before}}]},
+            {"$set": {"started_at": now}},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        return False
+    await repository.update_all(repo_full_name, {"parse_status": JobStatus.IN_PROGRESS, "parse_started_at": now})
+    return True
 
 
-def enqueue_parse_retry(background_tasks, user_id: str, repo_full_name: str) -> None:
-    enqueued_jobs.append({"job": "parse_retry", "user_id": user_id, "repo": repo_full_name})
-    background_tasks.add_task(run_parse_retry, user_id, repo_full_name)
+async def _release(repo_full_name: str, status: str, error: str | None = None) -> None:
+    await repository.update_all(repo_full_name, {
+        "parse_status": status, "parse_error": error, "parse_started_at": None,
+    })
+    await mongo.index_locks().update_one({"_id": repo_full_name}, {"$set": {"started_at": None}})
 
 
-async def run_ticket_sync(user_id: str, project_key: str) -> None:
-    """Full ticket pull for one project; sync_status acts as the overlap lock."""
-    from app.services import ticket_service  # local import to avoid a cycle
+async def _record_pending(repo_full_name: str, full: bool) -> None:
+    fields = {"sync_requested_at": utcnow()}
+    if full:
+        fields["pending_full"] = True  # never downgraded by a later incremental request
+    await mongo.index_locks().update_one({"_id": repo_full_name}, {"$set": fields})
 
-    claimed = await mongo.jira_projects().find_one_and_update(
-        {
-            "user_id": user_id,
-            "project_key": project_key,
-            "status": {"$ne": "disconnected"},
-            "sync_status": {"$ne": "in_progress"},
-        },
-        {"$set": {"sync_status": "in_progress", "updated_at": datetime.now(timezone.utc)}},
+
+async def _take_pending(repo_full_name: str) -> bool | None:
+    """Atomically claim and clear queued work. Returns whether it's a full index, or None."""
+    doc = await mongo.index_locks().find_one_and_update(
+        {"_id": repo_full_name, "sync_requested_at": {"$ne": None}},
+        {"$set": {"sync_requested_at": None, "pending_full": False}},
     )
-    if claimed is None:
-        logger.info("ticket_sync_skipped_already_running", project=project_key)
-        return
-
-    try:
-        count = await ticket_service.sync_project(user_id, project_key)
-        await mongo.jira_projects().update_one(
-            {"user_id": user_id, "project_key": project_key},
-            {"$set": {
-                "sync_status": "done",
-                "sync_error": None,
-                "last_synced_at": datetime.now(timezone.utc),
-                "updated_at": datetime.now(timezone.utc),
-            }},
-        )
-        logger.info("ticket_sync_done", project=project_key, tickets=count)
-    except Exception as exc:
-        logger.exception("ticket_sync_failed", project=project_key)
-        await mongo.jira_projects().update_one(
-            {"user_id": user_id, "project_key": project_key},
-            {"$set": {
-                "sync_status": "failed",
-                "sync_error": str(exc),
-                "updated_at": datetime.now(timezone.utc),
-            }},
-        )
+    return None if doc is None else bool(doc.get("pending_full"))
 
 
-async def resync_all_projects() -> None:
-    """One polling pass over every connected project (eval-1 choice: polling
-    instead of Jira webhooks — say so if asked why tickets aren't real-time)."""
-    async for project in mongo.jira_projects().find({"status": {"$ne": "disconnected"}}):
-        await run_ticket_sync(project["user_id"], project["project_key"])
+async def run_connector_sync(workspace_id: str, provider: str, target_key: str) -> None:
+    """Sync one tracker target (a Jira project) into work_items."""
+    await sync.run_work_item_sync(workspace_id, provider, target_key)
 
 
-def enqueue_ticket_sync(background_tasks, user_id: str, project_key: str) -> None:
-    enqueued_jobs.append({"job": "ticket_sync", "user_id": user_id, "project": project_key})
-    background_tasks.add_task(run_ticket_sync, user_id, project_key)
+async def resync_all_targets() -> None:
+    """One polling pass over every connected target (polling, not webhooks: see app/connectors/sync.py)."""
+    async for target in connectors.all_targets():
+        await run_connector_sync(target["workspace_id"], target["provider"], target["key"])

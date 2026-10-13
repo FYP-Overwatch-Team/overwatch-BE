@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from neo4j import AsyncGraphDatabase
@@ -9,6 +10,9 @@ class GraphStore(Protocol):
     """Injectable interface over Neo4j so services and tests never touch the driver directly."""
 
     async def run(self, query: str, **params: Any) -> list[dict]: ...
+
+    async def run_write(self, statements: Sequence[tuple[str, dict]]) -> None:
+        """Run several statements in one write transaction, all or nothing."""
 
     async def close(self) -> None: ...
 
@@ -25,6 +29,21 @@ class Neo4jStore:
         async with self._driver.session() as session:
             result = await session.run(query, **params)
             return [dict(record) async for record in result]
+
+    async def run_write(self, statements: Sequence[tuple[str, dict]]) -> None:
+        """One explicit write transaction for a batch of statements.
+
+        Graph writes come in related groups — nodes then the edges between
+        them — and a half-applied group would leave dangling references until
+        the next sync. Committing a group together avoids that.
+        """
+        async with self._driver.session() as session:
+
+            async def work(tx):
+                for query, params in statements:
+                    await tx.run(query, **params)
+
+            await session.execute_write(work)
 
     async def close(self) -> None:
         await self._driver.close()

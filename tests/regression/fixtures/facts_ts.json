@@ -1,0 +1,243 @@
+{
+  "api/server.ts": {
+    "calls": [
+      {
+        "argument_count": 0,
+        "callee": "express",
+        "enclosing": "startServer",
+        "is_construction": false,
+        "line": 5,
+        "receiver": null
+      },
+      {
+        "argument_count": 2,
+        "callee": "app.get",
+        "enclosing": "startServer",
+        "is_construction": false,
+        "line": 6,
+        "receiver": "app"
+      },
+      {
+        "argument_count": 1,
+        "callee": "getUser",
+        "enclosing": "startServer",
+        "is_construction": false,
+        "line": 7,
+        "receiver": null
+      },
+      {
+        "argument_count": 1,
+        "callee": "res.json",
+        "enclosing": "startServer",
+        "is_construction": false,
+        "line": 7,
+        "receiver": "res"
+      }
+    ],
+    "content_hash": "b86d290f9719f6458fccdb506e0f39351879d0a9b4e0b1d386b6c9070b77ba16",
+    "definitions": [
+      {
+        "docstring": null,
+        "end_line": 9,
+        "exported": true,
+        "kind": "function",
+        "name": "startServer",
+        "parent": null,
+        "qualified_name": "startServer",
+        "signature": "startServer(): void",
+        "start_line": 4
+      }
+    ],
+    "has_syntax_errors": false,
+    "http_calls": [],
+    "imports": [
+      {
+        "alias": "express",
+        "is_type_only": false,
+        "is_wildcard": false,
+        "line": 1,
+        "names": [
+          "default"
+        ],
+        "specifier": "express"
+      },
+      {
+        "alias": null,
+        "is_type_only": false,
+        "is_wildcard": false,
+        "line": 2,
+        "names": [
+          "getUser"
+        ],
+        "specifier": "../services/user"
+      }
+    ],
+    "inheritance": [],
+    "language": "typescript",
+    "loc": 10,
+    "parser_version": 2,
+    "path": "api/server.ts",
+    "renders": [],
+    "routes": [
+      {
+        "framework": "express",
+        "handler": "startServer",
+        "line": 6,
+        "method": "GET",
+        "path": "/user"
+      }
+    ],
+    "truncated": false
+  },
+  "index.ts": {
+    "calls": [
+      {
+        "argument_count": 0,
+        "callee": "startServer",
+        "enclosing": null,
+        "is_construction": false,
+        "line": 3,
+        "receiver": null
+      }
+    ],
+    "content_hash": "83c5be0a53f217b76179a353d973a6068585df6c40363499a83cdcaac10cf47c",
+    "definitions": [],
+    "has_syntax_errors": false,
+    "http_calls": [],
+    "imports": [
+      {
+        "alias": null,
+        "is_type_only": false,
+        "is_wildcard": false,
+        "line": 1,
+        "names": [
+          "startServer"
+        ],
+        "specifier": "./api/server"
+      }
+    ],
+    "inheritance": [],
+    "language": "typescript",
+    "loc": 4,
+    "parser_version": 2,
+    "path": "index.ts",
+    "renders": [],
+    "routes": [],
+    "truncated": false
+  },
+  "services/user.ts": {
+    "calls": [
+      {
+        "argument_count": 1,
+        "callee": "fmt",
+        "enclosing": "UserService.lookup",
+        "is_construction": false,
+        "line": 5,
+        "receiver": null
+      },
+      {
+        "argument_count": 1,
+        "callee": "fmt",
+        "enclosing": "getUser",
+        "is_construction": false,
+        "line": 10,
+        "receiver": null
+      }
+    ],
+    "content_hash": "0b49983f2eb3999886a03f54ee5a0cb1aebca85d5da8ca418d347dcba2a9ece2",
+    "definitions": [
+      {
+        "docstring": null,
+        "end_line": 7,
+        "exported": true,
+        "kind": "class",
+        "name": "UserService",
+        "parent": null,
+        "qualified_name": "UserService",
+        "signature": "UserService",
+        "start_line": 3
+      },
+      {
+        "docstring": null,
+        "end_line": 6,
+        "exported": false,
+        "kind": "method",
+        "name": "lookup",
+        "parent": "UserService",
+        "qualified_name": "UserService.lookup",
+        "signature": "lookup(id: string): string",
+        "start_line": 4
+      },
+      {
+        "docstring": null,
+        "end_line": 11,
+        "exported": true,
+        "kind": "function",
+        "name": "getUser",
+        "parent": null,
+        "qualified_name": "getUser",
+        "signature": "getUser(id: string): { id: string }",
+        "start_line": 9
+      }
+    ],
+    "has_syntax_errors": false,
+    "http_calls": [],
+    "imports": [
+      {
+        "alias": null,
+        "is_type_only": false,
+        "is_wildcard": false,
+        "line": 1,
+        "names": [
+          "fmt"
+        ],
+        "specifier": "../utils/format"
+      }
+    ],
+    "inheritance": [],
+    "language": "typescript",
+    "loc": 12,
+    "parser_version": 2,
+    "path": "services/user.ts",
+    "renders": [],
+    "routes": [],
+    "truncated": false
+  },
+  "utils/format.ts": {
+    "calls": [
+      {
+        "argument_count": 0,
+        "callee": "value.trim",
+        "enclosing": "fmt",
+        "is_construction": false,
+        "line": 1,
+        "receiver": "value"
+      }
+    ],
+    "content_hash": "b09506c0c9adab9cc3566852f301542fddbd1f1e046d43de0141b0d1486245f8",
+    "definitions": [
+      {
+        "docstring": null,
+        "end_line": 1,
+        "exported": true,
+        "kind": "function",
+        "name": "fmt",
+        "parent": null,
+        "qualified_name": "fmt",
+        "signature": "fmt(value: string): string",
+        "start_line": 1
+      }
+    ],
+    "has_syntax_errors": false,
+    "http_calls": [],
+    "imports": [],
+    "inheritance": [],
+    "language": "typescript",
+    "loc": 2,
+    "parser_version": 2,
+    "path": "utils/format.ts",
+    "renders": [],
+    "routes": [],
+    "truncated": false
+  }
+}

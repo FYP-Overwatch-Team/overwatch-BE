@@ -1,6 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 from app.core.config import get_settings
+from app.core.constants import NATIVE_SOURCE, SprintState
 
 _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
@@ -9,7 +10,8 @@ _db: AsyncIOMotorDatabase | None = None
 def connect() -> AsyncIOMotorDatabase:
     global _client, _db
     settings = get_settings()
-    _client = AsyncIOMotorClient(settings.mongo_uri)
+    # tz_aware: datetimes come back UTC-aware, so comparisons with utcnow() just work
+    _client = AsyncIOMotorClient(settings.mongo_uri, tz_aware=True)
     _db = _client[settings.mongo_db_name]
     return _db
 
@@ -51,17 +53,136 @@ def repos():
     return get_db()["repos"]
 
 
+def index_locks():
+    """One doc per repo: the indexing lock and any work queued behind it."""
+    return get_db()["index_locks"]
+
+
+def connections():
+    """One per workspace and provider (Jira, ...): how it's authorised and by whom."""
+    return get_db()["connections"]
+
+
+def sync_targets():
+    """The projects (lists, channels) a connection syncs."""
+    return get_db()["sync_targets"]
+
+
+def work_items():
+    """Board items: mirrored from a tracker (`source` = provider) or created here (`native`)."""
+    return get_db()["work_items"]
+
+
+def boards():
+    """One per tracker target (`source` = provider) plus one native board per workspace: columns, mode, prompt."""
+    return get_db()["boards"]
+
+
+def sprints():
+    """A board's sprints: native ones, and mirrors of the tracker's (`external_id` set)."""
+    return get_db()["sprints"]
+
+
+def work_item_comments():
+    """Comments on native items, and who in Overwatch wrote the tracker comments posted from here."""
+    return get_db()["work_item_comments"]
+
+
 def jira_projects():
+    """Legacy: replaced by sync_targets; read only by migration scripts."""
     return get_db()["jira_projects"]
 
 
 def tickets():
+    """Legacy: replaced by work_items; read only by migration scripts."""
     return get_db()["tickets"]
+
+
+def workspaces():
+    return get_db()["workspaces"]
+
+
+def workspace_members():
+    return get_db()["workspace_members"]
+
+
+def workspace_invites():
+    return get_db()["workspace_invites"]
 
 
 def webhook_deliveries():
     return get_db()["webhook_deliveries"]
 
 
-def file_parses():
-    return get_db()["file_parses"]
+def chat_conversations():
+    """AI chat conversations, private to the member who started them; messages embedded."""
+    return get_db()["chat_conversations"]
+
+
+def usage_counters():
+    """Fixed-window request counters for rate limits; expire with their window."""
+    return get_db()["usage_counters"]
+
+
+def file_facts():
+    """Knowledge-graph extraction facts, one document per file."""
+    return get_db()["file_facts"]
+
+
+async def ensure_indexes() -> None:
+    """Create the indexes the hot paths depend on. Idempotent — safe on every boot.
+
+    The two TTL indexes are what keep the session store from growing without
+    bound: Mongo drops refresh-token rows once they pass `expires_at`, and
+    webhook delivery ids 30 days after receipt (GitHub never retries that late,
+    so anything older can no longer cause a duplicate re-parse).
+    """
+    # Session lookup on every /auth/refresh, plus family-wide revocation.
+    await refresh_tokens().create_index("token_hash", unique=True)
+    await refresh_tokens().create_index("family_id")
+    await refresh_tokens().create_index("user_id")  # logout-all
+    await refresh_tokens().create_index("expires_at", expireAfterSeconds=0)
+
+    await users().create_index("github_id", unique=True)
+    await workspace_members().create_index([("workspace_id", 1), ("user_id", 1)], unique=True)
+    await workspace_members().create_index("user_id")
+    await workspace_invites().create_index("token_hash", unique=True)
+    await workspace_invites().create_index("workspace_id")
+    await oauth_tokens().create_index([("owner_id", 1), ("provider", 1)], unique=True)
+    await repos().create_index([("workspace_id", 1), ("repo_full_name", 1)], unique=True)
+    await repos().create_index("repo_full_name")
+    # webhook routing: push events carry the repo id, installation events the installation id
+    await repos().create_index("github_repo_id")
+    await repos().create_index("installation_id")
+    await connections().create_index([("workspace_id", 1), ("provider", 1)], unique=True)
+    await sync_targets().create_index([("workspace_id", 1), ("provider", 1), ("key", 1)], unique=True)
+    await sync_targets().create_index("status")
+    # Must match the sync upsert filter: keyed on the provider's stable id, so an issue
+    # moved between projects (which changes its key) updates rather than duplicating.
+    await work_items().create_index([("workspace_id", 1), ("source", 1), ("external_id", 1)], unique=True)
+    await work_items().create_index([("workspace_id", 1), ("status_category", 1), ("rank", 1)])
+    await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1), ("column_id", 1), ("rank", 1)])
+    await boards().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1)], unique=True)
+    await sprints().create_index(
+        [("workspace_id", 1), ("source", 1), ("external_id", 1)], unique=True,
+        partialFilterExpression={"external_id": {"$type": "string"}},
+    )
+    await sprints().create_index([("board_id", 1), ("state", 1)])
+    # one active native sprint per board, even when two admins start sprints at once (Jira allows parallel ones)
+    await sprints().create_index(
+        "board_id", unique=True, name="one_active_native_sprint",
+        partialFilterExpression={"source": NATIVE_SOURCE, "state": SprintState.ACTIVE.value},
+    )
+    await work_item_comments().create_index([("workspace_id", 1), ("item_id", 1), ("created_at", 1)])
+    await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1), ("sprint_id", 1)])
+
+    # Extraction cache: read on every sync to decide what changed, and always
+    # scoped to one repository.
+    await file_facts().create_index([("repo_full_name", 1), ("path", 1)], unique=True)
+
+    # Webhook dedup: looked up on every delivery, expired 30 days after receipt.
+    await chat_conversations().create_index([("workspace_id", 1), ("user_id", 1), ("repo_full_name", 1), ("updated_at", -1)])
+    await chat_conversations().create_index("expires_at", expireAfterSeconds=0)
+    await usage_counters().create_index("expires_at", expireAfterSeconds=0)
+    await webhook_deliveries().create_index("delivery_id", unique=True)
+    await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)
