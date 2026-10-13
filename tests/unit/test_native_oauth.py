@@ -6,7 +6,7 @@ from httpx import Response
 
 from app.connectors import registry
 from app.core import security
-from app.core.exceptions import ExternalServiceError, UnauthorizedError
+from app.core.exceptions import ExternalServiceError, ForbiddenError, UnauthorizedError
 from app.db import mongo, oauth_tokens
 
 TOKEN_URL = "https://auth.atlassian.com/oauth/token"
@@ -68,6 +68,31 @@ async def test_a_revoked_token_needs_reauth():
         with pytest.raises(UnauthorizedError):
             await auth.request(CONN, "GET", API_URL)
     assert (await oauth_tokens.get("ws-1", "jira"))["status"] == "needs_reauth"
+
+
+async def test_a_call_outside_the_grants_scopes_fails_alone(monkeypatch):
+    await seed_tokens(expires_in_seconds=3600)
+    with respx.mock as router:
+        router.get(API_URL).mock(return_value=Response(401, json={"code": 401, "message": "Unauthorized; scope does not match"}))
+        with pytest.raises(ForbiddenError) as exc:
+            await auth.request(CONN, "GET", API_URL)
+    assert exc.value.error_code == "jira_scope_missing"
+    # the token still works for everything else, so the connection isn't flagged
+    assert (await oauth_tokens.get("ws-1", "jira"))["status"] == "active"
+
+
+async def test_a_rate_limit_with_a_short_retry_after_is_retried_once(monkeypatch):
+    await seed_tokens(expires_in_seconds=3600)
+    waits = []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr("app.connectors.auth_backends.asyncio.sleep", sleep)
+    with respx.mock as router:
+        route = router.get(API_URL).mock(side_effect=[Response(429, headers={"Retry-After": "2"}), Response(200, json={})])
+        resp = await auth.request(CONN, "GET", API_URL)
+    assert (resp.status_code, route.call_count, waits) == (200, 2, [2.0])
 
 
 async def test_rate_limits_surface_as_their_own_error():
