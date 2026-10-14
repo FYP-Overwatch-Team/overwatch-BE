@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     # can be reclaimed, so a restart mid-parse cannot wedge a repository.
     parse_lock_stale_minutes: int = 15
 
+    # Where uploaded files (doc images) live: "local" (a folder, for dev) or "s3".
+    # S3 credentials come from the standard AWS sources (env vars, instance role), never from here.
+    storage_backend: str = "local"
+    uploads_dir: str = "./uploads"
+    s3_bucket: str = ""
+    s3_region: str = ""
+    # only for S3-compatible stores (MinIO, R2); empty for AWS
+    s3_endpoint_url: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

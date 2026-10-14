@@ -3,6 +3,7 @@ import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from mongomock.collection import BulkOperationBuilder
 from mongomock_motor import AsyncMongoMockClient
 
 from app.core.config import get_settings
@@ -15,6 +16,8 @@ from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
     use_knowledge_graph_store,
 )
+from app.storage.memory import InMemoryStore
+from app.storage.store import use_object_store
 from tests.fakes import FakeGeminiClient
 
 
@@ -46,6 +49,19 @@ def test_env(monkeypatch, github_app_key):
     get_settings.cache_clear()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def bulk_updates_take_sort():
+    """pymongo's UpdateOne passes `sort`, which mongomock's bulk builder predates."""
+    add_update = BulkOperationBuilder.add_update
+
+    def accepting_sort(self, *args, sort=None, **kwargs):
+        return add_update(self, *args, **kwargs)
+
+    BulkOperationBuilder.add_update = accepting_sort
+    yield
+    BulkOperationBuilder.add_update = add_update
+
+
 @pytest.fixture(autouse=True)
 async def mock_mongo():
     client = AsyncMongoMockClient(tz_aware=True)
@@ -67,6 +83,15 @@ def graph_store():
     yield store
     use_knowledge_graph_store(None)
     use_facts_store(None)
+
+
+@pytest.fixture(autouse=True)
+def object_store():
+    """Every test uploads into an empty in-memory store."""
+    store = InMemoryStore()
+    use_object_store(store)
+    yield store
+    use_object_store(None)
 
 
 @pytest.fixture(autouse=True)
