@@ -21,6 +21,7 @@ from app.jira.router import router as jira_router
 from app.link_previews.router import router as link_previews_router
 from app.onboarding.router import router as onboarding_router
 from app.query.router import router as query_router
+from app.work_item_types.router import router as work_item_types_router
 from app.work_items.router import router as work_items_router
 from app.workspaces.router import router as workspaces_router
 from app.workers import jobs
@@ -126,6 +127,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(webhooks_router)
     app.include_router(connections_router)
     app.include_router(work_items_router)
+    app.include_router(work_item_types_router)
     app.include_router(boards_router)
     app.include_router(sprints_router)
     app.include_router(comments_router)

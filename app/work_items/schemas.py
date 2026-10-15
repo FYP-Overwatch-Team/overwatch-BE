@@ -38,6 +38,8 @@ class WorkItem(BaseModel):
     #: the tracker's rich text as Markdown, for display; edits still go through `description`
     description_md: str | None = None
     status: str | None = None
+    #: the tracker's status id; null for native items
+    status_id: str | None = None
     status_category: StatusCategory
     #: the board column it's in; null for a tracker status no column holds
     column_id: str | None = None
@@ -46,7 +48,10 @@ class WorkItem(BaseModel):
     rank: float
     assignee: WorkItemAssignee | None = None
     priority: str | None = None
+    #: the workspace's work item type (Task, Bug, ...); null for a native item from before types
+    type_id: str | None = None
     issue_type: str | None = None
+    issue_type_id: str | None = None
     reporter: WorkItemAssignee | None = None
     labels: list[str] = []
     parent: ParentItem | None = None
@@ -73,6 +78,8 @@ class CreateWorkItem(BaseModel):
     column_id: str | None = None
     # an open sprint of the board; the backlog when omitted
     sprint_id: str | None = None
+    # the workspace's Task when omitted
+    type_id: str | None = None
 
 
 class UpdateWorkItem(BaseModel):
@@ -85,11 +92,14 @@ class UpdateWorkItem(BaseModel):
     labels: list[Annotated[str, Field(min_length=1, max_length=255, pattern=r"^\S+$")]] | None = Field(default=None, max_length=50)
     due_date: date | None = None
     story_points: float | None = Field(default=None, ge=0, le=1000)
+    type_id: str | None = None
 
     @model_validator(mode="after")
     def _title_not_null(self):
         if "title" in self.model_fields_set and self.title is None:
             raise ValueError("title can't be empty")
+        if "type_id" in self.model_fields_set and self.type_id is None:
+            raise ValueError("an item always has a type")
         return self
 
 
@@ -113,3 +123,8 @@ class Lane(BaseModel):
     key: str
     label: str | None
     total: int
+
+
+class AllowedTypes(BaseModel):
+    #: the types this item can be changed to; null when it can take any of the workspace's
+    type_ids: list[str] | None

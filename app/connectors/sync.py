@@ -23,6 +23,7 @@ from app.core.constants import JobStatus
 from app.core.exceptions import ExternalServiceError, NotFoundError
 from app.core.time import utcnow
 from app.sprints import service as sprints
+from app.work_item_types import service as work_item_types
 from app.work_items import repository as work_items
 
 logger = structlog.get_logger("app.connectors.sync")
@@ -84,6 +85,7 @@ async def _sync(workspace_id: str, provider: str, target_key: str, target: dict,
         except Exception:
             logger.warning("sprints_unavailable", provider=provider, target=target_key, exc_info=True)
     sprint_ids: dict[str, str] = {}
+    type_ids: dict[str, str | None] = {}
 
     seen: list[str] = []
     seen_tokens: set[str] = set()
@@ -93,6 +95,7 @@ async def _sync(workspace_id: str, provider: str, target_key: str, target: dict,
         batch = []
         for raw in page.items:
             fields = boards.place(board, adapter.normalise(conn, target_key, raw, board))
+            fields["type_id"] = await work_item_types.type_for(workspace_id, provider, fields.get("issue_type"), type_ids)
             batch.append(await sprints.apply_tracker_sprint(board, fields, sprint_ids))
             seen.append(fields["external_id"])
         await work_items.upsert_many_synced(workspace_id, batch)

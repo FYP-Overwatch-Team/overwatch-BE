@@ -68,6 +68,11 @@ def sync_targets():
     return get_db()["sync_targets"]
 
 
+def work_item_types():
+    """A workspace's kinds of work item (Task, Bug, ...), with the icon and color each shows with."""
+    return get_db()["work_item_types"]
+
+
 def work_items():
     """Board items: mirrored from a tracker (`source` = provider) or created here (`native`)."""
     return get_db()["work_items"]
@@ -216,6 +221,11 @@ async def ensure_indexes() -> None:
         partialFilterExpression={"external_id": {"$type": "string"}},
     )
     await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1), ("sprint_id", 1)])
+    # a type's items, found again when it's deleted
+    await work_items().create_index([("workspace_id", 1), ("type_id", 1)])
+    # one type per name in a workspace, whatever its case
+    await work_item_types().create_index([("workspace_id", 1), ("name_key", 1)], unique=True)
+
     # Extraction cache: read on every sync to decide what changed, and always
     # scoped to one repository.
     await file_facts().create_index([("repo_full_name", 1), ("path", 1)], unique=True)
