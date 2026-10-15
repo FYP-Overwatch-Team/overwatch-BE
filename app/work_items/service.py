@@ -12,6 +12,7 @@ from datetime import timedelta
 from app.auth.repository import get_user
 from app.boards import repository as boards
 from app.boards import service as board_service
+from app.boards import workflow
 from app.connectors import registry
 from app.work_item_types import service as work_item_types
 from app.connectors import repository as connectors
@@ -82,6 +83,8 @@ async def _query(
     if board_id:
         board = await board_service.get_visible(workspace_id, board_id)
         query.update(_scope(board))
+        # what the tracker's own board doesn't show isn't on ours either
+        query["tracker_hidden"] = {"$ne": True}
         if sprint:
             sprint_id = await _sprint_filter(board, sprint)
             if sprint_id is _NO_SPRINT:
@@ -320,18 +323,47 @@ async def move(member: dict, item_id: str, body) -> dict:
     board = await boards.ensure(workspace_id, item["source"], item["target_key"])
     column = _column(board, body.column_id)
     fields: dict = {}
+    current = to_work_item(item, set())["column_id"]
     if item["source"] == NATIVE_SOURCE:
+        if column["id"] != current and column["id"] not in workflow.native_targets(board, current):
+            raise ConflictError(_blocked(board, current, column), error_code="transition_not_allowed")
         fields = {"column_id": column["id"], "status_category": column["status_category"]}
         if column["status_category"] != item["status_category"]:
             fields["status_changed_at"] = utcnow()
-    elif column["id"] != to_work_item(item, set())["column_id"]:
+    elif column["id"] != current or (body.status_id and body.status_id != item.get("status_id")):
         conn = await writable_connection(workspace_id, item["source"])
-        await registry.get(item["source"]).adapter.move(registry.auth_for(conn), conn, item["external_id"], column)
+        await registry.work_item_source(item["source"]).move(registry.auth_for(conn), conn, item["external_id"], column, body.status_id)
         # the column comes from the status the tracker now reports
         await _refresh(workspace_id, conn, item["target_key"], item["external_id"])
     fields["rank"] = await _rank_between(_scope(board), column["id"], body.before_id, body.after_id, item_id)
     await repository.update(item_id, fields)
     return await _result(workspace_id, item_id)
+
+
+def _blocked(board: dict, from_column_id: str, column: dict) -> str:
+    """Why a native card can't move there, and the column to move it to first when there's a way."""
+    names = {c["id"]: c["name"] for c in board["columns"]}
+    step = workflow.first_step(board, from_column_id, column["id"])
+    if step:
+        return f"Move it to {names[step]} first: this board's workflow doesn't go from {names.get(from_column_id)} to {column['name']}."
+    return f"This board's workflow doesn't allow moving from {names.get(from_column_id)} to {column['name']}."
+
+
+async def allowed_moves(member: dict, item_id: str) -> dict:
+    """Where an item can move from where it is: its board's rules, or what its tracker allows it now."""
+    workspace_id = member["workspace_id"]
+    item = await get_visible(workspace_id, item_id)
+    board = await boards.ensure(workspace_id, item["source"], item["target_key"])
+    current = to_work_item(item, set())["column_id"]
+    if item["source"] == NATIVE_SOURCE:
+        targets = [{"column_id": column_id} for column_id in workflow.native_targets(board, current)]
+        rules = any(c.get("next") is not None for c in board["columns"])
+        return {"basis": "board" if rules else "open", "targets": targets}
+    conn = await writable_connection(workspace_id, item["source"])
+    reachable = await registry.work_item_source(item["source"]).allowed_statuses(registry.auth_for(conn), conn, item["external_id"])
+    if reachable is None:
+        return {"basis": "open", "targets": [{"column_id": c["id"]} for c in board["columns"] if c["id"] != current]}
+    return {"basis": "live", "targets": workflow.tracker_targets(board, {**item, "column_id": current}, reachable)}
 
 
 async def _open_sprint(board: dict, sprint_id: str | None) -> dict | None:

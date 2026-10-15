@@ -80,7 +80,7 @@ async def test_a_column_the_workflow_cant_reach_is_refused(client):
         router.get(TRANSITIONS).mock(return_value=Response(200, json={"transitions": []}))
         resp = await client.post(f"/work-items/{item_id}/move", json={"column_id": "done"}, headers=headers)
 
-    assert resp.json()["meta"]["error_code"] == "jira_transition_unavailable"
+    assert resp.json()["meta"]["error_code"] == "transition_not_allowed"
     assert (await stored())["status_category"] == "in_progress"
 
 

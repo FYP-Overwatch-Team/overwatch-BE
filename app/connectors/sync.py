@@ -67,6 +67,37 @@ async def run_work_item_sync(workspace_id: str, provider: str, target_key: str) 
     await run_target(workspace_id, provider, target_key, _sync)
 
 
+# a board opened again within this long of its last sync isn't synced again (unless asked to)
+MIN_INTERVAL = timedelta(seconds=30)
+# how long a request waits for its sync; a slower one carries on and reports itself as running
+WAIT_SECONDS = 20
+# syncs started for a request, kept referenced so they finish after it returns
+_running: set[asyncio.Task] = set()
+
+
+async def sync_now(workspace_id: str, provider: str, target_key: str, *, force: bool) -> dict:
+    """Sync a tracker target for someone looking at it, and return its sync state.
+
+    Waits briefly so a quick sync is done by the time this returns; a slow one keeps running.
+    Skipped when it synced moments ago, unless `force` (the refresh button).
+    """
+    target = await repository.find_target(workspace_id, provider, target_key)
+    if target is None:
+        raise NotFoundError("not connected", error_code="target_not_found")
+    last = target.get("last_synced_at")
+    if not force and last is not None and utcnow() - last < MIN_INTERVAL:
+        return target
+    task = asyncio.create_task(run_target(workspace_id, provider, target_key, _sync, scheduled_full=False))
+    _running.add(task)
+    task.add_done_callback(_running.discard)
+    try:
+        # shielded: a client that leaves, or a sync that takes longer, doesn't stop it
+        await asyncio.wait_for(asyncio.shield(task), WAIT_SECONDS)
+    except TimeoutError:
+        pass
+    return await repository.find_target(workspace_id, provider, target_key)
+
+
 async def _sync(workspace_id: str, provider: str, target_key: str, target: dict, full: bool) -> int:
     conn = await repository.active_connection(workspace_id, provider)
     if conn is None:
@@ -118,6 +149,12 @@ async def _read_board(adapter, auth, conn: dict, board: dict) -> dict:
         board = await boards.offer_columns(board, await adapter.board_columns(auth, conn, target_key))
     except Exception:
         logger.warning("board_columns_unavailable", provider=provider, target=target_key, exc_info=True)
+    try:
+        workflow = await adapter.workflow(auth, conn, target_key)
+        if workflow is not None and workflow != board.get("tracker_workflow"):
+            board = await board_store.update(board["_id"], {"tracker_workflow": workflow})
+    except Exception:
+        logger.warning("workflow_unavailable", provider=provider, target=target_key, exc_info=True)
     try:
         details = await adapter.board_details(auth, conn, target_key)
     except Exception:

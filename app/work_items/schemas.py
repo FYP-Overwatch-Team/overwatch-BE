@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -105,6 +105,8 @@ class UpdateWorkItem(BaseModel):
 
 class MoveWorkItem(BaseModel):
     column_id: str
+    # which of the column's statuses, when it holds several the item can reach
+    status_id: str | None = None
     # the cards it lands between; both None for an empty column
     before_id: str | None = None
     after_id: str | None = None
@@ -128,3 +130,19 @@ class Lane(BaseModel):
 class AllowedTypes(BaseModel):
     #: the types this item can be changed to; null when it can take any of the workspace's
     type_ids: list[str] | None
+
+
+class MoveTarget(BaseModel):
+    column_id: str
+    #: the tracker status it lands in; null on native boards
+    status_id: str | None = None
+    status: str | None = None
+    #: the tracker's name for the move, when it has one
+    transition_name: str | None = None
+
+
+class AllowedMoves(BaseModel):
+    """Where an item can move: `open` boards allow any column; `live` is the tracker's answer for this item now."""
+
+    basis: Literal["open", "board", "live"]
+    targets: list[MoveTarget]

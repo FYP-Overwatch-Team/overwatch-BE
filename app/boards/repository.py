@@ -65,6 +65,9 @@ async def update(board_id: str, fields: dict) -> dict:
 async def place_items(board: dict) -> None:
     """Recompute `column_id` for every item on a tracker board after its columns changed."""
     scope = {"workspace_id": board["workspace_id"], "source": board["source"], "target_key": board["target_key"]}
+    shown = board.get("tracker_status_ids") or []
+    if shown:
+        await mark_hidden(scope, shown)
     if board["column_mode"] == ColumnMode.DEFAULT:
         for column in board["columns"]:
             await mongo.work_items().update_many({**scope, "status_category": column["status_category"]}, {"$set": {"column_id": column["id"]}})
@@ -72,3 +75,16 @@ async def place_items(board: dict) -> None:
     await mongo.work_items().update_many(scope, {"$set": {"column_id": None}})
     for column in board["columns"]:
         await mongo.work_items().update_many({**scope, "status_id": {"$in": column["status_ids"]}}, {"$set": {"column_id": column["id"]}})
+
+
+async def mark_hidden(scope: dict, shown_status_ids: list[str]) -> None:
+    """Hide a tracker's items in statuses its own board doesn't show (Jira leaves them off board and backlog)."""
+    await mongo.work_items().update_many({**scope, "status_id": {"$nin": shown_status_ids}}, {"$set": {"tracker_hidden": True}})
+    await mongo.work_items().update_many({**scope, "status_id": {"$in": shown_status_ids}}, {"$set": {"tracker_hidden": False}})
+
+
+async def move_items(scope: dict, from_column_id: str, to_column_id: str, status_category: str) -> None:
+    """Put a column's items in another (or the same) column, taking on its category."""
+    await mongo.work_items().update_many(
+        {**scope, "column_id": from_column_id}, {"$set": {"column_id": to_column_id, "status_category": status_category}},
+    )

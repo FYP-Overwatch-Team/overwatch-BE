@@ -20,7 +20,7 @@ ISSUES = json.loads((FIXTURES / "sample_jira_tickets.json").read_text(encoding="
 
 
 async def connect_jira(workspace_id: str, scopes: list[str] = WRITE_SCOPES, key: str = "OVR") -> None:
-    await oauth_tokens.save(workspace_id, "jira", {"access_token": "jira-access", "refresh_token": "r", "expires_in": 3600})
+    await oauth_tokens.save(workspace_id, "atlassian", {"access_token": "jira-access", "refresh_token": "r", "expires_in": 3600})
     await mongo.connections().insert_one({
         "_id": f"conn-{workspace_id}", "workspace_id": workspace_id, "provider": "jira", "auth_backend": "native_oauth",
         "status": "active", "scopes": scopes, "connected_by": workspace_id,
