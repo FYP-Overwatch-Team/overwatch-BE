@@ -2,7 +2,7 @@
 
 from pymongo import ReturnDocument, UpdateOne
 
-from app.core.constants import DocumentKind
+from app.core.constants import DocPushState, DocumentKind
 from app.db import mongo
 
 # tree rows never carry the content, which is the bulk of a page
@@ -33,16 +33,16 @@ async def insert(doc: dict) -> None:
     await mongo.documents().insert_one(doc)
 
 
-async def update(workspace_id: str, node_id: str, fields: dict, *, source: str) -> dict | None:
+async def update(workspace_id: str, node_id: str, fields: dict, *, source: str, **query) -> dict | None:
     return await mongo.documents().find_one_and_update(
-        _live(workspace_id, _id=node_id, source=source), {"$set": fields}, return_document=ReturnDocument.AFTER,
+        _live(workspace_id, _id=node_id, source=source, **query), {"$set": fields}, return_document=ReturnDocument.AFTER,
     )
 
 
-async def save_content(workspace_id: str, node_id: str, base_version: int, fields: dict, *, source: str) -> dict | None:
+async def save_content(workspace_id: str, node_id: str, base_version: int, fields: dict, *, source: str, **query) -> dict | None:
     """Write a page's content edited from `base_version`; None when it changed in between, or can't take content."""
     return await mongo.documents().find_one_and_update(
-        _live(workspace_id, _id=node_id, source=source, kind=DocumentKind.PAGE, version=base_version),
+        _live(workspace_id, _id=node_id, source=source, kind=DocumentKind.PAGE, version=base_version, **query),
         {"$set": fields, "$inc": {"version": 1}},
         return_document=ReturnDocument.AFTER,
     )
@@ -141,3 +141,84 @@ async def restore(workspace_id: str, root_id: str) -> None:
         {"workspace_id": workspace_id, "archive_root_id": root_id},
         {"$set": {"archived_at": None, "archived_by": None, "archive_root_id": None, "archived_root": False}},
     )
+
+
+async def mirror(workspace_id: str, source: str, target_key: str) -> list[dict]:
+    """Every node mirrored from one synced target, archived ones too, without content."""
+    query = {"workspace_id": workspace_id, "source": source, "target_key": target_key}
+    return [doc async for doc in mongo.documents().find(query, {**SUMMARY, "conflict_content": 0})]
+
+
+async def write_mirror(ops: list) -> None:
+    if ops:
+        await mongo.documents().bulk_write(ops, ordered=False)
+
+
+async def save_synced(node_id: str, expected: dict, fields: dict) -> bool:
+    """Store content read from the source, unless the page changed here since it was read (`expected`)."""
+    result = await mongo.documents().update_one({"_id": node_id, **expected}, {"$set": fields, "$inc": {"version": 1}})
+    return result.modified_count > 0
+
+
+async def archive_target(workspace_id: str, source: str, target_key: str, root_id: str, fields: dict) -> None:
+    """Archive a target's whole mirror as one group under its root folder."""
+    query = {"workspace_id": workspace_id, "source": source, "target_key": target_key, "archived_at": None}
+    await mongo.documents().update_many(query, {"$set": {**fields, "archive_root_id": root_id}})
+    await mongo.documents().update_one({"_id": root_id}, {"$set": {"archived_root": True}})
+
+
+async def mirrored_pages(workspace_id: str, node_id: str, source: str) -> list[dict]:
+    """A node and the live pages under it that came from `source`."""
+    query = _live(workspace_id, source=source, kind=DocumentKind.PAGE, **{"$or": [{"_id": node_id}, {"ancestor_ids": node_id}]})
+    return [doc async for doc in mongo.documents().find(query, {"external_id": 1})]
+
+
+async def claim_push(now, stale_before) -> dict | None:
+    """The next page due to go back to its source, marked as on its way; a push stuck past `stale_before` is retried."""
+    for query in (
+        {"push_state": DocPushState.PENDING, "push_due_at": {"$lte": now}},
+        {"push_state": DocPushState.PUSHING, "push_started_at": {"$lt": stale_before}},
+    ):
+        doc = await mongo.documents().find_one_and_update(
+            query, {"$set": {"push_state": DocPushState.PUSHING, "push_started_at": now}}, return_document=ReturnDocument.AFTER,
+        )
+        if doc:
+            return doc
+    return None
+
+
+async def push_done(node_id: str, external_version: int, now) -> None:
+    await mongo.documents().update_one({"_id": node_id}, {"$set": {"external_version": external_version, "synced_at": now}})
+    # an edit saved while it was on its way is still pending, and goes next
+    await mongo.documents().update_one(
+        {"_id": node_id, "push_state": DocPushState.PUSHING}, {"$set": {"push_state": DocPushState.NONE, "push_error": None}},
+    )
+
+
+async def push_later(node_id: str, due, error: str) -> None:
+    await mongo.documents().update_one(
+        {"_id": node_id, "push_state": DocPushState.PUSHING},
+        {"$set": {"push_state": DocPushState.PENDING, "push_due_at": due, "push_error": error}},
+    )
+
+
+async def resolve_conflict(workspace_id: str, node_id: str, base_version: int, fields: dict) -> dict | None:
+    return await mongo.documents().find_one_and_update(
+        _live(workspace_id, _id=node_id, push_state=DocPushState.CONFLICT, version=base_version),
+        {"$set": {**fields, "conflict_content": None, "conflict_content_md": None, "conflict_title": None}, "$inc": {"version": 1}},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def archive_group(workspace_id: str, root_id: str) -> list[dict]:
+    query = {"workspace_id": workspace_id, "archive_root_id": root_id}
+    return [doc async for doc in mongo.documents().find(query, {"source": 1, "external_id": 1, "kind": 1, "archived_by_sync": 1})]
+
+
+async def delete_group(workspace_id: str, root_id: str) -> None:
+    await mongo.documents().delete_many({"workspace_id": workspace_id, "archive_root_id": root_id})
+
+
+def archived_before(before):
+    """Archive roots older than `before`, across workspaces."""
+    return mongo.documents().find({"archived_root": True, "archived_at": {"$lt": before}}, {"workspace_id": 1})

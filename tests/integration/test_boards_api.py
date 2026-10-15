@@ -271,3 +271,25 @@ async def test_settings_for_columns_the_board_doesnt_have_are_refused(client):
 
     assert unknown.json()["meta"]["error_code"] == "column_not_found"
     assert bad_color.status_code == 422
+
+
+async def test_items_in_statuses_the_jira_board_leaves_out_are_hidden_as_in_jira(client):
+    headers = auth_headers(await login(client))
+    await connect_jira(headers["X-Workspace-Id"], scopes=[*WRITE_SCOPES, *AGILE_SCOPES])
+    await mongo.sync_targets().update_many({}, {"$set": {"last_full_sync_at": None}})
+
+    # the Jira board maps To Do and In Progress, not Done (as a team might leave out "Archived")
+    with respx.mock as router:
+        router.get(SEARCH_URL).mock(return_value=search_response(issues()))
+        router.get(f"{API}/project/OVR/statuses").mock(return_value=statuses())
+        router.get(f"{AGILE}/board").mock(return_value=Response(200, json={"values": [{"id": 9, "name": "OVR", "type": "kanban"}]}))
+        router.get(f"{AGILE}/board/9/configuration").mock(return_value=Response(200, json={"columnConfig": {"columns": [
+            {"name": "Ready", "statuses": [{"id": "1"}]}, {"name": "Working", "statuses": [{"id": "3"}]},
+        ]}}))
+        await jobs.run_connector_sync(headers["X-Workspace-Id"], "jira", "OVR")
+
+    board = (await boards(client, headers))["jira"]
+    listed = (await client.get(f"/work-items?board_id={board['id']}", headers=headers)).json()["data"]
+    assert sorted(i["key"] for i in listed) == ["OVR-2", "OVR-3"]
+    # kept, just off the board
+    assert (await mongo.work_items().find_one({"key": "OVR-1"}))["tracker_hidden"] is True

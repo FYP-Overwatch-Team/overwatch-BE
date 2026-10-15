@@ -17,6 +17,7 @@ dependencies = [
     "pathspec>=1.1.1",
     "google-genai>=2.12.1",
     "boto3>=1.43.113",
+    "httpx>=0.28",
 ]
 
 [dependency-groups]

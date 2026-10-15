@@ -46,5 +46,8 @@ class S3Store:
             raise
         return {"size": meta["ContentLength"], "content_type": meta.get("ContentType", "")}
 
+    async def write(self, key: str, data: bytes, content_type: str) -> None:
+        await asyncio.to_thread(self.client.put_object, Bucket=self.bucket, Key=key, Body=data, ContentType=content_type)
+
     async def delete(self, key: str) -> None:
         await asyncio.to_thread(self.client.delete_object, Bucket=self.bucket, Key=key)

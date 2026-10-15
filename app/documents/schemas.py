@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.core.constants import DocumentKind
+from app.core.constants import DocPushState, DocumentKind
 
 TITLE = {"max_length": 255}
 #: a page's editor document, serialised; Mongo's own cap is 16 MB
@@ -39,7 +39,18 @@ class DocumentSummary(BaseModel):
     source: str  # NATIVE_SOURCE or the docs provider it's mirrored from
     # false for a mirrored doc whose provider can't take writes
     editable: bool
+    # whether pages can be created inside it (mirrored ones are created at their source)
+    can_add_pages: bool
+    external_url: str | None = None
     updated_at: datetime
+
+
+class ConflictCopy(BaseModel):
+    """What was saved here while the source changed too; kept until the user resolves it."""
+
+    title: str
+    content: dict
+    content_md: str | None = None
 
 
 class Document(DocumentSummary):
@@ -50,7 +61,6 @@ class Document(DocumentSummary):
     #: bumped on every content save; send it back as `base_version`
     version: int
     breadcrumbs: list[Crumb]
-    external_url: str | None = None
     #: who created it, as they were named then
     author: Person | None = None
     #: signed links to the page's uploaded images, by attachment id; they expire, so reload for fresh ones
@@ -58,6 +68,13 @@ class Document(DocumentSummary):
     created_by: str | None
     updated_by: str | None
     created_at: datetime
+    #: a mirrored page's way back to its source; null for pages written here
+    push_state: DocPushState | None = None
+    #: why the last push didn't go through; it's retried
+    push_error: str | None = None
+    #: when the source's content was last read or written
+    synced_at: datetime | None = None
+    conflict: ConflictCopy | None = None
 
 
 class CreateDocument(BaseModel):
@@ -122,3 +139,16 @@ class ArchivedDocument(BaseModel):
     archived_with: int
     archived_at: datetime
     archived_by: str | None
+    source: str
+
+
+class ConflictAction(StrEnum):
+    #: keep the source's version; the copy saved here is dropped (save it as a page first to keep it)
+    KEEP_SOURCE = "keep_source"
+    #: send the copy saved here over the source's version
+    OVERWRITE = "overwrite"
+
+
+class ResolveConflict(BaseModel):
+    action: ConflictAction
+    base_version: int = Field(ge=0)

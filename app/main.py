@@ -18,8 +18,10 @@ from app.github.router import router as github_router
 from app.github.webhooks import router as webhooks_router
 from app.graph.router import router as graph_router
 from app.jira.router import router as jira_router
+from app.link_previews.router import router as link_previews_router
 from app.onboarding.router import router as onboarding_router
 from app.query.router import router as query_router
+from app.work_item_types.router import router as work_item_types_router
 from app.work_items.router import router as work_items_router
 from app.workspaces.router import router as workspaces_router
 from app.workers import jobs
@@ -32,12 +34,27 @@ from app.db.knowledge_graph_store import get_knowledge_graph_store
 
 
 async def _tracker_sync_loop(interval_seconds: int) -> None:
+    # a pass at once, so a restart doesn't leave boards a whole interval behind
     while True:
-        await asyncio.sleep(interval_seconds)
         try:
             await jobs.resync_all_targets()
         except Exception:
             structlog.get_logger("app.jobs").exception("tracker_sync_loop_error")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _docs_loop(push_seconds: int) -> None:
+    """Push settled docs edits every few seconds; purge expired archives about hourly."""
+    purged_at = 0.0
+    while True:
+        await asyncio.sleep(push_seconds)
+        try:
+            await jobs.push_documents()
+            if asyncio.get_running_loop().time() - purged_at >= 3600:
+                await jobs.purge_archived_documents()
+                purged_at = asyncio.get_running_loop().time()
+        except Exception:
+            structlog.get_logger("app.jobs").exception("docs_loop_error")
 
 
 @asynccontextmanager
@@ -77,8 +94,10 @@ async def lifespan(app: FastAPI):
     sync_task = asyncio.create_task(
         _tracker_sync_loop(get_settings().ticket_sync_interval_seconds)
     )
+    docs_task = asyncio.create_task(_docs_loop(get_settings().doc_push_interval_seconds))
     yield
     sync_task.cancel()
+    docs_task.cancel()
     mongo.close()
 
 
@@ -108,11 +127,13 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(webhooks_router)
     app.include_router(connections_router)
     app.include_router(work_items_router)
+    app.include_router(work_item_types_router)
     app.include_router(boards_router)
     app.include_router(sprints_router)
     app.include_router(comments_router)
     app.include_router(documents_router)
     app.include_router(attachments_router)
+    app.include_router(link_previews_router)
     app.include_router(query_router)
     app.include_router(chat_router)
     app.include_router(workspaces_router)

@@ -12,7 +12,9 @@ from datetime import timedelta
 from app.auth.repository import get_user
 from app.boards import repository as boards
 from app.boards import service as board_service
+from app.boards import workflow
 from app.connectors import registry
+from app.work_item_types import service as work_item_types
 from app.connectors import repository as connectors
 from app.connectors.service import can_write
 from app.core.constants import NATIVE_SOURCE, Role, SprintState, StatusCategory
@@ -59,7 +61,8 @@ async def _visibility(workspace_id: str) -> dict:
     """Native items, plus tracker items whose target is still connected."""
     by_provider: dict[str, list[str]] = {}
     for target in await connectors.list_targets(workspace_id):
-        by_provider.setdefault(target["provider"], []).append(target["key"])
+        if registry.has_work_items(target["provider"]):
+            by_provider.setdefault(target["provider"], []).append(target["key"])
     return {"$or": [{"source": NATIVE_SOURCE}, *({"source": p, "target_key": {"$in": keys}} for p, keys in by_provider.items())]}
 
 
@@ -80,6 +83,8 @@ async def _query(
     if board_id:
         board = await board_service.get_visible(workspace_id, board_id)
         query.update(_scope(board))
+        # what the tracker's own board doesn't show isn't on ours either
+        query["tracker_hidden"] = {"$ne": True}
         if sprint:
             sprint_id = await _sprint_filter(board, sprint)
             if sprint_id is _NO_SPRINT:
@@ -183,10 +188,11 @@ async def _assignee(workspace_id: str, user_id: str | None) -> dict | None:
 
 
 async def _refresh(workspace_id: str, conn: dict, target_key: str, external_id: str) -> dict:
-    connector = registry.get(conn["provider"])
+    adapter = registry.work_item_source(conn["provider"])
     board = await boards.ensure(workspace_id, conn["provider"], target_key)
-    raw = await connector.adapter.fetch(registry.auth_for(conn), conn, external_id, board)
-    fields = board_service.place(board, connector.adapter.normalise(conn, target_key, raw, board))
+    raw = await adapter.fetch(registry.auth_for(conn), conn, external_id, board)
+    fields = board_service.place(board, adapter.normalise(conn, target_key, raw, board))
+    fields["type_id"] = await work_item_types.type_for(workspace_id, conn["provider"], fields.get("issue_type"), {})
     await repository.upsert_synced(workspace_id, await sprint_service.apply_tracker_sprint(board, fields))
     return await repository.find_external(workspace_id, conn["provider"], external_id)
 
@@ -202,10 +208,12 @@ async def create(member: dict, body) -> dict:
     sprint = await _open_sprint(board, body.sprint_id)
     if board["source"] != NATIVE_SOURCE:
         conn = await writable_connection(workspace_id, board["source"])
-        adapter, auth = registry.get(board["source"]).adapter, registry.auth_for(conn)
+        adapter, auth = registry.work_item_source(board["source"]), registry.auth_for(conn)
         fields = {"title": body.title, "description": body.description}
         if body.assignee_id:
             fields["assignee_id"] = body.assignee_id
+        if body.type_id:
+            fields["issue_type"] = (await work_item_types.get(workspace_id, body.type_id))["name"]
         external_id = await adapter.create(auth, conn, board["target_key"], fields)
         item = await _refresh(workspace_id, conn, board["target_key"], external_id)
         # a new issue starts in the workflow's first status; move it if that's not the column asked for
@@ -227,6 +235,7 @@ async def create(member: dict, body) -> dict:
         "sprint_id": sprint and sprint["_id"], "status_changed_at": now, "description_md": body.description,
         "reporter": await _assignee(workspace_id, member["user_id"]), "labels": [], "due_date": None, "story_points": None,
         "assignee": await _assignee(workspace_id, body.assignee_id), "priority": None, "issue_type": None,
+        "type_id": (await work_item_types.get(workspace_id, body.type_id))["_id"] if body.type_id else await work_item_types.default_type_id(workspace_id),
         "external_url": None, "created_by": member["user_id"], "created_at": now, "updated_at": now,
     }
     await repository.insert(doc)
@@ -240,6 +249,11 @@ async def update(member: dict, item_id: str, body) -> dict:
     if fields.get("due_date"):
         # Mongo has no date-only type, and trackers take the ISO date
         fields["due_date"] = fields["due_date"].isoformat()
+    if "type_id" in fields:
+        chosen = await work_item_types.get(workspace_id, fields["type_id"])
+        if item["source"] != NATIVE_SOURCE:
+            fields.pop("type_id")
+            fields["issue_type_id"] = await _tracker_type_id(workspace_id, item, chosen)
     if item["source"] == NATIVE_SOURCE:
         if "assignee_id" in fields:
             fields["assignee"] = await _assignee(workspace_id, fields.pop("assignee_id"))
@@ -250,9 +264,32 @@ async def update(member: dict, item_id: str, body) -> dict:
     elif fields:
         conn = await writable_connection(workspace_id, item["source"])
         board = await boards.ensure(workspace_id, item["source"], item["target_key"])
-        await registry.get(item["source"]).adapter.update(registry.auth_for(conn), conn, item["external_id"], fields, board)
+        await registry.work_item_source(item["source"]).update(registry.auth_for(conn), conn, item["external_id"], fields, board)
         await _refresh(workspace_id, conn, item["target_key"], item["external_id"])
     return await _result(workspace_id, item_id)
+
+
+async def _tracker_type_id(workspace_id: str, item: dict, chosen: dict) -> str:
+    """The tracker's id for the type a tracker item is changed to; only types it can change to in place."""
+    conn = await writable_connection(workspace_id, item["source"])
+    allowed = await registry.work_item_source(item["source"]).allowed_types(registry.auth_for(conn), conn, item["external_id"])
+    match = next((t for t in allowed if work_item_types.name_key(t["name"] or "") == chosen["name_key"]), None)
+    if match is None:
+        raise ConflictError(f"Change this item to {chosen['name']} in its tracker", error_code="type_change_in_tracker")
+    return match["id"]
+
+
+async def allowed_types(member: dict, item_id: str) -> dict:
+    """The types an item can be changed to: any for native items, what its tracker allows in place otherwise."""
+    workspace_id = member["workspace_id"]
+    item = await get_visible(workspace_id, item_id)
+    if item["source"] == NATIVE_SOURCE:
+        return {"type_ids": None}
+    conn = await writable_connection(workspace_id, item["source"])
+    allowed = await registry.work_item_source(item["source"]).allowed_types(registry.auth_for(conn), conn, item["external_id"])
+    cache: dict[str, str | None] = {}
+    ids = [await work_item_types.type_for(workspace_id, item["source"], t["name"], cache) for t in allowed]
+    return {"type_ids": [type_id for type_id in ids if type_id]}
 
 
 async def _rank_between(scope: dict, column_id: str, before_id: str | None, after_id: str | None, item_id: str) -> float:
@@ -286,18 +323,47 @@ async def move(member: dict, item_id: str, body) -> dict:
     board = await boards.ensure(workspace_id, item["source"], item["target_key"])
     column = _column(board, body.column_id)
     fields: dict = {}
+    current = to_work_item(item, set())["column_id"]
     if item["source"] == NATIVE_SOURCE:
+        if column["id"] != current and column["id"] not in workflow.native_targets(board, current):
+            raise ConflictError(_blocked(board, current, column), error_code="transition_not_allowed")
         fields = {"column_id": column["id"], "status_category": column["status_category"]}
         if column["status_category"] != item["status_category"]:
             fields["status_changed_at"] = utcnow()
-    elif column["id"] != to_work_item(item, set())["column_id"]:
+    elif column["id"] != current or (body.status_id and body.status_id != item.get("status_id")):
         conn = await writable_connection(workspace_id, item["source"])
-        await registry.get(item["source"]).adapter.move(registry.auth_for(conn), conn, item["external_id"], column)
+        await registry.work_item_source(item["source"]).move(registry.auth_for(conn), conn, item["external_id"], column, body.status_id)
         # the column comes from the status the tracker now reports
         await _refresh(workspace_id, conn, item["target_key"], item["external_id"])
     fields["rank"] = await _rank_between(_scope(board), column["id"], body.before_id, body.after_id, item_id)
     await repository.update(item_id, fields)
     return await _result(workspace_id, item_id)
+
+
+def _blocked(board: dict, from_column_id: str, column: dict) -> str:
+    """Why a native card can't move there, and the column to move it to first when there's a way."""
+    names = {c["id"]: c["name"] for c in board["columns"]}
+    step = workflow.first_step(board, from_column_id, column["id"])
+    if step:
+        return f"Move it to {names[step]} first: this board's workflow doesn't go from {names.get(from_column_id)} to {column['name']}."
+    return f"This board's workflow doesn't allow moving from {names.get(from_column_id)} to {column['name']}."
+
+
+async def allowed_moves(member: dict, item_id: str) -> dict:
+    """Where an item can move from where it is: its board's rules, or what its tracker allows it now."""
+    workspace_id = member["workspace_id"]
+    item = await get_visible(workspace_id, item_id)
+    board = await boards.ensure(workspace_id, item["source"], item["target_key"])
+    current = to_work_item(item, set())["column_id"]
+    if item["source"] == NATIVE_SOURCE:
+        targets = [{"column_id": column_id} for column_id in workflow.native_targets(board, current)]
+        rules = any(c.get("next") is not None for c in board["columns"])
+        return {"basis": "board" if rules else "open", "targets": targets}
+    conn = await writable_connection(workspace_id, item["source"])
+    reachable = await registry.work_item_source(item["source"]).allowed_statuses(registry.auth_for(conn), conn, item["external_id"])
+    if reachable is None:
+        return {"basis": "open", "targets": [{"column_id": c["id"]} for c in board["columns"] if c["id"] != current]}
+    return {"basis": "live", "targets": workflow.tracker_targets(board, {**item, "column_id": current}, reachable)}
 
 
 async def _open_sprint(board: dict, sprint_id: str | None) -> dict | None:
@@ -331,5 +397,5 @@ async def delete(member: dict, item_id: str) -> None:
         if rank(member["role"]) < rank(Role.ADMIN):
             raise ForbiddenError(f"only admins delete {item['source']} items", error_code="insufficient_role")
         conn = await writable_connection(workspace_id, item["source"])
-        await registry.get(item["source"]).adapter.delete(registry.auth_for(conn), conn, item["external_id"])
+        await registry.work_item_source(item["source"]).delete(registry.auth_for(conn), conn, item["external_id"])
     await repository.delete(item_id)

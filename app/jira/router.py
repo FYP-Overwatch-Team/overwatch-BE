@@ -1,6 +1,6 @@
 """The original /jira routes, kept as aliases over the generic connector API.
 
-/jira/callback stays for good: it's the redirect URI registered with Atlassian.
+/jira/callback stays for good: it's the redirect URI registered with Atlassian, for Jira and Confluence alike.
 The rest go once the frontend uses /connections.
 """
 
@@ -11,7 +11,7 @@ from app.api.deps import workspace_member
 from app.connectors import service
 from app.connectors.router import oauth_callback, set_state_cookie
 from app.connectors.schemas import AuthorizationUrl, Target
-from app.core.constants import Provider, Role
+from app.core.constants import CredentialGroup, Provider, Role
 from app.core.responses import api_router
 from app.jira.schemas import ConnectedProject, ConnectProjectRequest
 from app.workers import jobs
@@ -21,7 +21,7 @@ router = api_router(prefix="/jira", tags=["jira"])
 
 @router.post("/login")
 async def jira_login(response: Response, member: dict = Depends(workspace_member(Role.ADMIN))) -> AuthorizationUrl:
-    url, state = service.start_authorization(member, Provider.JIRA, "onboarding")
+    url, state = await service.start_authorization(member, Provider.JIRA, "onboarding")
     set_state_cookie(response, Provider.JIRA, state)
     return AuthorizationUrl(authorization_url=url)
 
@@ -30,7 +30,7 @@ async def jira_login(response: Response, member: dict = Depends(workspace_member
 async def jira_callback(
     request: Request, state: str = "", code: str | None = None, error: str | None = None,
 ) -> RedirectResponse:
-    return await oauth_callback(Provider.JIRA, request, state, code, error)
+    return await oauth_callback(CredentialGroup.ATLASSIAN, request, state, code, error)
 
 
 @router.delete("/connection")

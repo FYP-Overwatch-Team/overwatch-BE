@@ -68,6 +68,11 @@ def sync_targets():
     return get_db()["sync_targets"]
 
 
+def work_item_types():
+    """A workspace's kinds of work item (Task, Bug, ...), with the icon and color each shows with."""
+    return get_db()["work_item_types"]
+
+
 def work_items():
     """Board items: mirrored from a tracker (`source` = provider) or created here (`native`)."""
     return get_db()["work_items"]
@@ -134,6 +139,11 @@ def usage_counters():
     return get_db()["usage_counters"]
 
 
+def link_previews():
+    """What a link shows as a card, by its address; dropped once `expires_at` passes."""
+    return get_db()["link_previews"]
+
+
 def file_facts():
     """Knowledge-graph extraction facts, one document per file."""
     return get_db()["file_facts"]
@@ -191,6 +201,17 @@ async def ensure_indexes() -> None:
     # each archive's group, restored together
     await documents().create_index([("workspace_id", 1), ("archive_root_id", 1)])
     await doc_attachments().create_index([("workspace_id", 1), ("node_id", 1)])
+    # images copied from a docs source, found again when a page syncs
+    await doc_attachments().create_index(
+        [("workspace_id", 1), ("source", 1), ("external_id", 1)], unique=True,
+        partialFilterExpression={"external_id": {"$type": "string"}},
+    )
+    # a synced target's mirror, read whole on each sync
+    await documents().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1)])
+    # archives past their retention, across workspaces (the hourly clean-up)
+    await documents().create_index([("archived_at", 1)], partialFilterExpression={"archived_root": True})
+    # mirrored pages waiting to go back to their source (only mirrored pages have a push state)
+    await documents().create_index([("push_state", 1), ("push_due_at", 1)], partialFilterExpression={"push_state": {"$type": "string"}})
     # the Archive list: what was archived, newest first
     await documents().create_index(
         [("workspace_id", 1), ("archived_at", -1)], partialFilterExpression={"archived_root": True},
@@ -200,6 +221,10 @@ async def ensure_indexes() -> None:
         partialFilterExpression={"external_id": {"$type": "string"}},
     )
     await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1), ("sprint_id", 1)])
+    # a type's items, found again when it's deleted
+    await work_items().create_index([("workspace_id", 1), ("type_id", 1)])
+    # one type per name in a workspace, whatever its case
+    await work_item_types().create_index([("workspace_id", 1), ("name_key", 1)], unique=True)
 
     # Extraction cache: read on every sync to decide what changed, and always
     # scoped to one repository.
@@ -209,5 +234,6 @@ async def ensure_indexes() -> None:
     await chat_conversations().create_index([("workspace_id", 1), ("user_id", 1), ("repo_full_name", 1), ("updated_at", -1)])
     await chat_conversations().create_index("expires_at", expireAfterSeconds=0)
     await usage_counters().create_index("expires_at", expireAfterSeconds=0)
+    await link_previews().create_index("expires_at", expireAfterSeconds=0)
     await webhook_deliveries().create_index("delivery_id", unique=True)
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)
