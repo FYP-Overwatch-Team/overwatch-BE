@@ -17,6 +17,20 @@ class Role(StrEnum):
 class Provider(StrEnum):
     GITHUB = "github"
     JIRA = "jira"
+    CONFLUENCE = "confluence"
+
+
+class CredentialGroup(StrEnum):
+    """Providers that share one OAuth app and one token: one consent covers every product in the group."""
+
+    ATLASSIAN = "atlassian"
+
+
+class ConnectorCategory(StrEnum):
+    """What a connector mirrors: tracker tickets into `work_items`, or pages into `documents`."""
+
+    WORK_ITEMS = "work_items"
+    DOCUMENTS = "documents"
 
 
 # `work_items.source` for items created in Overwatch; tracker items carry their provider

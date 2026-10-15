@@ -26,23 +26,30 @@ router = api_router(prefix="/connections", tags=["connections"])
 LANDING = {"onboarding": "/onboarding/{provider}", "settings": "/settings/integrations"}
 
 
-def _state_cookie(provider: str) -> str:
-    return f"overwatch_{provider}_state"
+def _state_cookie(credential: str) -> str:
+    return f"overwatch_{credential}_state"
 
 
 def set_state_cookie(response: Response, provider: str, state: str) -> None:
     # the provider's callback carries no bearer token, so the user and workspace are bound
     # to a short-lived httpOnly state cookie, scoped to the callback path
+    connector = registry.get(provider)
     response.set_cookie(
-        _state_cookie(provider), state, httponly=True, secure=cookie_secure(), samesite=cookie_samesite(),
-        path=registry.get(provider).oauth.redirect_path, max_age=600,
+        _state_cookie(connector.credential), state, httponly=True, secure=cookie_secure(), samesite=cookie_samesite(),
+        path=connector.oauth.redirect_path, max_age=600,
     )
 
 
-async def oauth_callback(provider: str, request: Request, state: str, code: str | None, error: str | None) -> RedirectResponse:
-    """Lands back where the flow started with ?{provider}=connected|denied|error."""
-    expected_state = request.cookies.get(_state_cookie(provider))
-    user_id, workspace_id, return_to, _ = (state.split(".", 3) + ["", "", "", ""])[:4]
+async def oauth_callback(credential: str, request: Request, state: str, code: str | None, error: str | None) -> RedirectResponse:
+    """Lands back where the flow started with ?{provider}=connected|denied|error.
+
+    One callback per OAuth app; the state says which of its products was being connected.
+    """
+    expected_state = request.cookies.get(_state_cookie(credential))
+    user_id, workspace_id, return_to, provider, _ = (state.split(".", 4) + [""] * 5)[:5]
+    products = [p for p, c in registry.CONNECTORS.items() if c.credential == credential]
+    if provider not in products:
+        provider, expected_state = products[0], None
     if not expected_state or not secrets.compare_digest(state, expected_state):
         outcome = "error"
     elif error or not code:
@@ -57,7 +64,7 @@ async def oauth_callback(provider: str, request: Request, state: str, code: str 
     landing = LANDING.get(return_to, LANDING["onboarding"]).format(provider=provider)
     query = f"{provider}={outcome}" + (f"&w={workspace_id}" if outcome != "error" else "")
     response = RedirectResponse(f"{get_settings().frontend_origin}{landing}?{query}")
-    response.delete_cookie(_state_cookie(provider), path=registry.get(provider).oauth.redirect_path)
+    response.delete_cookie(_state_cookie(credential), path=registry.get(provider).oauth.redirect_path)
     return response
 
 
@@ -71,7 +78,7 @@ async def authorize(
     provider: str, response: Response, body: AuthorizeRequest = AuthorizeRequest(),
     member: dict = Depends(workspace_member(Role.ADMIN)),
 ) -> AuthorizationUrl:
-    url, state = service.start_authorization(member, provider, body.return_to)
+    url, state = await service.start_authorization(member, provider, body.return_to)
     set_state_cookie(response, provider, state)
     return AuthorizationUrl(authorization_url=url)
 

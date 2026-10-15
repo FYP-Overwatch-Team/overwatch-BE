@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.core.constants import ConnectionStatus
+from app.core.constants import ConnectionStatus, ConnectorCategory
 
 # keys go into provider queries (JQL), so only plain key shapes get through
 TargetKey = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
@@ -45,6 +45,7 @@ class ExternalAccount(BaseModel):
 class Connection(BaseModel):
     provider: str
     name: str
+    category: ConnectorCategory
     status: ConnectionStatus
     # false for grants made before write-back existed: reconnect to edit from the board
     can_write: bool

@@ -36,6 +36,12 @@ async def save_connection(workspace_id: str, provider: str, **fields) -> None:
     )
 
 
+async def set_scopes(workspace_id: str, provider: str, scopes: list[str]) -> None:
+    await mongo.connections().update_one(
+        {"workspace_id": workspace_id, "provider": provider}, {"$set": {"scopes": scopes, "updated_at": utcnow()}},
+    )
+
+
 async def disconnect(workspace_id: str, provider: str) -> None:
     """Soft-disconnect the connection and its targets: synced items are kept."""
     now = utcnow()

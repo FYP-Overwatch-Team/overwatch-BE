@@ -19,6 +19,7 @@ class OAuthConfig:
     provider: str
     authorize_url: str
     token_url: str
+    # always asked for, on top of the connecting product's own
     scopes: tuple[str, ...]
     client_id_setting: str
     client_secret_setting: str
@@ -39,10 +40,10 @@ class OAuth2Flow:
         settings = get_settings()
         return getattr(settings, self.config.client_id_setting), getattr(settings, self.config.client_secret_setting)
 
-    def authorize_url(self, state: str) -> str:
+    def authorize_url(self, state: str, scopes: tuple[str, ...] = ()) -> str:
         params = httpx.QueryParams(
             client_id=self._client()[0],
-            scope=" ".join(self.config.scopes),
+            scope=" ".join(dict.fromkeys((*scopes, *self.config.scopes))),
             redirect_uri=self.redirect_uri,
             state=state,
             response_type="code",

@@ -33,7 +33,7 @@ async def jira(client, headers: dict) -> dict:
 async def test_the_catalog_shows_each_connector_and_its_state(client):
     headers = auth_headers(await login(client))
     assert await jira(client, headers) == {
-        "provider": "jira", "name": "Jira", "status": "disconnected", "can_write": False,
+        "provider": "jira", "name": "Jira", "category": "work_items", "status": "disconnected", "can_write": False,
         "external_account": None, "connected_by": None, "connected_at": None, "targets": [],
     }
 
@@ -46,7 +46,7 @@ async def test_the_catalog_shows_each_connector_and_its_state(client):
     assert state["external_account"]["url"] == "https://acme.atlassian.net"
     assert [(t["key"], t["name"], t["sync_status"]) for t in state["targets"]] == [("OVR", "Overwatch", "pending")]
 
-    await oauth_tokens.set_status(headers["X-Workspace-Id"], "jira", "needs_reauth")
+    await oauth_tokens.set_status(headers["X-Workspace-Id"], "atlassian", "needs_reauth")
     assert (await jira(client, headers))["status"] == "needs_reauth"
 
 
@@ -120,3 +120,65 @@ async def test_a_token_response_with_scopes_records_what_was_granted(client):
         await client.get(f"/jira/callback?code=fake&state={state}")
 
     assert (await jira(client, headers))["can_write"] is False
+
+
+async def connect(client, headers: dict, provider: str, scope: str | None = None) -> Response:
+    start = await client.post(f"/connections/{provider}/authorize", json={"return_to": "settings"}, headers=headers)
+    url = start.json()["data"]["authorization_url"]
+    state = parse_qs(urlparse(url).query)["state"][0]
+    with respx.mock as router:
+        mock_atlassian(router)
+        if scope is not None:
+            router.post("https://auth.atlassian.com/oauth/token").mock(return_value=Response(200, json={
+                "access_token": "a2", "refresh_token": "r2", "expires_in": 3600, "scope": scope,
+            }))
+        callback = await client.get(f"/jira/callback?code=fake&state={state}")
+    callback.authorize_url = url
+    return callback
+
+
+async def test_confluence_shares_jiras_atlassian_grant(client):
+    headers = auth_headers(await login(client))
+    ws = headers["X-Workspace-Id"]
+    await connect(client, headers, "jira")
+
+    callback = await connect(client, headers, "confluence", scope="read:jira-work write:jira-work read:page:confluence write:page:confluence")
+
+    requested = parse_qs(urlparse(callback.authorize_url).query)["scope"][0].split()
+    assert {"write:jira-work", "write:page:confluence", "offline_access"} <= set(requested)  # Jira keeps its scopes
+    assert callback.headers["location"].endswith(f"/settings/integrations?confluence=connected&w={ws}")
+    assert await mongo.oauth_tokens().count_documents({"owner_id": ws, "provider": {"$ne": "github"}}) == 1
+    catalog = {c["provider"]: c for c in (await client.get("/connections", headers=headers)).json()["data"]}
+    assert (catalog["confluence"]["category"], catalog["confluence"]["status"], catalog["confluence"]["can_write"]) == ("documents", "active", True)
+    # the new grant is Jira's too
+    assert catalog["jira"]["status"] == "active" and "write:page:confluence" in (await mongo.connections().find_one({"provider": "jira"}))["scopes"]
+    assert (await mongo.connections().find_one({"provider": "confluence"}))["external_account"]["id"] == "cloud-1"
+
+
+async def test_a_jira_only_grant_never_asks_for_confluence(client):
+    headers = auth_headers(await login(client))
+    callback = await connect(client, headers, "jira")
+    assert not any("confluence" in s for s in parse_qs(urlparse(callback.authorize_url).query)["scope"][0].split())
+
+
+async def test_disconnecting_one_product_keeps_the_shared_token_for_the_other(client):
+    headers = auth_headers(await login(client))
+    ws = headers["X-Workspace-Id"]
+    await connect(client, headers, "jira")
+    await connect(client, headers, "confluence")
+
+    await client.delete("/connections/confluence", headers=headers)
+    assert (await oauth_tokens.get(ws, "atlassian"))["status"] == "active"
+    assert (await jira(client, headers))["status"] == "active"
+
+    await client.delete("/connections/jira", headers=headers)
+    assert (await oauth_tokens.get(ws, "atlassian"))["status"] == "disconnected"
+
+
+async def test_a_state_naming_another_apps_product_is_rejected(client):
+    headers = auth_headers(await login(client))
+    start = await client.post("/connections/jira/authorize", headers=headers)
+    state = parse_qs(urlparse(start.json()["data"]["authorization_url"]).query)["state"][0]
+    forged = state.replace(".jira.", ".github.")
+    callback = await client.get(f"/jira/callback?code=fake&state={forged}")
+    assert "jira=error" in callback.headers["location"]

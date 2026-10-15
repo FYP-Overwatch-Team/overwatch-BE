@@ -6,6 +6,11 @@ from tests.integration.test_auth_flow import auth_headers, login
 JIRA_TOKENS = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
 
 
+async def connect_jira(workspace_id: str) -> None:
+    await oauth_tokens.save(workspace_id, "atlassian", JIRA_TOKENS)
+    await mongo.connections().insert_one({"workspace_id": workspace_id, "provider": "jira", "status": "active"})
+
+
 async def authed(client) -> tuple[dict, str]:
     access = await login(client)
     user = await mongo.users().find_one({})
@@ -35,7 +40,7 @@ async def test_signed_in_user_has_nothing_connected(client):
 async def test_full_setup_reports_repos_and_project(client):
     headers, user_id = await authed(client)
     await add_repo(user_id, "octocat/hello-world", "in_progress")
-    await oauth_tokens.save(user_id, "jira", JIRA_TOKENS, cloud_id="c1")
+    await connect_jira(user_id)
     await mongo.sync_targets().insert_one({
         "workspace_id": user_id, "provider": "jira", "key": "OVR", "sync_status": "done", "status": "active", "connected_at": 1,
     })
@@ -72,8 +77,8 @@ async def test_disconnected_jira_projects_are_not_reported(client):
 
 async def test_needs_reauth_surfaced_independently(client):
     headers, user_id = await authed(client)
-    await oauth_tokens.save(user_id, "jira", JIRA_TOKENS, cloud_id="c1")
-    await oauth_tokens.set_status(user_id, "jira", "needs_reauth")
+    await connect_jira(user_id)
+    await oauth_tokens.set_status(user_id, "atlassian", "needs_reauth")
 
     body = (await client.get("/onboarding/status", headers=headers)).json()["data"]
     assert body["jira"]["connected"] is False

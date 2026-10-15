@@ -26,14 +26,16 @@ MAX_RETRY_AFTER_SECONDS = 10
 class NativeOAuth:
     def __init__(self, flow: OAuth2Flow):
         self.flow = flow
-        self.provider = flow.config.provider
+        # the token's key: one per OAuth app, shared by the products on it (Jira and Confluence)
+        self.credential = flow.config.provider
 
     async def request(self, conn: dict, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        token = await oauth_tokens.get_fresh_access_token(conn["workspace_id"], self.provider, self.flow.refresh)
+        provider = conn["provider"]
+        token = await oauth_tokens.get_fresh_access_token(conn["workspace_id"], self.credential, self.flow.refresh)
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", **kwargs.pop("headers", {})}
         for attempt in range(2):
             resp = await http.request(method, url, headers=headers, **kwargs)
-            log_call(logger, f"{self.provider}_api_call", method, httpx.URL(url).path, resp)
+            log_call(logger, f"{provider}_api_call", method, httpx.URL(url).path, resp)
             if resp.status_code != 429 or attempt:
                 break
             # one retry when the provider says how long to wait and it's short enough
@@ -45,12 +47,12 @@ class NativeOAuth:
             if _scope_mismatch(resp):
                 # the token is fine; this call needs a scope the grant lacks, so only this call fails
                 raise ForbiddenError(
-                    f"reconnect {self.provider} to allow this", error_code=f"{self.provider}_scope_missing",
+                    f"reconnect {provider} to allow this", error_code=f"{provider}_scope_missing",
                 )
-            await oauth_tokens.set_status(conn["workspace_id"], self.provider, ConnectionStatus.NEEDS_REAUTH)
-            raise UnauthorizedError(f"{self.provider} token is no longer valid", error_code=f"{self.provider}_needs_reauth")
+            await oauth_tokens.set_status(conn["workspace_id"], self.credential, ConnectionStatus.NEEDS_REAUTH)
+            raise UnauthorizedError(f"{provider} token is no longer valid", error_code=f"{provider}_needs_reauth")
         if resp.status_code == 429:
-            raise ExternalServiceError(f"{self.provider} rate limit hit", error_code=f"{self.provider}_rate_limited")
+            raise ExternalServiceError(f"{provider} rate limit hit", error_code=f"{provider}_rate_limited")
         return resp
 
 

@@ -1,23 +1,21 @@
 """Jira Cloud connector: issues mirrored into `work_items`, and board changes written back."""
 
 import hashlib
-import re
 from datetime import datetime
 
 import httpx
 import structlog
 
-from app.connectors.oauth import OAuthConfig, http
+from app.connectors import atlassian
+from app.connectors.adf import adf_to_markdown as _adf_to_markdown, adf_to_text, markdown_to_adf
 from app.connectors.ports import AuthBackend, Page
 from app.core.constants import BoardKind, Provider, SprintState, StatusCategory
 from app.core.exceptions import ConflictError, ExternalServiceError, ForbiddenError, NotFoundError
 from app.core.time import utcnow
-from app.integrations.http_log import log_call
 
 logger = structlog.get_logger("app.connectors.jira")
 
 API_BASE = "https://api.atlassian.com/ex/jira"
-ACCESSIBLE_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resources"
 WRITE_SCOPE = "write:jira-work"
 # Jira Software (boards, their columns, sprints and the backlog) only accepts granular scopes
 AGILE_SCOPES = (
@@ -30,17 +28,10 @@ AGILE_SCOPES = (
 )
 AGILE_SCOPE = "read:board-scope.admin:jira-software"
 
-# Classic platform scopes plus Jira Software's; offline_access is what returns a (rotating) refresh token.
-OAUTH = OAuthConfig(
-    provider=Provider.JIRA,
-    authorize_url="https://auth.atlassian.com/authorize",
-    token_url="https://auth.atlassian.com/oauth/token",
-    scopes=("read:jira-work", WRITE_SCOPE, "read:jira-user", *AGILE_SCOPES, "offline_access"),
-    client_id_setting="jira_client_id",
-    client_secret_setting="jira_client_secret",
-    redirect_path="/jira/callback",
-    extra_authorize_params={"audience": "api.atlassian.com", "prompt": "consent"},
-)
+# reading a project's workflows (every status and the moves between them), for drag hints
+WORKFLOW_SCOPE = "read:workflow:jira"
+# classic platform scopes plus Jira Software's and the workflow read
+SCOPES = ("read:jira-work", WRITE_SCOPE, "read:jira-user", *AGILE_SCOPES, WORKFLOW_SCOPE)
 
 PAGE_SIZE = 100
 PROJECTS_PAGE_SIZE = 50
@@ -59,10 +50,14 @@ ISSUES_PER_MOVE = 50
 SPRINT_STATES = {"future": SprintState.FUTURE, "active": SprintState.ACTIVE, "closed": SprintState.CLOSED}
 # Jira's own statusCategory keys
 CATEGORIES = {"new": StatusCategory.TODO, "indeterminate": StatusCategory.IN_PROGRESS, "done": StatusCategory.DONE}
+# the same categories as the workflows API names them
+WORKFLOW_CATEGORIES = {"TODO": StatusCategory.TODO, "IN_PROGRESS": StatusCategory.IN_PROGRESS, "DONE": StatusCategory.DONE}
 DONE_NAMES = {"done", "closed", "resolved"}
 TODO_NAMES = {"to do", "todo", "open", "backlog"}
-# block nodes whose children are themselves blocks, so they sit on separate lines
-ADF_BLOCKS = {"doc", "bulletList", "orderedList", "listItem", "blockquote", "panel", "table", "tableRow", "tableCell", "tableHeader", "expand"}
+
+
+def adf_to_markdown(node: dict | None) -> str | None:
+    return _adf_to_markdown(node, "attachment in Jira")
 
 
 def status_category(status: dict) -> StatusCategory:
@@ -75,311 +70,6 @@ def status_category(status: dict) -> StatusCategory:
     return StatusCategory.TODO if name in TODO_NAMES else StatusCategory.IN_PROGRESS
 
 
-def adf_to_text(node: dict | None) -> str | None:
-    if not node:
-        return None
-    if node.get("type") == "text":
-        return node.get("text", "")
-    if node.get("type") == "hardBreak":
-        return "\n"
-    parts = [adf_to_text(child) or "" for child in node.get("content", [])]
-    return ("\n" if node.get("type") in ADF_BLOCKS else "").join(parts)
-
-
-def adf_to_markdown(node: dict | None) -> str | None:
-    """Jira's rich text as Markdown, for showing a description or comment as written.
-
-    Covers what Jira's editor produces day to day; media need Jira's auth, so they become a note.
-    """
-    if not node:
-        return None
-    return _md_blocks(node.get("content", [])).strip() or None
-
-
-def _md_blocks(nodes: list[dict], indent: str = "", sep: str = "\n\n") -> str:
-    return sep.join(block for block in (_md_block(n, indent) for n in nodes) if block)
-
-
-def _md_block(node: dict, indent: str) -> str:
-    kind, attrs, content = node.get("type"), node.get("attrs") or {}, node.get("content", [])
-    if kind == "paragraph":
-        return indent + _md_inline(content)
-    if kind == "heading":
-        return f"{indent}{'#' * min(int(attrs.get('level', 1)), 6)} {_md_inline(content)}"
-    if kind in ("bulletList", "orderedList"):
-        lines = []
-        for number, item in enumerate(content, start=int(attrs.get("order", 1))):
-            marker = f"{number}. " if kind == "orderedList" else "- "
-            # a list item's blocks stay together, so the list stays tight
-            body = _md_blocks(item.get("content", []), indent + "  ", "\n").lstrip()
-            lines.append(f"{indent}{marker}{body}")
-        return "\n".join(lines)
-    if kind == "codeBlock":
-        code = "".join(child.get("text", "") for child in content)
-        return f"{indent}```{attrs.get('language') or ''}\n{code}\n{indent}```"
-    if kind in ("blockquote", "panel"):
-        return "\n".join(f"{indent}> {line}" if line else f"{indent}>" for line in _md_blocks(content).split("\n"))
-    if kind == "rule":
-        return f"{indent}---"
-    if kind == "table":
-        rows = [[_md_inline_blocks(cell.get("content", [])) for cell in row.get("content", [])] for row in content]
-        if not rows:
-            return ""
-        width = max(len(row) for row in rows)
-        rows = [row + [""] * (width - len(row)) for row in rows]
-        lines = [f"| {' | '.join(rows[0])} |", f"|{'---|' * width}", *(f"| {' | '.join(row)} |" for row in rows[1:])]
-        return "\n".join(indent + line for line in lines)
-    if kind in ("mediaSingle", "mediaGroup", "media"):
-        return f"{indent}_[attachment in Jira]_"
-    if kind in ("expand", "nestedExpand"):
-        title = attrs.get("title")
-        return (f"{indent}**{title}**\n\n" if title else "") + _md_blocks(content, indent)
-    # anything else: keep its text
-    return indent + (_md_inline(content) if content else "")
-
-
-def _md_inline_blocks(nodes: list[dict]) -> str:
-    """A table cell's blocks on one line."""
-    return " ".join(_md_inline(n.get("content", [])) for n in nodes).replace("|", "\\|")
-
-
-def _md_inline(nodes: list[dict]) -> str:
-    parts = []
-    for node in nodes:
-        kind, attrs = node.get("type"), node.get("attrs") or {}
-        if kind == "text":
-            parts.append(_md_marks(node.get("text", ""), node.get("marks", [])))
-        elif kind == "hardBreak":
-            parts.append("  \n")
-        elif kind == "mention":
-            parts.append(attrs.get("text") or "@someone")
-        elif kind == "emoji":
-            parts.append(attrs.get("text") or attrs.get("shortName") or "")
-        elif kind in ("inlineCard", "blockCard"):
-            parts.append(attrs.get("url") or "")
-        elif kind == "status":
-            parts.append(f"`{attrs.get('text', '')}`")
-        elif kind == "date":
-            try:
-                parts.append(datetime.fromtimestamp(int(attrs.get("timestamp")) / 1000).strftime("%Y-%m-%d"))
-            except (TypeError, ValueError):
-                pass
-        else:
-            parts.append(_md_inline(node.get("content", [])))
-    return "".join(parts)
-
-
-def _md_marks(text: str, marks: list[dict]) -> str:
-    kinds = {mark.get("type"): mark.get("attrs") or {} for mark in marks}
-    if "code" in kinds:
-        return f"`{text}`"
-    if "strong" in kinds:
-        text = f"**{text}**"
-    if "em" in kinds:
-        text = f"_{text}_"
-    if "strike" in kinds:
-        text = f"~~{text}~~"
-    if "link" in kinds and kinds["link"].get("href"):
-        text = f"[{text}]({kinds['link']['href']})"
-    return text
-
-
-def markdown_to_adf(md: str | None) -> dict | None:
-    """Markdown as Jira's rich text: the inverse of `adf_to_markdown`, so an edit keeps its formatting.
-
-    Covers what `adf_to_markdown` writes and what an editor produces: headings, lists, code, quotes,
-    rules, tables, and bold, italic, strikethrough, code and links inline. A single line break stays
-    a line break, so plain text keeps its lines.
-    """
-    if not md or not md.strip():
-        return None
-    return {"type": "doc", "version": 1, "content": _adf_blocks(md.replace("\r\n", "\n").split("\n"))}
-
-
-_FENCE_RE = re.compile(r"^\s*```\s*([\w+#.-]*)\s*$")
-_HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.*?)\s*#*\s*$")
-_LIST_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
-_RULE_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
-_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$")
-_CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
-_INLINE_RE = re.compile(
-    r"`([^`]+)`"
-    r"|\[([^\]]+)\]\(([^)\s]+)\)"
-    r"|\*\*(.+?)\*\*"
-    r"|~~(.+?)~~"
-    r"|(?<![\w*])\*(?![\s*])(.+?)(?<!\s)\*(?![\w*])"
-    r"|(?<![\w_])_(?![\s_])(.+?)(?<!\s)_(?![\w_])"
-    r"|\\([\\`*_\[\]()#+\-.!|~>])"
-)
-
-
-def _starts_block(line: str) -> bool:
-    stripped = line.lstrip()
-    return bool(
-        _FENCE_RE.match(line) or _HEADING_RE.match(line) or _RULE_RE.match(line) or _LIST_RE.match(line) or stripped.startswith(">")
-    )
-
-
-def _dedent(lines: list[str]) -> list[str]:
-    depth = min((len(line) - len(line.lstrip()) for line in lines if line.strip()), default=0)
-    return [line[depth:] for line in lines]
-
-
-def _adf_blocks(lines: list[str]) -> list[dict]:
-    blocks, i = [], 0
-    while i < len(lines):
-        line = lines[i]
-        if not line.strip():
-            i += 1
-        elif fence := _FENCE_RE.match(line):
-            code, i = [], i + 1
-            while i < len(lines) and lines[i].strip() != "```":
-                code.append(lines[i])
-                i += 1
-            block: dict = {"type": "codeBlock"}
-            if fence.group(1):
-                block["attrs"] = {"language": fence.group(1)}
-            if code:
-                block["content"] = [{"type": "text", "text": "\n".join(code)}]
-            blocks.append(block)
-            i += 1
-        elif heading := _HEADING_RE.match(line):
-            blocks.append({"type": "heading", "attrs": {"level": len(heading.group(1))}, "content": _adf_inline(heading.group(2))})
-            i += 1
-        elif _RULE_RE.match(line):
-            blocks.append({"type": "rule"})
-            i += 1
-        elif line.lstrip().startswith(">"):
-            quoted = []
-            while i < len(lines) and lines[i].lstrip().startswith(">"):
-                rest = lines[i].lstrip()[1:]
-                quoted.append(rest[1:] if rest.startswith(" ") else rest)
-                i += 1
-            blocks.append({"type": "blockquote", "content": _adf_blocks(quoted) or [{"type": "paragraph"}]})
-        elif "|" in line and i + 1 < len(lines) and _TABLE_SEP_RE.match(lines[i + 1]):
-            rows = [line]
-            i += 2
-            while i < len(lines) and "|" in lines[i] and lines[i].strip():
-                rows.append(lines[i])
-                i += 1
-            blocks.append(_adf_table(rows))
-        elif _LIST_RE.match(line):
-            block, i = _adf_list(lines, i)
-            blocks.append(block)
-        else:
-            paragraph = [line]
-            i += 1
-            while i < len(lines) and lines[i].strip() and not _starts_block(lines[i]):
-                paragraph.append(lines[i])
-                i += 1
-            blocks.append({"type": "paragraph", "content": _adf_lines(paragraph)})
-    return blocks
-
-
-def _adf_list(lines: list[str], i: int) -> tuple[dict, int]:
-    first = _LIST_RE.match(lines[i])
-    base, ordered = len(first.group(1)), first.group(2)[0].isdigit()
-    items: list[dict] = []
-    while i < len(lines):
-        item = _LIST_RE.match(lines[i])
-        if not item or len(item.group(1)) != base or item.group(2)[0].isdigit() != ordered:
-            break
-        children, i = [], i + 1
-        while i < len(lines):
-            line = lines[i]
-            if line.strip() and len(line) - len(line.lstrip()) <= base:
-                break
-            if not line.strip():
-                # a blank line ends the list unless more of it follows
-                following = next((later for later in lines[i + 1:] if later.strip()), "")
-                if len(following) - len(following.lstrip()) <= base and not _LIST_RE.match(following):
-                    break
-            children.append(line)
-            i += 1
-        content = _adf_blocks([item.group(3), *_dedent(children)]) or [{"type": "paragraph"}]
-        items.append({"type": "listItem", "content": content})
-        while i < len(lines) and not lines[i].strip() and _LIST_RE.match(next((later for later in lines[i:] if later.strip()), "")):
-            i += 1
-    block: dict = {"type": "orderedList" if ordered else "bulletList", "content": items}
-    start = int(re.match(r"\d+", first.group(2)).group()) if ordered else 1
-    if start != 1:
-        block["attrs"] = {"order": start}
-    return block, i
-
-
-def _adf_table(rows: list[str]) -> dict:
-    def cells(row: str) -> list[str]:
-        row = row.strip()
-        row = row[1:] if row.startswith("|") else row
-        row = row[:-1] if row.endswith("|") and not row.endswith("\\|") else row
-        return [cell.strip().replace("\\|", "|") for cell in _CELL_SPLIT_RE.split(row)]
-
-    def cell(kind: str, text: str) -> dict:
-        return {"type": kind, "content": [{"type": "paragraph", "content": _adf_inline(text)} if text else {"type": "paragraph"}]}
-
-    header, *body = [cells(row) for row in rows]
-    return {
-        "type": "table",
-        "content": [
-            {"type": "tableRow", "content": [cell("tableHeader", text) for text in header]},
-            *({"type": "tableRow", "content": [cell("tableCell", text) for text in row]} for row in body),
-        ],
-    }
-
-
-def _adf_lines(lines: list[str]) -> list[dict]:
-    """A paragraph's lines, joined by hard breaks (Markdown's `  ` or `\\` line ends included)."""
-    content: list[dict] = []
-    for index, line in enumerate(lines):
-        if index:
-            content.append({"type": "hardBreak"})
-        text = line.strip()
-        content.extend(_adf_inline(text[:-1].rstrip() if text.endswith("\\") else text))
-    return content
-
-
-def _adf_inline(text: str, marks: tuple[dict, ...] = ()) -> list[dict]:
-    nodes: list[dict] = []
-    position = 0
-    for match in _INLINE_RE.finditer(text):
-        if match.start() > position:
-            nodes.append(_adf_text(text[position:match.start()], marks))
-        code, label, href, strong, strike, star_em, underscore_em, escaped = match.groups()
-        if code is not None:
-            # Jira's code mark only combines with a link
-            nodes.append(_adf_text(code, (*(mark for mark in marks if mark["type"] == "link"), {"type": "code"})))
-        elif label is not None:
-            nodes.extend(_adf_inline(label, (*marks, {"type": "link", "attrs": {"href": href}})))
-        elif strong is not None:
-            nodes.extend(_adf_inline(strong, (*marks, {"type": "strong"})))
-        elif strike is not None:
-            nodes.extend(_adf_inline(strike, (*marks, {"type": "strike"})))
-        elif (star_em or underscore_em) is not None:
-            nodes.extend(_adf_inline(star_em or underscore_em, (*marks, {"type": "em"})))
-        else:
-            nodes.append(_adf_text(escaped, marks))
-        position = match.end()
-    if position < len(text):
-        nodes.append(_adf_text(text[position:], marks))
-    # escapes split a run of text; Jira rejects empty text nodes
-    merged: list[dict] = []
-    for node in nodes:
-        if not node["text"]:
-            continue
-        if merged and merged[-1].get("marks") == node.get("marks"):
-            merged[-1] = {**merged[-1], "text": merged[-1]["text"] + node["text"]}
-        else:
-            merged.append(node)
-    return merged
-
-
-def _adf_text(text: str, marks: tuple[dict, ...]) -> dict:
-    node: dict = {"type": "text", "text": text}
-    if marks:
-        node["marks"] = list(marks)
-    return node
-
-
 def column_id(name: str) -> str:
     """A tracker column's id: stable while its name is, so re-importing keeps items in place."""
     return "col_" + hashlib.sha1(name.strip().lower().encode()).hexdigest()[:10]
@@ -387,6 +77,35 @@ def column_id(name: str) -> str:
 
 def has_agile(conn: dict) -> bool:
     return AGILE_SCOPE in conn.get("scopes", [])
+
+
+def has_workflow(conn: dict) -> bool:
+    return WORKFLOW_SCOPE in conn.get("scopes", [])
+
+
+def _workflow(raw: dict, statuses: dict[str, dict]) -> dict:
+    """One Jira workflow's moves: from any of `from` (None: any status, a global transition) to `to`."""
+    by_reference = {ref: status["id"] for ref, status in statuses.items()}
+    transitions = []
+    for transition in raw.get("transitions") or []:
+        kind, to = transition.get("type"), by_reference.get(transition.get("toStatusReference"))
+        if kind == "INITIAL" or not to:
+            continue  # creating an issue isn't a move
+        sources = [by_reference[link["fromStatusReference"]] for link in transition.get("links") or [] if link.get("fromStatusReference") in by_reference]
+        transitions.append({"id": str(transition.get("id")), "name": transition.get("name") or "", "from": None if kind == "GLOBAL" else sources, "to": to})
+    return {"name": raw.get("name"), "transitions": transitions}
+
+
+def _reachable(transitions: list[dict]) -> list[dict]:
+    """The statuses an issue's available transitions lead to: [{status_id, status, status_category, transition_id, transition_name}]."""
+    found = []
+    for transition in transitions:
+        to = transition.get("to") or {}
+        found.append({
+            "status_id": str(to["id"]) if to.get("id") is not None else None, "status": to.get("name"), "status_category": status_category(to),
+            "transition_id": str(transition["id"]), "transition_name": transition.get("name") or "",
+        })
+    return found
 
 
 def _datetime(timestamp: str | None) -> datetime | None:
@@ -473,6 +192,8 @@ def _fields(fields: dict, board: dict | None = None) -> dict:
         out["description"] = markdown_to_adf(fields["description"])
     if "assignee_id" in fields:
         out["assignee"] = {"accountId": fields["assignee_id"]}
+    if "issue_type_id" in fields:
+        out["issuetype"] = {"id": fields["issue_type_id"]}
     return out
 
 
@@ -521,16 +242,8 @@ def _sprint_body(fields: dict) -> dict:
 
 
 class JiraAdapter:
-    async def resolve_account(self, access_token: str) -> dict:
-        resp = await http.get(ACCESSIBLE_RESOURCES_URL, headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"})
-        log_call(logger, "jira_api_call", "GET", "/oauth/token/accessible-resources", resp)
-        if resp.status_code != 200:
-            raise ExternalServiceError("failed to fetch accessible Atlassian resources")
-        sites = resp.json()
-        if not sites:
-            raise NotFoundError("no accessible Jira sites for this account", error_code="no_jira_sites")
-        # one site per workspace: the first one the account can reach
-        return {"id": sites[0]["id"], "name": sites[0].get("name"), "url": sites[0].get("url")}
+    async def resolve_account(self, access_token: str, known_site_id: str | None = None) -> dict:
+        return await atlassian.pick_site(access_token, known_site_id, "jira", "no_jira_sites")
 
     async def list_targets(self, auth: AuthBackend, conn: dict) -> list[dict]:
         projects: list[dict] = []
@@ -601,6 +314,7 @@ class JiraAdapter:
             "assignee": assignee and {"id": assignee.get("accountId"), "name": assignee.get("displayName")},
             "priority": (fields.get("priority") or {}).get("name"),
             "issue_type": (fields.get("issuetype") or {}).get("name"),
+            "issue_type_id": (fields.get("issuetype") or {}).get("id"),
             "external_url": f"{conn['external_account'].get('url')}/browse/{raw['key']}",
             "source_created_at": fields.get("created"),
             "source_updated_at": fields.get("updated"),
@@ -626,13 +340,26 @@ class JiraAdapter:
         types = [t for t in project.get("issueTypes", []) if not t.get("subtask")]
         if not types:
             raise ConflictError("the Jira project has no issue type to create", error_code="jira_no_issue_type")
-        issue_type = next((t for t in types if t.get("name") == "Task"), types[0])
+        # the type asked for when the project has it, else Task, else its first
+        wanted = (fields.get("issue_type") or "").lower()
+        issue_type = next((t for t in types if (t.get("name") or "").lower() == wanted), None)
+        issue_type = issue_type or next((t for t in types if t.get("name") == "Task"), types[0])
+        fields = {k: v for k, v in fields.items() if k != "issue_type"}
         body = {"fields": {"project": {"key": target_key}, "issuetype": {"id": issue_type["id"]}, **_fields(fields)}}
         resp = _check(
             await auth.request(conn, "POST", _url(conn, "/rest/api/3/issue"), json=body),
             {201}, "jira_create_failed", "could not create the Jira issue",
         )
         return resp.json()["id"]
+
+    async def allowed_types(self, auth: AuthBackend, conn: dict, external_id: str) -> list[dict]:
+        """The issue types this issue can be changed to in place: [{id, name}] (others need Jira's "Move")."""
+        resp = _check(
+            await auth.request(conn, "GET", _url(conn, f"/rest/api/3/issue/{external_id}/editmeta")),
+            {200}, "jira_issue_unavailable", "could not read the Jira issue",
+        )
+        allowed = ((resp.json().get("fields") or {}).get("issuetype") or {}).get("allowedValues") or []
+        return [{"id": str(t["id"]), "name": t.get("name")} for t in allowed]
 
     async def update(self, auth: AuthBackend, conn: dict, external_id: str, fields: dict, board: dict | None = None) -> None:
         _check(
@@ -779,24 +506,65 @@ class JiraAdapter:
         boards = resp.json().get("values", [])
         return next((b for b in boards if b.get("type") == "scrum"), boards[0] if boards else None)
 
-    async def move(self, auth: AuthBackend, conn: dict, external_id: str, column: dict) -> None:
+    async def allowed_statuses(self, auth: AuthBackend, conn: dict, external_id: str) -> list[dict]:
+        """Where the issue can move now, as Jira decides for the connected account (conditions included)."""
         url = _url(conn, f"/rest/api/3/issue/{external_id}/transitions")
-        transitions = _check(
+        return _reachable(_check(
             await auth.request(conn, "GET", url), {200}, "jira_transitions_unavailable", "could not read Jira transitions",
-        ).json().get("transitions", [])
+        ).json().get("transitions", []))
+
+    async def workflow(self, auth: AuthBackend, conn: dict, target_key: str) -> dict | None:
+        """The project's workflows, one per issue type: every move between its statuses, with its name.
+
+        None when the grant can't read workflows (or Jira won't show them to this account); hints then
+        come from asking Jira per issue.
+        """
+        if not has_workflow(conn):
+            return None
+        project = _check(
+            await auth.request(conn, "GET", _url(conn, f"/rest/api/3/project/{target_key}")),
+            {200}, "jira_project_unavailable", "could not read the Jira project",
+        ).json()
+        statuses: dict[str, dict] = {}  # by status reference
+        workflows: dict[str, dict] = {}
+        by_issue_type: dict[str, str] = {}
+        for issue_type in project.get("issueTypes") or []:
+            resp = await auth.request(conn, "POST", _url(conn, "/rest/api/3/workflows"), json={
+                "projectAndIssueTypes": [{"projectId": str(project["id"]), "issueTypeId": str(issue_type["id"])}],
+            })
+            if resp.status_code in (401, 403):
+                return None
+            body = _check(resp, {200}, "jira_workflows_unavailable", "could not read the Jira workflows").json()
+            for status in body.get("statuses") or []:
+                statuses[status["statusReference"]] = {
+                    "id": str(status["id"]), "name": status.get("name") or "",
+                    "category": WORKFLOW_CATEGORIES.get(status.get("statusCategory"), StatusCategory.TODO),
+                }
+            for raw in body.get("workflows") or []:
+                workflows.setdefault(str(raw["id"]), raw)
+                by_issue_type[str(issue_type["id"])] = str(raw["id"])
+        return {
+            "statuses": {status["id"]: {"name": status["name"], "category": status["category"]} for status in statuses.values()},
+            "workflows": {wf_id: _workflow(raw, statuses) for wf_id, raw in workflows.items()},
+            "by_issue_type": by_issue_type,
+        }
+
+    async def move(self, auth: AuthBackend, conn: dict, external_id: str, column: dict, status_id: str | None = None) -> None:
+        """Take the transition into the column: into `status_id` when given (one of its statuses), else its first reachable one."""
+        reachable = await self.allowed_statuses(auth, conn, external_id)
         if column["status_ids"]:
-            # the column's statuses in their order: the first one a transition reaches
-            reachable = {str((t.get("to") or {}).get("id")): t for t in transitions}
-            transition = next((reachable[s] for s in column["status_ids"] if s in reachable), None)
+            by_status = {r["status_id"]: r for r in reachable}
+            wanted = [status_id] if status_id in column["status_ids"] else column["status_ids"]
+            target = next((by_status[s] for s in wanted if s in by_status), None)
         else:
-            transition = next((t for t in transitions if status_category(t.get("to") or {}) == column["status_category"]), None)
-        if transition is None:
+            target = next((r for r in reachable if r["status_category"] == column["status_category"]), None)
+        if target is None:
+            allowed = ", ".join(dict.fromkeys(r["status"] for r in reachable if r["status"])) or "nowhere"
             raise ConflictError(
-                "the Jira workflow has no transition into that column from the issue's status",
-                error_code="jira_transition_unavailable",
+                f"Jira's workflow doesn't allow that move. From here it allows: {allowed}.", error_code="transition_not_allowed",
             )
         _check(
-            await auth.request(conn, "POST", url, json={"transition": {"id": transition["id"]}}),
+            await auth.request(conn, "POST", _url(conn, f"/rest/api/3/issue/{external_id}/transitions"), json={"transition": {"id": target["transition_id"]}}),
             {204}, "jira_transition_failed", "could not move the Jira issue",
         )
 
