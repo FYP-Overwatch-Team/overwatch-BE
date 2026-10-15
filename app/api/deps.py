@@ -1,6 +1,6 @@
 from collections.abc import Awaitable, Callable
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.auth.repository import get_user
@@ -11,6 +11,11 @@ from app.github.repository import get_readable
 from app.workspaces.service import require_member
 
 _bearer = HTTPBearer(auto_error=False)
+
+
+def client_ip(request: Request) -> str:
+    """The caller's address, for rate limits; uvicorn takes it from the proxy's X-Forwarded-For."""
+    return request.client.host if request.client else "unknown"
 
 
 async def get_current_user_id(

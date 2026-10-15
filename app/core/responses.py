@@ -67,8 +67,9 @@ def api_router(**kwargs: Any) -> APIRouter:
     return APIRouter(route_class=EnvelopeRoute, **kwargs)
 
 
-def error(code: int, error_code: str, message: str) -> JSONResponse:
-    body = ApiResponse[None](status="error", code=code, meta={"error_code": error_code, "message": message})
+def error(code: int, error_code: str, message: str, extra: dict[str, Any] | None = None) -> JSONResponse:
+    meta = {"error_code": error_code, "message": message, **(extra or {})}
+    body = ApiResponse[None](status="error", code=code, meta=meta)
     return JSONResponse(status_code=code, content=jsonable_encoder(body))
 
 

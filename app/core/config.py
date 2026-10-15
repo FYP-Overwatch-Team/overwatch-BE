@@ -62,6 +62,20 @@ class Settings(BaseSettings):
     # only for S3-compatible stores (MinIO, R2); empty for AWS
     s3_endpoint_url: str = ""
 
+    # How emails go out: "console" (logged, for dev and tests) or "smtp" (Gmail: an App Password, port 587 with STARTTLS)
+    email_backend: str = "console"
+    email_from: str = "noreply@overwatch.local"
+    email_from_name: str = "Overwatch"
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    # new passwords are checked against Have I Been Pwned's breach corpus (k-anonymity: only a hash prefix leaves)
+    hibp_enabled: bool = True
+    # invite emails a workspace or one admin may send a day; Gmail caps an account at about 500 recipients a day
+    invite_email_daily_limit_workspace: int = 50
+    invite_email_daily_limit_user: int = 100
+
 
 @lru_cache
 def get_settings() -> Settings:
