@@ -134,6 +134,11 @@ def usage_counters():
     return get_db()["usage_counters"]
 
 
+def link_previews():
+    """What a link shows as a card, by its address; dropped once `expires_at` passes."""
+    return get_db()["link_previews"]
+
+
 def file_facts():
     """Knowledge-graph extraction facts, one document per file."""
     return get_db()["file_facts"]
@@ -219,5 +224,6 @@ async def ensure_indexes() -> None:
     await chat_conversations().create_index([("workspace_id", 1), ("user_id", 1), ("repo_full_name", 1), ("updated_at", -1)])
     await chat_conversations().create_index("expires_at", expireAfterSeconds=0)
     await usage_counters().create_index("expires_at", expireAfterSeconds=0)
+    await link_previews().create_index("expires_at", expireAfterSeconds=0)
     await webhook_deliveries().create_index("delivery_id", unique=True)
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)
