@@ -3,7 +3,15 @@ from fastapi import Depends, Query
 from app.api.deps import workspace_member
 from app.core.responses import WithMeta, api_router
 from app.documents import service
-from app.documents.schemas import ArchiveDocument, ArchivedDocument, CreateDocument, Document, DocumentSummary, UpdateDocument
+from app.documents.schemas import (
+    ArchiveDocument,
+    ArchivedDocument,
+    CreateDocument,
+    Document,
+    DocumentSummary,
+    ResolveConflict,
+    UpdateDocument,
+)
 
 # not /docs: that's the API reference
 router = api_router(prefix="/documents", tags=["documents"])
@@ -55,3 +63,14 @@ async def archive_document(node_id: str, body: ArchiveDocument, member: dict = D
 @router.post("/{node_id}/restore")
 async def restore_document(node_id: str, member: dict = Depends(workspace_member())) -> Document:
     return await service.restore(member, node_id)
+
+
+@router.post("/{node_id}/resolve-conflict")
+async def resolve_conflict(node_id: str, body: ResolveConflict, member: dict = Depends(workspace_member())) -> Document:
+    return await service.resolve_conflict(member, node_id, body)
+
+
+@router.delete("/{node_id}")
+async def delete_document(node_id: str, member: dict = Depends(workspace_member())) -> None:
+    """Delete an archive for good; only what's in the Archive can be deleted."""
+    await service.delete_archived(member, node_id)

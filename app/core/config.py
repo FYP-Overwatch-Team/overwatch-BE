@@ -38,7 +38,14 @@ class Settings(BaseSettings):
 
     repos_dir: str = "./repos"
 
-    ticket_sync_interval_seconds: int = 300
+    ticket_sync_interval_seconds: int = 120
+    # a target sync running longer than this was lost (a restart mid-sync) and may be taken over
+    sync_lock_stale_minutes: int = 15
+    # a mirrored page's edits go to its source once nobody has typed for this long, as one version
+    doc_push_idle_seconds: int = 60
+    doc_push_interval_seconds: int = 10
+    # archived docs are deleted for good this long after archiving
+    doc_archive_retention_days: int = 30
 
     # Every git invocation is bounded; a hung clone must not pin a worker.
     git_command_timeout_seconds: int = 300

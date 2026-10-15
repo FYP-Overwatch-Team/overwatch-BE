@@ -59,7 +59,8 @@ async def _visibility(workspace_id: str) -> dict:
     """Native items, plus tracker items whose target is still connected."""
     by_provider: dict[str, list[str]] = {}
     for target in await connectors.list_targets(workspace_id):
-        by_provider.setdefault(target["provider"], []).append(target["key"])
+        if registry.has_work_items(target["provider"]):
+            by_provider.setdefault(target["provider"], []).append(target["key"])
     return {"$or": [{"source": NATIVE_SOURCE}, *({"source": p, "target_key": {"$in": keys}} for p, keys in by_provider.items())]}
 
 

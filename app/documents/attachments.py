@@ -167,3 +167,46 @@ def image_ids(content: dict) -> list[str]:
             found[attachment_id] = None
         stack.extend(reversed(node.get("content") or []))
     return list(found)
+
+
+async def source_copies(workspace_id: str, source: str, external_ids: list[str]) -> dict[str, dict]:
+    """Images already copied from a docs source, by their id there."""
+    cursor = mongo.doc_attachments().find({"workspace_id": workspace_id, "source": source, "external_id": {"$in": external_ids}})
+    return {doc["external_id"]: doc async for doc in cursor}
+
+
+async def copy_from_source(workspace_id: str, node_id: str, source: str, file: dict, data: bytes) -> str | None:
+    """Keep our own copy of an image from a docs source, so pages show it without the source's auth.
+
+    `file` is the source's description ({external_id, media_id, filename, content_type, external_version}).
+    None when it isn't an image we can show.
+    """
+    content_type = _sniffed_type(data)
+    if content_type not in IMAGE_TYPES or len(data) > MAX_BYTES:
+        return None
+    existing = await mongo.doc_attachments().find_one({"workspace_id": workspace_id, "source": source, "external_id": file["external_id"]})
+    attachment_id = existing["_id"] if existing else uuid.uuid4().hex
+    key = f"ws/{workspace_id}/docs/{node_id}/{attachment_id}"
+    await get_object_store().write(key, data, content_type)
+    await mongo.doc_attachments().update_one({"_id": attachment_id}, {"$set": {
+        "workspace_id": workspace_id, "node_id": node_id, "key": key, "filename": file["filename"][:255],
+        "content_type": content_type, "size": len(data), "status": READY, "source": source,
+        "external_id": file["external_id"], "media_id": file.get("media_id"), "external_version": file.get("external_version"),
+        "created_by": None, "created_at": utcnow(),
+    }}, upsert=True)
+    return attachment_id
+
+
+async def media_map(workspace_id: str, node_id: str) -> dict[str, str]:
+    """A mirrored page's copied images: the source's media id → our attachment id."""
+    cursor = mongo.doc_attachments().find({"workspace_id": workspace_id, "node_id": node_id, "media_id": {"$ne": None}}, {"media_id": 1})
+    return {doc["media_id"]: doc["_id"] async for doc in cursor if doc.get("media_id")}
+
+
+async def delete_for(workspace_id: str, node_ids: list[str]) -> None:
+    """Remove the files of deleted pages, then their records."""
+    store = get_object_store()
+    cursor = mongo.doc_attachments().find({"workspace_id": workspace_id, "node_id": {"$in": node_ids}}, {"key": 1})
+    async for doc in cursor:
+        await store.delete(doc["key"])
+    await mongo.doc_attachments().delete_many({"workspace_id": workspace_id, "node_id": {"$in": node_ids}})

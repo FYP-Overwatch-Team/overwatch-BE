@@ -83,6 +83,16 @@ class DocumentKind(StrEnum):
     PAGE = "page"
 
 
+class DocPushState(StrEnum):
+    """Where a mirrored page's local edits are on their way back to the source."""
+
+    NONE = "none"
+    PENDING = "pending"
+    PUSHING = "pushing"
+    # the source changed too: its version is shown, the local edit kept for the user to resolve
+    CONFLICT = "conflict"
+
+
 class BoardKind(StrEnum):
     """`scrum` boards plan work in sprints; `kanban` boards are a continuous flow."""
 

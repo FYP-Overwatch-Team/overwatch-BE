@@ -4,7 +4,7 @@ from fastapi import BackgroundTasks, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 
 from app.api.deps import workspace_member
-from app.connectors import registry, service
+from app.connectors import doc_sync, registry, service
 from app.connectors.schemas import (
     AddTargetRequest,
     Assignee,
@@ -15,7 +15,7 @@ from app.connectors.schemas import (
     Target,
 )
 from app.core.config import get_settings
-from app.core.constants import Role
+from app.core.constants import ConnectorCategory, Role
 from app.core.cookies import cookie_samesite, cookie_secure
 from app.core.exceptions import AppError
 from app.core.responses import api_router
@@ -111,6 +111,8 @@ async def add_target(
 @router.delete("/{provider}/targets/{key}")
 async def remove_target(provider: str, key: str, member: dict = Depends(workspace_member(Role.ADMIN))) -> None:
     await service.remove_target(member["workspace_id"], provider, key)
+    if registry.get(provider).category == ConnectorCategory.DOCUMENTS:
+        await doc_sync.archive_target(member["workspace_id"], provider, key)
 
 
 @router.post("/{provider}/sync", status_code=202)

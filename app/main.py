@@ -32,12 +32,27 @@ from app.db.knowledge_graph_store import get_knowledge_graph_store
 
 
 async def _tracker_sync_loop(interval_seconds: int) -> None:
+    # a pass at once, so a restart doesn't leave boards a whole interval behind
     while True:
-        await asyncio.sleep(interval_seconds)
         try:
             await jobs.resync_all_targets()
         except Exception:
             structlog.get_logger("app.jobs").exception("tracker_sync_loop_error")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _docs_loop(push_seconds: int) -> None:
+    """Push settled docs edits every few seconds; purge expired archives about hourly."""
+    purged_at = 0.0
+    while True:
+        await asyncio.sleep(push_seconds)
+        try:
+            await jobs.push_documents()
+            if asyncio.get_running_loop().time() - purged_at >= 3600:
+                await jobs.purge_archived_documents()
+                purged_at = asyncio.get_running_loop().time()
+        except Exception:
+            structlog.get_logger("app.jobs").exception("docs_loop_error")
 
 
 @asynccontextmanager
@@ -77,8 +92,10 @@ async def lifespan(app: FastAPI):
     sync_task = asyncio.create_task(
         _tracker_sync_loop(get_settings().ticket_sync_interval_seconds)
     )
+    docs_task = asyncio.create_task(_docs_loop(get_settings().doc_push_interval_seconds))
     yield
     sync_task.cancel()
+    docs_task.cancel()
     mongo.close()
 
 

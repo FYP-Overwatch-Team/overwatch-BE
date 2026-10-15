@@ -1,6 +1,7 @@
 """A workspace's connections (one per provider) and the targets each one syncs."""
 
 import uuid
+from datetime import timedelta
 
 from pymongo import ReturnDocument
 
@@ -99,11 +100,20 @@ async def remove_target(workspace_id: str, provider: str, key: str) -> bool:
     return result.matched_count > 0
 
 
-async def claim_target(workspace_id: str, provider: str, key: str) -> dict | None:
-    """Mark the target as syncing; None if it's gone or already syncing (the overlap lock)."""
+async def claim_target(workspace_id: str, provider: str, key: str, stale_after: timedelta) -> dict | None:
+    """Mark the target as syncing; None if it's gone or already syncing (the overlap lock).
+
+    A sync running longer than `stale_after` was lost (a restart mid-sync) and is taken over;
+    so is one marked running before syncs recorded when they started.
+    """
+    now = utcnow()
+    running_too_long = {"$or": [{"sync_started_at": {"$lt": now - stale_after}}, {"sync_started_at": None}]}
     return await mongo.sync_targets().find_one_and_update(
-        {"workspace_id": workspace_id, "provider": provider, "key": key, **ACTIVE, "sync_status": {"$ne": JobStatus.IN_PROGRESS}},
-        {"$set": {"sync_status": JobStatus.IN_PROGRESS, "updated_at": utcnow()}},
+        {
+            "workspace_id": workspace_id, "provider": provider, "key": key, **ACTIVE,
+            "$or": [{"sync_status": {"$ne": JobStatus.IN_PROGRESS}}, running_too_long],
+        },
+        {"$set": {"sync_status": JobStatus.IN_PROGRESS, "sync_started_at": now, "updated_at": now}},
     )
 
 
@@ -112,3 +122,8 @@ async def finish_target(workspace_id: str, provider: str, key: str, **fields) ->
         {"workspace_id": workspace_id, "provider": provider, "key": key},
         {"$set": {**fields, "updated_at": utcnow()}},
     )
+
+
+async def end_sync(workspace_id: str, provider: str, key: str, **fields) -> None:
+    """Record how a sync went and release its lock."""
+    await finish_target(workspace_id, provider, key, **fields, sync_started_at=None)

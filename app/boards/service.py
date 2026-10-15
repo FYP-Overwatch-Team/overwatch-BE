@@ -89,6 +89,8 @@ async def list_boards(workspace_id: str) -> list[dict]:
     writable = await _writable_sources(workspace_id)
     boards = [await repository.ensure(workspace_id, NATIVE_SOURCE, None)]
     for target in await connectors.list_targets(workspace_id):
+        if not registry.has_work_items(target["provider"]):
+            continue
         boards.append(await repository.ensure(workspace_id, target["provider"], target["key"], target.get("name")))
     return [to_board(board, writable=board["source"] in writable) for board in boards]
 
@@ -96,7 +98,7 @@ async def list_boards(workspace_id: str) -> list[dict]:
 async def get_visible(workspace_id: str, board_id: str) -> dict:
     """A board whose target is still connected; 404 otherwise."""
     board = await repository.get(workspace_id, board_id)
-    if board and (board["source"] == NATIVE_SOURCE or await connectors.find_target(workspace_id, board["source"], board["target_key"])):
+    if board and (board["source"] == NATIVE_SOURCE or (registry.has_work_items(board["source"]) and await connectors.find_target(workspace_id, board["source"], board["target_key"]))):
         return board
     raise NotFoundError("board not found", error_code="board_not_found")
 

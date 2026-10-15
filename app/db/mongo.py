@@ -191,6 +191,17 @@ async def ensure_indexes() -> None:
     # each archive's group, restored together
     await documents().create_index([("workspace_id", 1), ("archive_root_id", 1)])
     await doc_attachments().create_index([("workspace_id", 1), ("node_id", 1)])
+    # images copied from a docs source, found again when a page syncs
+    await doc_attachments().create_index(
+        [("workspace_id", 1), ("source", 1), ("external_id", 1)], unique=True,
+        partialFilterExpression={"external_id": {"$type": "string"}},
+    )
+    # a synced target's mirror, read whole on each sync
+    await documents().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1)])
+    # archives past their retention, across workspaces (the hourly clean-up)
+    await documents().create_index([("archived_at", 1)], partialFilterExpression={"archived_root": True})
+    # mirrored pages waiting to go back to their source (only mirrored pages have a push state)
+    await documents().create_index([("push_state", 1), ("push_due_at", 1)], partialFilterExpression={"push_state": {"$type": "string"}})
     # the Archive list: what was archived, newest first
     await documents().create_index(
         [("workspace_id", 1), ("archived_at", -1)], partialFilterExpression={"archived_root": True},
@@ -200,7 +211,6 @@ async def ensure_indexes() -> None:
         partialFilterExpression={"external_id": {"$type": "string"}},
     )
     await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1), ("sprint_id", 1)])
-
     # Extraction cache: read on every sync to decide what changed, and always
     # scoped to one repository.
     await file_facts().create_index([("repo_full_name", 1), ("path", 1)], unique=True)
