@@ -62,6 +62,13 @@ class StatusCategory(StrEnum):
     DONE = "done"
 
 
+class DocumentKind(StrEnum):
+    """A docs tree node: folders hold other nodes, pages hold content (and may hold child pages)."""
+
+    FOLDER = "folder"
+    PAGE = "page"
+
+
 class BoardKind(StrEnum):
     """`scrum` boards plan work in sprints; `kanban` boards are a continuous flow."""
 

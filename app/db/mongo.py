@@ -98,6 +98,16 @@ def tickets():
     return get_db()["tickets"]
 
 
+def documents():
+    """Docs tree nodes (folders and pages): written here (`native`) or mirrored from a docs provider."""
+    return get_db()["documents"]
+
+
+def doc_attachments():
+    """Files (images) uploaded into docs pages: where each is stored, and whether its upload finished."""
+    return get_db()["doc_attachments"]
+
+
 def workspaces():
     return get_db()["workspaces"]
 
@@ -174,6 +184,21 @@ async def ensure_indexes() -> None:
         partialFilterExpression={"source": NATIVE_SOURCE, "state": SprintState.ACTIVE.value},
     )
     await work_item_comments().create_index([("workspace_id", 1), ("item_id", 1), ("created_at", 1)])
+    # a folder's children in order: the docs tree loads one level at a time
+    await documents().create_index([("workspace_id", 1), ("parent_id", 1), ("archived_at", 1), ("rank", 1)])
+    # a node's whole subtree, through the ancestors each node keeps (archive, move)
+    await documents().create_index([("workspace_id", 1), ("ancestor_ids", 1)])
+    # each archive's group, restored together
+    await documents().create_index([("workspace_id", 1), ("archive_root_id", 1)])
+    await doc_attachments().create_index([("workspace_id", 1), ("node_id", 1)])
+    # the Archive list: what was archived, newest first
+    await documents().create_index(
+        [("workspace_id", 1), ("archived_at", -1)], partialFilterExpression={"archived_root": True},
+    )
+    await documents().create_index(
+        [("workspace_id", 1), ("source", 1), ("external_id", 1)], unique=True,
+        partialFilterExpression={"external_id": {"$type": "string"}},
+    )
     await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1), ("sprint_id", 1)])
 
     # Extraction cache: read on every sync to decide what changed, and always
