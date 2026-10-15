@@ -7,6 +7,7 @@ once and pushed back by the docs sync. Folders and the source's own structure st
 import uuid
 from datetime import timedelta
 
+from app.auth import usernames
 from app.auth.repository import get_user
 from app.connectors import registry, repository as connectors
 from app.connectors.doc_sync import push_delay
@@ -24,7 +25,7 @@ MIN_RANK_GAP = 1e-6
 
 async def _author(user_id: str) -> dict:
     user = await get_user(user_id) or {}
-    return {"id": user_id, "name": user.get("name") or user.get("github_login"), "avatar_url": user.get("avatar_url")}
+    return {"id": user_id, "name": usernames.display_name(user), "avatar_url": user.get("avatar_url")}
 
 
 async def writable_sources(workspace_id: str, docs: list[dict] | None = None) -> set[str]:

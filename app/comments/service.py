@@ -8,6 +8,7 @@ what shows who wrote it and lets only them change it.
 
 import uuid
 
+from app.auth import usernames
 from app.auth.repository import get_user
 from app.connectors import registry
 from app.connectors import repository as connectors
@@ -24,7 +25,7 @@ ATTRIBUTION = "\n\n_Posted from Overwatch by {name}_"
 
 async def _author(member: dict) -> dict:
     user = await get_user(member["user_id"])
-    return {"id": member["user_id"], "name": (user or {}).get("name") or (user or {}).get("github_login")}
+    return {"id": member["user_id"], "name": usernames.display_name(user)}
 
 
 def _rights(member: dict, author_id: str | None, local: bool) -> dict:

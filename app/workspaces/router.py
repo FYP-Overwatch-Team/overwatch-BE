@@ -1,7 +1,10 @@
-from fastapi import Depends
+from datetime import timedelta
 
-from app.api.deps import get_current_user, get_current_user_id, workspace_member_by_path
+from fastapi import BackgroundTasks, Depends
+
+from app.api.deps import client_ip, get_current_user, get_current_user_id, workspace_member_by_path
 from app.core.constants import Role
+from app.core.rate_limit import Limit, take
 from app.core.responses import api_router
 from app.workspaces import service
 from app.workspaces.schemas import (
@@ -9,13 +12,16 @@ from app.workspaces.schemas import (
     Invite,
     InviteCreated,
     InvitePreview,
+    InviteToken,
     Member,
+    PublicInvitePreview,
     UpdateMemberRequest,
     Workspace,
     WorkspaceName,
 )
 
 router = api_router(tags=["workspaces"])
+PREVIEWS_PER_IP = Limit("invite_preview:ip", 60, timedelta(minutes=15))
 
 member = workspace_member_by_path()
 admin = workspace_member_by_path(Role.ADMIN)
@@ -63,8 +69,13 @@ async def remove_member(user_id: str, actor: dict = Depends(member)) -> None:
 
 
 @router.post("/workspaces/{workspace_id}/invites", status_code=201)
-async def create_invite(body: CreateInviteRequest, actor: dict = Depends(admin)) -> InviteCreated:
-    return await service.create_invite(actor, body.role, body.github_login)
+async def create_invite(body: CreateInviteRequest, background: BackgroundTasks, actor: dict = Depends(admin)) -> InviteCreated:
+    return await service.create_invite(actor, body.role, body.github_login, body.email, background)
+
+
+@router.post("/workspaces/{workspace_id}/invites/{invite_id}/resend")
+async def resend_invite(invite_id: str, background: BackgroundTasks, actor: dict = Depends(admin)) -> Invite:
+    return await service.resend_invite(actor, invite_id, background)
 
 
 @router.get("/workspaces/{workspace_id}/invites")
@@ -77,6 +88,24 @@ async def revoke_invite(invite_id: str, actor: dict = Depends(admin)) -> None:
     await service.revoke_invite(actor["workspace_id"], invite_id)
 
 
+# the token goes in the body, out of URLs and access logs
+@router.post("/invites/public-preview")
+async def public_preview(body: InviteToken, ip: str = Depends(client_ip)) -> PublicInvitePreview:
+    await take(PREVIEWS_PER_IP, ip)
+    return await service.public_preview(body.token)
+
+
+@router.post("/invites/preview")
+async def preview(body: InviteToken, user: dict = Depends(get_current_user)) -> InvitePreview:
+    return await service.preview_invite(body.token, user)
+
+
+@router.post("/invites/accept")
+async def accept(body: InviteToken, user: dict = Depends(get_current_user)) -> Workspace:
+    return await service.accept_invite(body.token, user)
+
+
+# links sent before tokens moved into the fragment; remove once they've all expired (7 days after release)
 @router.get("/invites/{token}")
 async def preview_invite(token: str, user: dict = Depends(get_current_user)) -> InvitePreview:
     return await service.preview_invite(token, user)

@@ -158,3 +158,32 @@ class WorkItemIcon(StrEnum):
     PUZZLE = "PuzzlePiece"
     CODE = "Code"
     CIRCLE = "Circle"
+
+
+class ChallengePurpose(StrEnum):
+    """What an emailed one-time code proves: a new account's address, or the right to reset a password."""
+
+    VERIFY_EMAIL = "verify_email"
+    RESET_PASSWORD = "reset_password"
+
+
+class InviteKind(StrEnum):
+    """Who may accept an invite: anyone with the link, one GitHub account, or one email address."""
+
+    LINK = "link"
+    GITHUB = "github"
+    EMAIL = "email"
+
+
+class AuthErrorCode(StrEnum):
+    """Error codes of the email and password flows the frontend reacts to."""
+
+    INVALID_CREDENTIALS = "invalid_credentials"
+    EMAIL_NOT_VERIFIED = "email_not_verified"
+    INVALID_CODE = "invalid_code"
+    OTP_ATTEMPTS_EXCEEDED = "otp_attempts_exceeded"
+    OTP_RESEND_COOLDOWN = "otp_resend_cooldown"
+    OTP_RESEND_LIMIT = "otp_resend_limit"
+    USERNAME_ALREADY_SET = "username_already_set"
+    GITHUB_ACCOUNT_IN_USE = "github_account_in_use"
+    ACCOUNT_EXISTS = "account_exists"

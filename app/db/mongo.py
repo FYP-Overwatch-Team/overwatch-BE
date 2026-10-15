@@ -41,6 +41,11 @@ def users():
     return get_db()["users"]
 
 
+def auth_challenges():
+    """Emailed one-time codes (email verification, password reset); dropped once `expires_at` passes."""
+    return get_db()["auth_challenges"]
+
+
 def oauth_tokens():
     return get_db()["oauth_tokens"]
 
@@ -163,11 +168,28 @@ async def ensure_indexes() -> None:
     await refresh_tokens().create_index("user_id")  # logout-all
     await refresh_tokens().create_index("expires_at", expireAfterSeconds=0)
 
-    await users().create_index("github_id", unique=True)
+    # partial: email-only users have no GitHub id, and a plain unique index would count each missing one as a duplicate null
+    if "github_id_1" in await users().index_information():
+        await users().drop_index("github_id_1")
+    await users().create_index(
+        "github_id", unique=True, name="github_id_unique", partialFilterExpression={"github_id": {"$type": "number"}},
+    )
+    # emails and usernames are stored lowercase, so exact-match uniqueness is uniqueness ignoring case
+    await users().create_index("email", unique=True, partialFilterExpression={"email": {"$type": "string"}})
+    await users().create_index("username", unique=True, partialFilterExpression={"username": {"$type": "string"}})
+    # an account whose email was never verified is deleted 7 days after its last sign-up attempt
+    await users().create_index("unverified_expires_at", expireAfterSeconds=0)
+    await auth_challenges().create_index([("user_id", 1), ("purpose", 1)])
+    await auth_challenges().create_index("expires_at", expireAfterSeconds=0)
     await workspace_members().create_index([("workspace_id", 1), ("user_id", 1)], unique=True)
     await workspace_members().create_index("user_id")
     await workspace_invites().create_index("token_hash", unique=True)
     await workspace_invites().create_index("workspace_id")
+    # one pending invite per email in a workspace; `pending_email` is unset once it's accepted, revoked or expired
+    await workspace_invites().create_index(
+        [("workspace_id", 1), ("pending_email", 1)], unique=True,
+        partialFilterExpression={"pending_email": {"$type": "string"}},
+    )
     await oauth_tokens().create_index([("owner_id", 1), ("provider", 1)], unique=True)
     await repos().create_index([("workspace_id", 1), ("repo_full_name", 1)], unique=True)
     await repos().create_index("repo_full_name")

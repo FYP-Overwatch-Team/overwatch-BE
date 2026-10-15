@@ -9,6 +9,7 @@ import re
 import uuid
 from datetime import timedelta
 
+from app.auth import usernames
 from app.auth.repository import get_user
 from app.boards import repository as boards
 from app.boards import service as board_service
@@ -184,7 +185,7 @@ async def _assignee(workspace_id: str, user_id: str | None) -> dict | None:
     user = await workspaces.membership(workspace_id, user_id) and await get_user(user_id)
     if not user:
         raise NotFoundError("assignee is not a member of this workspace", error_code="member_not_found")
-    return {"id": user_id, "name": user.get("name") or user["github_login"]}
+    return {"id": user_id, "name": usernames.display_name(user)}
 
 
 async def _refresh(workspace_id: str, conn: dict, target_key: str, external_id: str) -> dict:

@@ -10,11 +10,12 @@ from datetime import timedelta
 from typing import NoReturn
 
 import structlog
+from pymongo.errors import DuplicateKeyError
 
-from app.auth import repository
+from app.auth import repository, usernames
 from app.core import security
-from app.core.constants import Provider
-from app.core.exceptions import UnauthorizedError
+from app.core.constants import AuthErrorCode, Provider
+from app.core.exceptions import ConflictError, UnauthorizedError
 from app.core.time import utcnow
 from app.db import oauth_tokens
 from app.workspaces import repository as workspaces
@@ -26,7 +27,15 @@ REFRESH_TOKEN_TTL = timedelta(days=30)
 
 async def sign_in_with_github(profile: dict, github_tokens: dict) -> str:
     """Upsert the user, keep their GitHub user token, start a session. Returns the raw refresh token."""
-    user = await repository.upsert_github_user(profile)
+    existing = await repository.find_user_by_github_id(profile["id"])
+    username = None
+    if existing is None and (candidate := usernames.default_from(profile["login"])) and not await usernames.is_taken(candidate):
+        username = candidate
+    try:
+        user = await repository.upsert_github_user(profile, username)
+    except DuplicateKeyError:
+        # the free username was taken in between; they choose one after signing in
+        user = await repository.upsert_github_user(profile, None)
     await oauth_tokens.save(user["_id"], Provider.GITHUB, github_tokens)
     await workspaces.ensure_personal(user)
     return await create_session(user["_id"])
@@ -71,6 +80,20 @@ async def _reject(token_hash: str) -> NoReturn:
         logger.warning("refresh_token_reuse_detected", family_id=doc["family_id"], user_id=doc["user_id"])
         raise UnauthorizedError("refresh token reuse detected", error_code="refresh_token_reused")
     raise UnauthorizedError("refresh token expired", error_code="refresh_token_expired")
+
+
+async def link_github(user_id: str, profile: dict, github_tokens: dict) -> None:
+    """Attach a GitHub account to a signed-in user, unless it already belongs to someone else."""
+    in_use = ConflictError("that GitHub account belongs to another user", error_code=AuthErrorCode.GITHUB_ACCOUNT_IN_USE)
+    owner = await repository.find_user_by_github_id(profile["id"])
+    if owner and owner["_id"] != user_id:
+        raise in_use
+    try:
+        await repository.link_github(user_id, profile)
+    except DuplicateKeyError as exc:
+        # another user linked it in between
+        raise in_use from exc
+    await oauth_tokens.save(user_id, Provider.GITHUB, github_tokens)
 
 
 async def logout(raw_refresh: str) -> None:

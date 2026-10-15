@@ -8,7 +8,8 @@ from datetime import datetime
 
 from pymongo import ReturnDocument
 
-from app.core.constants import Role
+from app.auth import usernames
+from app.core.constants import InviteKind, Role
 from app.core.time import utcnow
 from app.db import mongo
 
@@ -21,7 +22,7 @@ async def ensure_personal(user: dict) -> None:
     await mongo.workspaces().update_one(
         {"_id": user["_id"]},
         {"$setOnInsert": {
-            "name": user.get("name") or user["github_login"],
+            "name": usernames.display_name(user, "Personal"),
             "personal": True,
             "created_by": user["_id"],
             "created_at": now,
@@ -107,9 +108,33 @@ async def list_invites(workspace_id: str) -> list[dict]:
 
 async def revoke_invite(workspace_id: str, invite_id: str) -> bool:
     result = await mongo.workspace_invites().update_one(
-        {"_id": invite_id, "workspace_id": workspace_id}, {"$set": {"revoked": True}},
+        {"_id": invite_id, "workspace_id": workspace_id}, {"$set": {"revoked": True}, "$unset": {"pending_email": ""}},
     )
     return result.matched_count > 0
+
+
+async def release_expired_email_invites(workspace_id: str) -> None:
+    """Expired invites stop holding their email, so it can be invited again."""
+    await mongo.workspace_invites().update_many(
+        {"workspace_id": workspace_id, "pending_email": {"$type": "string"}, "expires_at": {"$lte": utcnow()}},
+        {"$unset": {"pending_email": ""}},
+    )
+
+
+async def find_open_email_invite(workspace_id: str, invite_id: str) -> dict | None:
+    return await mongo.workspace_invites().find_one({
+        "_id": invite_id, "workspace_id": workspace_id, "kind": InviteKind.EMAIL, "accepted_by": None, "revoked": False,
+        "expires_at": {"$gt": utcnow()},
+    })
+
+
+async def renew_invite(invite_id: str, last_sent_at: datetime, fields: dict) -> dict | None:
+    """A fresh token and expiry, unless another resend got there first."""
+    return await mongo.workspace_invites().find_one_and_update(
+        {"_id": invite_id, "last_sent_at": last_sent_at},
+        {"$set": fields, "$inc": {"send_count": 1}},
+        return_document=ReturnDocument.AFTER,
+    )
 
 
 async def find_open_invite(token_hash: str) -> dict | None:
@@ -122,6 +147,6 @@ async def claim_invite(token_hash: str, user_id: str, now: datetime) -> dict | N
     """Use up an open invite in one write, so a single-use link can't be accepted twice."""
     return await mongo.workspace_invites().find_one_and_update(
         {"token_hash": token_hash, "accepted_by": None, "revoked": False, "expires_at": {"$gt": now}},
-        {"$set": {"accepted_by": user_id, "accepted_at": now}},
+        {"$set": {"accepted_by": user_id, "accepted_at": now}, "$unset": {"pending_email": ""}},
         return_document=ReturnDocument.AFTER,
     )

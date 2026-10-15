@@ -17,6 +17,7 @@ from datetime import timedelta
 import structlog
 from pymongo import InsertOne, UpdateOne
 
+from app.auth import usernames
 from app.auth.repository import get_user
 from app.connectors import registry, repository as connectors
 from app.connectors.adf import EDITOR_FORMAT
@@ -325,7 +326,7 @@ async def _push(doc: dict) -> None:
         return
     adapter, auth = registry.doc_source(provider), registry.auth_for(conn)
     editor = await get_user(doc["updated_by"]) if doc.get("updated_by") else None
-    name = (editor or {}).get("name") or (editor or {}).get("github_login") or "someone"
+    name = usernames.display_name(editor, "someone")
     try:
         version = await adapter.update_page(
             auth, conn, doc["external_id"], title=doc["title"], content=doc["content"],
