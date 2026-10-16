@@ -6,6 +6,7 @@ Runs against a real Mongo (`docker compose up -d mongo`) and skips otherwise.
 import asyncio
 import os
 import uuid
+from datetime import timedelta
 
 import pytest
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -35,7 +36,9 @@ async def real_mongo():
     client.close()
 
 
-async def test_concurrent_rotation_of_one_token_succeeds_once(real_mongo):
+async def test_concurrent_rotation_of_one_token_succeeds_once(real_mongo, monkeypatch):
+    # past the reuse grace period: one rotation wins, the rest are reuse
+    monkeypatch.setattr(service, "REUSE_GRACE", timedelta(0))
     raw = await service.create_session("user-1")
     results = await asyncio.gather(*(service.rotate(raw) for _ in range(5)), return_exceptions=True)
 

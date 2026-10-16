@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 import pytest
 
 from app.auth import repository, service
@@ -53,7 +55,9 @@ async def test_a_token_can_be_claimed_only_once():
     assert await repository.claim_refresh_token(token_hash, "next-2") is None
 
 
-async def test_reuse_of_rotated_token_revokes_family():
+async def test_reuse_of_rotated_token_revokes_family(monkeypatch):
+    # past the reuse grace period (covered in test_auth_flow)
+    monkeypatch.setattr(service, "REUSE_GRACE", timedelta(0))
     raw1 = await service.create_session("user-1")
     _, raw2 = await service.rotate(raw1)
 

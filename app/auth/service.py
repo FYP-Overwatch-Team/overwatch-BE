@@ -23,6 +23,9 @@ from app.workspaces import repository as workspaces
 logger = structlog.get_logger("app.auth")
 
 REFRESH_TOKEN_TTL = timedelta(days=30)
+# a token rotated this recently still works once, through its unused successor: a refresh whose answer was lost
+# (a closed tab, a dropped connection) or two tabs refreshing together aren't mistaken for theft
+REUSE_GRACE = timedelta(seconds=20)
 
 
 async def sign_in_with_github(profile: dict, github_tokens: dict) -> str:
@@ -57,7 +60,10 @@ async def rotate(raw_refresh: str) -> tuple[str, str]:
     """Swap a refresh token for a new one. Returns (access_jwt, new_raw_refresh)."""
     token_hash = security.hash_refresh_token(raw_refresh)
     new_raw = security.generate_refresh_token()
-    claimed = await repository.claim_refresh_token(token_hash, security.hash_refresh_token(new_raw))
+    new_hash = security.hash_refresh_token(new_raw)
+    claimed = await repository.claim_refresh_token(token_hash, new_hash)
+    if claimed is None:
+        claimed = await _claim_successor(token_hash, new_hash)
     if claimed is None:
         await _reject(token_hash)
 
@@ -68,6 +74,14 @@ async def rotate(raw_refresh: str) -> tuple[str, str]:
         utcnow() + REFRESH_TOKEN_TTL,
     )
     return security.issue_access_token(claimed["user_id"]), new_raw
+
+
+async def _claim_successor(token_hash: str, new_hash: str) -> dict | None:
+    """Within the grace period, a just-rotated token takes over its successor if nothing has used that yet."""
+    doc = await repository.find_refresh_token(token_hash)
+    if not doc or not doc.get("rotated_at") or doc["rotated_at"] + REUSE_GRACE < utcnow():
+        return None
+    return await repository.claim_refresh_token(doc["replaced_by"], new_hash)
 
 
 async def _reject(token_hash: str) -> NoReturn:

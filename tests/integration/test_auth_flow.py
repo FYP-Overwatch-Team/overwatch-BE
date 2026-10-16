@@ -1,11 +1,14 @@
 import base64
 import hashlib
+from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 import respx
 from httpx import Response
 
 from app.core.security import verify_access_token
+from app.core.time import utcnow
+from app.db import mongo
 
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 USER_URL = "https://api.github.com/user"
@@ -114,7 +117,8 @@ async def test_refresh_rotates_and_reuse_revokes_family(client):
     new_refresh = client.cookies["overwatch_refresh"]
     assert new_refresh != old_refresh
 
-    # replay the old (already-rotated) cookie -> reuse detection kills the family
+    # replay the old (already-rotated) cookie after the grace period -> reuse detection kills the family
+    await mongo.refresh_tokens().update_many({}, {"$set": {"rotated_at": utcnow() - timedelta(minutes=1)}})
     client.cookies.set("overwatch_refresh", old_refresh, path="/auth")
     r2 = await client.post("/auth/refresh")
     assert r2.status_code == 401
@@ -123,6 +127,36 @@ async def test_refresh_rotates_and_reuse_revokes_family(client):
     # even the newest token is now revoked
     client.cookies.set("overwatch_refresh", new_refresh, path="/auth")
     assert (await client.post("/auth/refresh")).status_code == 401
+
+
+async def test_a_refresh_whose_answer_was_lost_can_be_retried_once(client):
+    await login(client)
+    old_refresh = client.cookies["overwatch_refresh"]
+    assert (await client.post("/auth/refresh")).status_code == 200
+    unused_successor = client.cookies["overwatch_refresh"]
+
+    # the browser never got that answer, so it sends the old cookie again, moments later
+    client.cookies.set("overwatch_refresh", old_refresh, path="/auth")
+    retried = await client.post("/auth/refresh")
+    assert retried.status_code == 200
+    newest = retried.cookies["overwatch_refresh"]
+    assert newest not in (old_refresh, unused_successor)
+
+    # only once: the successor it took over is spent, so a third use is reuse and ends the family
+    client.cookies.set("overwatch_refresh", old_refresh, path="/auth")
+    assert (await client.post("/auth/refresh")).json()["meta"]["error_code"] == "refresh_token_reused"
+    client.cookies.set("overwatch_refresh", newest, path="/auth")
+    assert (await client.post("/auth/refresh")).status_code == 401
+
+
+async def test_the_grace_period_doesnt_cover_a_successor_already_used(client):
+    await login(client)
+    old_refresh = client.cookies["overwatch_refresh"]
+    assert (await client.post("/auth/refresh")).status_code == 200
+    assert (await client.post("/auth/refresh")).status_code == 200  # the successor was used normally
+
+    client.cookies.set("overwatch_refresh", old_refresh, path="/auth")
+    assert (await client.post("/auth/refresh")).json()["meta"]["error_code"] == "refresh_token_reused"
 
 
 async def test_logout_invalidates_refresh(client):
