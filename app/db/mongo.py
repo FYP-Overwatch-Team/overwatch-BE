@@ -251,6 +251,8 @@ async def ensure_indexes() -> None:
     await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1), ("sprint_id", 1)])
     # a type's items, found again when it's deleted
     await work_items().create_index([("workspace_id", 1), ("type_id", 1)])
+    # a board item by its key, as a link to it on the board looks it up; keys repeat across trackers, so not unique
+    await work_items().create_index([("workspace_id", 1), ("source", 1), ("target_key", 1), ("key", 1)])
     # one type per name in a workspace, whatever its case
     await work_item_types().create_index([("workspace_id", 1), ("name_key", 1)], unique=True)
 

@@ -76,7 +76,7 @@ async def _query(
     workspace_id: str, *, board_id: str | None = None, column_id: str | None = None, sprint: str | None = None,
     done_within_days: int | None = None, hide_epics: bool = False, open_only: bool = False, source: str | None = None,
     status_category: str | None = None, target_key: str | None = None, assignee_id: str | None = None,
-    priority: str | None = None, q: str | None = None,
+    priority: str | None = None, q: str | None = None, key: str | None = None,
 ) -> dict | None:
     """The Mongo filter for a board's items; None when nothing can match (no active sprint for "current")."""
     query: dict = {"workspace_id": workspace_id, **await _visibility(workspace_id)}
@@ -98,7 +98,9 @@ async def _query(
         query["issue_type"] = {"$ne": "Epic"}
     if open_only:
         conditions.append({"status_category": {"$ne": StatusCategory.DONE}})
-    filters = {"column_id": column_id, "source": source, "status_category": status_category, "target_key": target_key}
+    filters = {
+        "column_id": column_id, "source": source, "status_category": status_category, "target_key": target_key, "key": key,
+    }
     query.update({k: v for k, v in filters.items() if v is not None})
     # "none" is the lane of items with no assignee (or priority)
     for field, value in ((LANE_FIELDS["assignee"], assignee_id), (LANE_FIELDS["priority"], priority)):

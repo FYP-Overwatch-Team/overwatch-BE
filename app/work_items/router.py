@@ -9,6 +9,8 @@ from app.work_items import service
 from app.work_items.schemas import AllowedMoves, AllowedTypes, CreateWorkItem, Lane, MoveWorkItem, SetSprint, UpdateWorkItem, WorkItem
 
 router = api_router(prefix="/work-items", tags=["work-items"])
+# Jira keys are a project key (up to 10 characters) and a number; room to spare
+KEY_MAX_LENGTH = 50
 
 
 @router.get("")
@@ -30,6 +32,8 @@ async def list_work_items(
     assignee_id: str | None = None,
     priority: str | None = None,
     q: str | None = Query(None, max_length=200),
+    # one exact key, e.g. a ticket linked from the board's address
+    key: str | None = Query(None, max_length=KEY_MAX_LENGTH),
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=500),
     # items to skip, instead of whole pages: lets a board load a first batch, then smaller ones
@@ -40,7 +44,7 @@ async def list_work_items(
         member["workspace_id"], board_id=board_id, column_id=column_id, sprint=sprint,
         done_within_days=done_within_days, hide_epics=hide_epics, open_only=open_only, source=source,
         status_category=status_category, target_key=target_key,
-        assignee_id=assignee_id, priority=priority, q=q, page=page, page_size=page_size, offset=offset,
+        assignee_id=assignee_id, priority=priority, q=q, key=key, page=page, page_size=page_size, offset=offset,
     )
     return WithMeta(items, {"total": total, "page": page, "page_size": page_size})
 
