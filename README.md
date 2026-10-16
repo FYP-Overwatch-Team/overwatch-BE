@@ -56,6 +56,14 @@ scopes): `read:board-scope:jira-software`, `write:board-scope:jira-software`, `r
 `read:sprint:jira-software`, `write:sprint:jira-software`, `read:issue:jira-software`.
 Then set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`.
 
+### Email
+
+Sign-up codes, password resets and workspace invites are emailed. Locally `EMAIL_BACKEND=console` logs them
+(with the code, in dev only). In production use `EMAIL_BACKEND=smtp` with a Gmail account: turn on 2-step
+verification, create an App Password, and set `SMTP_USERNAME` (the address), `SMTP_PASSWORD` (the App Password)
+and `EMAIL_FROM` (the same address or a verified "send as" alias). Gmail allows about 500 recipients a day;
+`INVITE_EMAIL_DAILY_LIMIT_*` keep invites well under it.
+
 ## API responses
 
 Every endpoint returns the same envelope. Routes just return their data and declare its type
@@ -170,7 +178,11 @@ application `.env` is never copied from GitHub.
    `uv run python scripts/migrate_boards.py` (dry run) and again with `--apply`, and have an admin reconnect
    Jira so its board columns and sprints can be read. Until they reconnect, columns are offered from the
    project's statuses instead.
-9. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
+9. Email and password sign-in: set the email variables above, deploy, then run
+   `uv run python scripts/migrate_native_auth.py` (dry run) and again with `--apply`. It replaces the
+   `github_id` index (the API also does this on boot), gives GitHub users their login as username, and marks
+   existing invites' kind. Users whose login couldn't be used choose a username the next time they sign in.
+10. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
 
 **Note on ticket freshness:** Jira issues sync on a polling loop
 (`ticket_sync_interval_seconds`, default 5 min) rather than via Jira webhooks, which need a

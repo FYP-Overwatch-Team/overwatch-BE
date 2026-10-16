@@ -59,6 +59,26 @@ async def test_list_filters_sorts_by_board_position_and_paginates(client):
     assert await keys(client, headers, "?offset=1&page_size=1") == ["OVR-2"]
 
 
+async def test_a_key_matches_exactly_and_only_on_its_board(client):
+    headers = await signed_in(client)
+    workspace = headers["X-Workspace-Id"]
+    await seed_jira(workspace)
+    # OVR-10 contains "OVR-1", which a substring search would also match
+    await work_items.upsert_synced(workspace, JiraAdapter().normalise(CONN, "OVR", {**ISSUES[0], "id": "99010", "key": "OVR-10"}))
+    jira_board, native_board = await board_id(client, headers, "jira"), await board_id(client, headers)
+    native = await create(client, headers, title="Native")
+
+    assert await keys(client, headers, "?key=OVR-1") == ["OVR-1"]
+    assert await keys(client, headers, "?key=OVR") == []
+    assert await keys(client, headers, "?key=ovr-1") == []
+    assert await keys(client, headers, f"?board_id={jira_board}&key=OVR-2") == ["OVR-2"]
+    assert await keys(client, headers, f"?board_id={native_board}&key=OVR-2") == []
+    assert await keys(client, headers, f"?board_id={native_board}&key={native['key']}") == [native["key"]]
+
+    too_long = await client.get(f"/work-items?key={'X' * 51}", headers=headers)
+    assert too_long.status_code == 422
+
+
 async def test_items_are_scoped_to_the_workspace(client):
     headers = await signed_in(client)
     await seed_jira("someone-else")

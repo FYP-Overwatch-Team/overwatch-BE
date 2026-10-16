@@ -18,7 +18,7 @@ auth = registry.auth_for(CONN)
 
 async def seed_tokens(expires_in_seconds: int) -> None:
     await oauth_tokens.save(
-        "ws-1", "jira", {"access_token": "old-access", "refresh_token": "old-refresh", "expires_in": expires_in_seconds},
+        "ws-1", "atlassian", {"access_token": "old-access", "refresh_token": "old-refresh", "expires_in": expires_in_seconds},
     )
 
 
@@ -44,7 +44,7 @@ async def test_token_inside_buffer_refreshes_and_rotates():
         await auth.request(CONN, "GET", API_URL)
 
     assert bearer(api) == "Bearer new-access"
-    doc = await mongo.oauth_tokens().find_one({"owner_id": "ws-1", "provider": "jira"})
+    doc = await mongo.oauth_tokens().find_one({"owner_id": "ws-1", "provider": "atlassian"})
     assert security.decrypt_secret(doc["refresh_token_encrypted"]) == "rotated-refresh"
 
 
@@ -54,8 +54,8 @@ async def test_rejected_refresh_marks_needs_reauth_and_fails_fast_after():
         router.post(TOKEN_URL).mock(return_value=Response(403, json={"error": "invalid_grant"}))
         with pytest.raises(UnauthorizedError) as exc:
             await auth.request(CONN, "GET", API_URL)
-    assert exc.value.error_code == "jira_needs_reauth"
-    assert (await oauth_tokens.get("ws-1", "jira"))["status"] == "needs_reauth"
+    assert exc.value.error_code == "atlassian_needs_reauth"
+    assert (await oauth_tokens.get("ws-1", "atlassian"))["status"] == "needs_reauth"
 
     with respx.mock, pytest.raises(UnauthorizedError):
         await auth.request(CONN, "GET", API_URL)
@@ -67,7 +67,7 @@ async def test_a_revoked_token_needs_reauth():
         router.get(API_URL).mock(return_value=Response(401))
         with pytest.raises(UnauthorizedError):
             await auth.request(CONN, "GET", API_URL)
-    assert (await oauth_tokens.get("ws-1", "jira"))["status"] == "needs_reauth"
+    assert (await oauth_tokens.get("ws-1", "atlassian"))["status"] == "needs_reauth"
 
 
 async def test_a_call_outside_the_grants_scopes_fails_alone(monkeypatch):
@@ -78,7 +78,7 @@ async def test_a_call_outside_the_grants_scopes_fails_alone(monkeypatch):
             await auth.request(CONN, "GET", API_URL)
     assert exc.value.error_code == "jira_scope_missing"
     # the token still works for everything else, so the connection isn't flagged
-    assert (await oauth_tokens.get("ws-1", "jira"))["status"] == "active"
+    assert (await oauth_tokens.get("ws-1", "atlassian"))["status"] == "active"
 
 
 async def test_a_rate_limit_with_a_short_retry_after_is_retried_once(monkeypatch):
@@ -107,11 +107,12 @@ async def test_rate_limits_surface_as_their_own_error():
 async def test_no_connection_needs_reauth():
     with pytest.raises(UnauthorizedError) as exc:
         await auth.request(CONN, "GET", API_URL)
-    assert exc.value.error_code == "jira_needs_reauth"
+    assert exc.value.error_code == "atlassian_needs_reauth"
 
 
 def test_the_authorize_url_asks_for_write_access_jira_software_and_a_refresh_token():
-    params = parse_qs(urlparse(registry.get("jira").flow.authorize_url("s")).query)
+    jira = registry.get("jira")
+    params = parse_qs(urlparse(jira.flow.authorize_url("s", jira.scopes)).query)
     scopes = params["scope"][0].split()
     assert scopes[:3] == ["read:jira-work", "write:jira-work", "read:jira-user"] and scopes[-1] == "offline_access"
     # boards, their columns and sprints only accept Jira Software's granular scopes

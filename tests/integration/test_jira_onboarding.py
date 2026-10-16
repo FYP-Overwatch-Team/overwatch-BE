@@ -44,7 +44,7 @@ async def test_jira_oauth_flow_stores_the_connection(client):
     headers = auth_headers(access)
     await connect_jira(client, headers)
 
-    token = await mongo.oauth_tokens().find_one({"provider": "jira"})
+    token = await mongo.oauth_tokens().find_one({"provider": "atlassian"})
     conn = await mongo.connections().find_one({"provider": "jira"})
     assert token["status"] == "active"
     assert conn["external_account"] == {"id": "cloud-1", "name": "acme", "url": "https://acme.atlassian.net"}
@@ -84,7 +84,7 @@ async def test_a_member_who_lost_the_admin_role_mid_flow_is_not_connected(client
         cb = await client.get(f"/jira/callback?code=fake&state={state}")
 
     assert cb.headers["location"].endswith("/onboarding/jira?jira=error")
-    assert await mongo.oauth_tokens().find_one({"provider": "jira"}) is None
+    assert await mongo.oauth_tokens().find_one({"provider": "atlassian"}) is None
 
 
 async def test_jira_login_requires_auth(client):
@@ -125,7 +125,7 @@ async def test_disconnect_soft_deletes_connection_and_allows_reconnect(client):
     response = await client.delete("/jira/connection", headers=headers)
 
     assert response.status_code == 200
-    token = await mongo.oauth_tokens().find_one({"owner_id": user["_id"], "provider": "jira"})
+    token = await mongo.oauth_tokens().find_one({"owner_id": user["_id"], "provider": "atlassian"})
     project = await mongo.sync_targets().find_one({"workspace_id": user["_id"], "key": "OVR"})
     assert token["status"] == "disconnected"
     assert project["status"] == "disconnected"
@@ -182,7 +182,7 @@ async def test_an_account_with_no_jira_sites_lands_on_an_error(client):
         cb = await client.get(f"/jira/callback?code=fake&state={state}")
 
     assert cb.headers["location"].endswith("/onboarding/jira?jira=error")
-    assert await mongo.oauth_tokens().find_one({"provider": "jira"}) is None
+    assert await mongo.oauth_tokens().find_one({"provider": "atlassian"}) is None
 
 
 async def test_malformed_project_keys_are_rejected(client):

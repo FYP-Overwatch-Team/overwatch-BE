@@ -73,7 +73,7 @@ async def tracker_for(board: dict) -> tuple:
         raise ConflictError(
             f"reconnect {board['source']} to manage its sprints from Overwatch", error_code=f"{board['source']}_reconnect_required",
         )
-    return registry.get(board["source"]).adapter, registry.auth_for(conn), conn
+    return registry.work_item_source(board["source"]), registry.auth_for(conn), conn
 
 
 def _require_admin(member: dict) -> None:

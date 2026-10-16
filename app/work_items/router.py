@@ -6,9 +6,11 @@ from app.api.deps import workspace_member
 from app.core.constants import StatusCategory
 from app.core.responses import WithMeta, api_router
 from app.work_items import service
-from app.work_items.schemas import CreateWorkItem, Lane, MoveWorkItem, SetSprint, UpdateWorkItem, WorkItem
+from app.work_items.schemas import AllowedMoves, AllowedTypes, CreateWorkItem, Lane, MoveWorkItem, SetSprint, UpdateWorkItem, WorkItem
 
 router = api_router(prefix="/work-items", tags=["work-items"])
+# Jira keys are a project key (up to 10 characters) and a number; room to spare
+KEY_MAX_LENGTH = 50
 
 
 @router.get("")
@@ -30,6 +32,8 @@ async def list_work_items(
     assignee_id: str | None = None,
     priority: str | None = None,
     q: str | None = Query(None, max_length=200),
+    # one exact key, e.g. a ticket linked from the board's address
+    key: str | None = Query(None, max_length=KEY_MAX_LENGTH),
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=500),
     # items to skip, instead of whole pages: lets a board load a first batch, then smaller ones
@@ -40,7 +44,7 @@ async def list_work_items(
         member["workspace_id"], board_id=board_id, column_id=column_id, sprint=sprint,
         done_within_days=done_within_days, hide_epics=hide_epics, open_only=open_only, source=source,
         status_category=status_category, target_key=target_key,
-        assignee_id=assignee_id, priority=priority, q=q, page=page, page_size=page_size, offset=offset,
+        assignee_id=assignee_id, priority=priority, q=q, key=key, page=page, page_size=page_size, offset=offset,
     )
     return WithMeta(items, {"total": total, "page": page, "page_size": page_size})
 
@@ -83,3 +87,15 @@ async def delete_work_item(item_id: str, member: dict = Depends(workspace_member
 @router.post("/{item_id}/sprint")
 async def set_work_item_sprint(item_id: str, body: SetSprint, member: dict = Depends(workspace_member())) -> WorkItem:
     return await service.set_sprint(member, item_id, body)
+
+
+@router.get("/{item_id}/types")
+async def allowed_types(item_id: str, member: dict = Depends(workspace_member())) -> AllowedTypes:
+    """The types an item can be changed to; a tracker item only to those its tracker allows in place."""
+    return await service.allowed_types(member, item_id)
+
+
+@router.get("/{item_id}/moves")
+async def allowed_moves(item_id: str, member: dict = Depends(workspace_member())) -> AllowedMoves:
+    """The columns an item can move to now (its current one aside); the move itself is checked again."""
+    return await service.allowed_moves(member, item_id)

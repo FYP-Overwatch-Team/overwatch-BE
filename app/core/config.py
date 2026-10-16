@@ -38,7 +38,14 @@ class Settings(BaseSettings):
 
     repos_dir: str = "./repos"
 
-    ticket_sync_interval_seconds: int = 300
+    ticket_sync_interval_seconds: int = 120
+    # a target sync running longer than this was lost (a restart mid-sync) and may be taken over
+    sync_lock_stale_minutes: int = 15
+    # a mirrored page's edits go to its source once nobody has typed for this long, as one version
+    doc_push_idle_seconds: int = 60
+    doc_push_interval_seconds: int = 10
+    # archived docs are deleted for good this long after archiving
+    doc_archive_retention_days: int = 30
 
     # Every git invocation is bounded; a hung clone must not pin a worker.
     git_command_timeout_seconds: int = 300
@@ -54,6 +61,20 @@ class Settings(BaseSettings):
     s3_region: str = ""
     # only for S3-compatible stores (MinIO, R2); empty for AWS
     s3_endpoint_url: str = ""
+
+    # How emails go out: "console" (logged, for dev and tests) or "smtp" (Gmail: an App Password, port 587 with STARTTLS)
+    email_backend: str = "console"
+    email_from: str = "noreply@overwatch.local"
+    email_from_name: str = "Overwatch"
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    # new passwords are checked against Have I Been Pwned's breach corpus (k-anonymity: only a hash prefix leaves)
+    hibp_enabled: bool = True
+    # invite emails a workspace or one admin may send a day; Gmail caps an account at about 500 recipients a day
+    invite_email_daily_limit_workspace: int = 50
+    invite_email_daily_limit_user: int = 100
 
 
 @lru_cache

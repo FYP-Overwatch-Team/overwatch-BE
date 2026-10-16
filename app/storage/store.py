@@ -36,14 +36,15 @@ class ObjectStore(Protocol):
     async def head(self, key: str) -> StoredFile | None:
         """What was actually stored at `key`; None when nothing is there."""
 
+    async def write(self, key: str, data: bytes, content_type: str) -> None:
+        """Store a file the server has itself (an image copied from a docs source, or a proxied upload)."""
+
     async def delete(self, key: str) -> None: ...
 
 
 @runtime_checkable
 class ProxiedStore(ObjectStore, Protocol):
     """A store whose files go through our API (dev, tests): it takes the upload and serves the file."""
-
-    async def write(self, key: str, data: bytes, content_type: str) -> None: ...
 
     async def read(self, key: str) -> tuple[bytes, str] | None: ...
 

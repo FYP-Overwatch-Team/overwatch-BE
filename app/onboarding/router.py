@@ -2,6 +2,7 @@ from fastapi import Depends
 
 from app.api.deps import workspace_member
 from app.connectors import repository as connectors
+from app.connectors.service import auth_status
 from app.core.constants import AccessStatus, ConnectionStatus, JobStatus, Provider
 from app.core.responses import api_router
 from app.db import oauth_tokens
@@ -19,7 +20,7 @@ async def onboarding_status(member: dict = Depends(workspace_member())) -> Onboa
     """
     workspace_id = member["workspace_id"]
     github_token = await oauth_tokens.get(member["user_id"], Provider.GITHUB)
-    jira_token = await oauth_tokens.get(workspace_id, Provider.JIRA)
+    jira_status = await auth_status(await connectors.get_connection(workspace_id, Provider.JIRA))
     connected = await repos.list_for_workspace(workspace_id)
     project = await connectors.latest_target(workspace_id, Provider.JIRA)
 
@@ -31,8 +32,8 @@ async def onboarding_status(member: dict = Depends(workspace_member())) -> Onboa
             repos=connected,
         ),
         jira=JiraStatus(
-            connected=_status(jira_token) == ConnectionStatus.ACTIVE,
-            needs_reauth=_status(jira_token) == ConnectionStatus.NEEDS_REAUTH,
+            connected=jira_status == ConnectionStatus.ACTIVE,
+            needs_reauth=jira_status == ConnectionStatus.NEEDS_REAUTH,
             project=project and JiraProjectStatus(
                 key=project["key"], sync_status=project["sync_status"], sync_error=project.get("sync_error"),
             ),

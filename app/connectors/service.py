@@ -10,7 +10,7 @@ from app.workspaces.service import require_member
 async def auth_status(conn: dict | None) -> str:
     if conn is None or conn["status"] == ConnectionStatus.DISCONNECTED:
         return ConnectionStatus.DISCONNECTED
-    token = await oauth_tokens.get(conn["workspace_id"], conn["provider"])
+    token = await oauth_tokens.get(conn["workspace_id"], registry.get(conn["provider"]).credential)
     return token["status"] if token else ConnectionStatus.DISCONNECTED
 
 
@@ -36,6 +36,7 @@ async def catalog(workspace_id: str) -> list[dict]:
         result.append({
             "provider": provider,
             "name": connector.name,
+            "category": connector.category,
             "status": status,
             "can_write": can_write(conn),
             "external_account": conn and conn.get("external_account") if status != ConnectionStatus.DISCONNECTED else None,
@@ -46,32 +47,49 @@ async def catalog(workspace_id: str) -> list[dict]:
     return result
 
 
-def start_authorization(member: dict, provider: str, return_to: str) -> tuple[str, str]:
-    """(authorization_url, state). The state binds the user, workspace and landing page."""
-    state = f"{member['user_id']}.{member['workspace_id']}.{return_to}.{secrets.token_urlsafe(24)}"
-    return registry.get(provider).flow.authorize_url(state), state
+async def start_authorization(member: dict, provider: str, return_to: str) -> tuple[str, str]:
+    """(authorization_url, state). The state binds the user, workspace, landing page and product.
+
+    Products sharing a credential share one grant, so it asks for theirs too: connecting
+    Confluence must not take Jira's scopes away.
+    """
+    connector = registry.get(provider)
+    scopes = list(connector.scopes)
+    for sibling in registry.siblings(provider):
+        if await repository.active_connection(member["workspace_id"], sibling):
+            scopes.extend(registry.get(sibling).scopes)
+    state = f"{member['user_id']}.{member['workspace_id']}.{return_to}.{provider}.{secrets.token_urlsafe(24)}"
+    return connector.flow.authorize_url(state, tuple(scopes)), state
 
 
 async def complete_authorization(provider: str, workspace_id: str, user_id: str, code: str) -> None:
     # they may have lost the admin role during the round trip
     await require_member(workspace_id, user_id, Role.ADMIN)
     connector = registry.get(provider)
+    siblings = [conn for p in registry.siblings(provider) if (conn := await repository.active_connection(workspace_id, p))]
     tokens = await connector.flow.exchange_code(code)
-    account = await connector.adapter.resolve_account(tokens["access_token"])
-    await oauth_tokens.save(workspace_id, provider, tokens)
+    known_site = next((conn["external_account"]["id"] for conn in siblings if conn.get("external_account")), None)
+    account = await connector.adapter.resolve_account(tokens["access_token"], known_site)
+    await oauth_tokens.save(workspace_id, connector.credential, tokens)
+    granted = tokens.get("scope", "").split() or [*connector.scopes, *(s for conn in siblings for s in registry.get(conn["provider"]).scopes)]
     await repository.save_connection(
         workspace_id, provider,
         auth_backend=AuthBackendName.NATIVE_OAUTH,
-        scopes=tokens.get("scope", "").split() or list(connector.oauth.scopes),
+        scopes=granted,
         external_account=account,
         connected_by=user_id,
     )
+    # the new grant replaced the one they used
+    for conn in siblings:
+        await repository.set_scopes(workspace_id, conn["provider"], granted)
 
 
 async def disconnect(workspace_id: str, provider: str) -> None:
-    registry.get(provider)
-    await oauth_tokens.set_status(workspace_id, provider, ConnectionStatus.DISCONNECTED)
+    connector = registry.get(provider)
     await repository.disconnect(workspace_id, provider)
+    # a shared token stays while another product still uses it
+    if not any([await repository.active_connection(workspace_id, p) for p in registry.siblings(provider)]):
+        await oauth_tokens.set_status(workspace_id, connector.credential, ConnectionStatus.DISCONNECTED)
 
 
 async def require_connection(workspace_id: str, provider: str) -> dict:
@@ -89,7 +107,7 @@ async def list_available_targets(workspace_id: str, provider: str) -> list[dict]
 
 async def list_assignees(workspace_id: str, provider: str, key: str) -> list[dict]:
     conn = await require_connection(workspace_id, provider)
-    return await registry.get(provider).adapter.list_assignees(registry.auth_for(conn), conn, key)
+    return await registry.work_item_source(provider).list_assignees(registry.auth_for(conn), conn, key)
 
 
 async def add_target(workspace_id: str, provider: str, key: str, name: str | None) -> dict:

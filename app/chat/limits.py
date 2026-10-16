@@ -6,10 +6,9 @@ the window is under its limit; once full, the upsert collides with the existing 
 
 from datetime import timedelta
 
-from pymongo.errors import DuplicateKeyError
-
 from app.core.config import get_settings
 from app.core.exceptions import AppError
+from app.core.rate_limit import take_one
 from app.core.time import utcnow
 from app.db import mongo
 
@@ -30,22 +29,9 @@ async def take(workspace_id: str, user_id: str) -> None:
 
     taken: list[str] = []
     for key, limit, lifetime, error in windows:
-        if not await _take_one(key, limit, now + lifetime):
+        if not await take_one(key, limit, now + lifetime):
             if taken:
                 await mongo.usage_counters().update_many({"_id": {"$in": taken}}, {"$inc": {"count": -1}})
             raise error
         taken.append(key)
 
-
-async def _take_one(key: str, limit: int, expires_at) -> bool:
-    if limit <= 0:
-        return False
-    try:
-        await mongo.usage_counters().update_one(
-            {"_id": key, "count": {"$lt": limit}},
-            {"$inc": {"count": 1}, "$setOnInsert": {"expires_at": expires_at}},
-            upsert=True,
-        )
-    except DuplicateKeyError:
-        return False
-    return True
