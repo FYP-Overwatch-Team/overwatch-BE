@@ -175,3 +175,25 @@ def workspace_invite_email(to: str, inviter: str, workspace: str, role: str, url
     )
     return Email(to=to, subject=subject, html=html, text=text)
 
+
+def waitlist_email(to: str, name: str) -> Email:
+    product = _product()
+    first_name = _clean(name).split()[0]
+    subject = f"You're on the {product} waitlist"
+    lines = [
+        f"Hi {first_name},",
+        f"Thanks so much for signing up for {product}. I'm Bilal, and I'm building it because I got tired of "
+        "decisions getting lost between Slack threads, tickets, docs and meetings. Seeing your name come in "
+        "genuinely made my day.",
+        "You're officially on the list. We're opening a small private beta soon, and I'll write to you myself as "
+        "soon as there's a spot for you.",
+        f"If there's one thing you'd love {product} to do for your team, just hit reply. I read every one.",
+    ]
+    sign_off = ["Talk soon,", "Bilal", f"Founder, {product}"]
+    footer = f"You're getting this because you joined the {product} waitlist. Not you? Just ignore this email."
+    html = _layout(
+        "You're on the list", "Thanks for signing up. Here's what happens next.",
+        "".join(_paragraph(escape(line)) for line in lines) + _paragraph("<br>".join(map(escape, sign_off))), footer,
+    )
+    text = "\n\n".join([subject, *lines, "\n".join(sign_off), footer]) + "\n"
+    return Email(to=to, subject=subject, html=html, text=text)

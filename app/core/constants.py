@@ -227,3 +227,13 @@ class Product(StrEnum):
 
 PRODUCT_NAMES = {Product.OVERWATCH: "Overwatch", Product.BEARINGS: "Bearings"}
 
+
+class HeardFrom(StrEnum):
+    """Where someone on the waitlist heard about the product."""
+
+    FRIEND = "friend"
+    LINKEDIN = "linkedin"
+    X = "x"
+    SEARCH = "search"
+    UNIVERSITY = "university"
+    OTHER = "other"
