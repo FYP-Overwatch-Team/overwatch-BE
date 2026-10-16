@@ -1,4 +1,4 @@
-"""The waitlist: anyone may join once, and the reply is the same whether or not they already had."""
+"""The waitlist: anyone may join once; joining again only tells them they already have."""
 
 import uuid
 from datetime import timedelta
@@ -19,7 +19,8 @@ JOINS_PER_IP = Limit("waitlist:ip", 20, timedelta(hours=1))
 JOINS_PER_EMAIL = Limit("waitlist:email", 5, timedelta(hours=1))
 
 
-async def join(background: BackgroundTasks, ip: str, name: str, email: str, heard_from: HeardFrom) -> None:
+async def join(background: BackgroundTasks, ip: str, name: str, email: str, heard_from: HeardFrom) -> bool:
+    """Add them to the waitlist and send the welcome email; False when they were already on it."""
     await take(JOINS_PER_IP, ip)
     await take(JOINS_PER_EMAIL, otp.email_key(email))
     added = await repository.add({
@@ -28,3 +29,4 @@ async def join(background: BackgroundTasks, ip: str, name: str, email: str, hear
     })
     if added:
         background.add_task(deliver, templates.waitlist_email(email, name))
+    return added

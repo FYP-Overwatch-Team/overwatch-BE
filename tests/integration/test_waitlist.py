@@ -1,4 +1,4 @@
-"""Joining the waitlist: stored once per email, one friendly email, nothing revealed about who's already on it."""
+"""Joining the waitlist: stored once per email, one friendly email, and a repeat join is told it already joined."""
 
 from app.core.config import get_settings
 from app.db import mongo
@@ -15,7 +15,7 @@ async def join(client, **changes):
 async def test_joining_stores_the_entry_and_sends_one_email(client, outbox):
     resp = await join(client, email="  Ada@Example.com ", name="  Ada Lovelace ")
 
-    assert resp.status_code == 202
+    assert resp.status_code == 202 and resp.json()["data"] == {"already_joined": False}
     entry = await mongo.waitlist().find_one({"email": EMAIL})
     assert entry["name"] == "Ada Lovelace" and entry["heard_from"] == "friend" and entry["product"] == "overwatch"
     [email] = outbox.to(EMAIL)
@@ -23,11 +23,11 @@ async def test_joining_stores_the_entry_and_sends_one_email(client, outbox):
     assert "Hi Ada," in email.text and "Hi Ada," in email.html and "hit reply" in email.text
 
 
-async def test_joining_again_answers_the_same_and_sends_nothing(client, outbox):
-    first = await join(client)
+async def test_joining_again_says_so_and_changes_nothing(client, outbox):
+    await join(client)
     again = await join(client, email="ADA@example.com", name="Someone Else")
 
-    assert again.status_code == first.status_code == 202 and again.json() == first.json()
+    assert again.status_code == 202 and again.json()["data"] == {"already_joined": True}
     assert await mongo.waitlist().count_documents({}) == 1
     assert (await mongo.waitlist().find_one({"email": EMAIL}))["name"] == "Ada Lovelace"
     assert len(outbox.to(EMAIL)) == 1

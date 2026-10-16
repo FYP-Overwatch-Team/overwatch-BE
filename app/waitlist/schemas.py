@@ -1,4 +1,4 @@
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.auth.schemas import EmailAddress
 from app.core.constants import HeardFrom
@@ -14,3 +14,8 @@ class JoinWaitlist(EmailAddress):
         if not value.strip():
             raise ValueError("Enter your name")
         return value.strip()
+
+
+class WaitlistJoined(BaseModel):
+    # true when the email was on the list already: nothing changed and no email went out
+    already_joined: bool
