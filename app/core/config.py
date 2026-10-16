@@ -2,11 +2,15 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.constants import PRODUCT_NAMES, Product
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_env: str = "dev"
+    # the brand users see (emails, sender name); internal names such as cookies and the database never change
+    product_name: Product = Product.OVERWATCH
     app_base_url: str = "http://localhost:8000"
     frontend_origin: str = "http://localhost:3000"
 
@@ -65,7 +69,8 @@ class Settings(BaseSettings):
     # How emails go out: "console" (logged, for dev and tests) or "smtp" (Gmail: an App Password, port 587 with STARTTLS)
     email_backend: str = "console"
     email_from: str = "noreply@overwatch.local"
-    email_from_name: str = "Overwatch"
+    # empty sends as the product name
+    email_from_name: str = ""
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
     smtp_username: str = ""
@@ -75,6 +80,11 @@ class Settings(BaseSettings):
     # invite emails a workspace or one admin may send a day; Gmail caps an account at about 500 recipients a day
     invite_email_daily_limit_workspace: int = 50
     invite_email_daily_limit_user: int = 100
+
+    @property
+    def product(self) -> str:
+        """The product name as users see it."""
+        return PRODUCT_NAMES[self.product_name]
 
 
 @lru_cache

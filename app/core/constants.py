@@ -216,3 +216,14 @@ class KeepProfile(StrEnum):
 
     CURRENT = "current"
     OTHER = "other"
+
+
+class Product(StrEnum):
+    """The brand a deployment presents itself as; `PRODUCT_NAMES` holds how each is written."""
+
+    OVERWATCH = "overwatch"
+    BEARINGS = "bearings"
+
+
+PRODUCT_NAMES = {Product.OVERWATCH: "Overwatch", Product.BEARINGS: "Bearings"}
+

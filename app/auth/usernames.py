@@ -14,8 +14,8 @@ USERNAME_MAX_LENGTH = 30
 # letters and digits, single "-" or "_" between them
 USERNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9]|[-_](?=[a-z0-9])){2,29}$")
 RESERVED = frozenset({
-    "about", "account", "accounts", "admin", "administrator", "api", "app", "auth", "billing", "blog", "board",
-    "boards", "chat", "choose-username", "confluence", "dashboard", "docs", "forgot-password", "github", "help",
+    "about", "account", "accounts", "admin", "administrator", "api", "app", "auth", "bearings", "billing", "blog",
+    "board", "boards", "chat", "choose-username", "confluence", "dashboard", "docs", "forgot-password", "github", "help",
     "invite", "invites", "jira", "login", "logout", "mail", "me", "noreply", "no-reply", "null", "onboarding",
     "overwatch", "owner", "postmaster", "privacy", "reset-password", "root", "security", "settings", "sign-in",
     "sign-up", "signin", "signup", "staff", "status", "support", "system", "team", "terms", "undefined",
