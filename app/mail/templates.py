@@ -1,7 +1,8 @@
 """Transactional emails, on brand and safe to render anywhere.
 
 Table layout with inline styles (what every client renders), the design tokens as solid hex (clients
-handle rgba badly), no remote images, tracking pixels or rewritten links, and a plain-text part.
+handle rgba badly), no remote images, tracking pixels or rewritten links, and a plain-text part. The
+logo is drawn with styled cells, so it shows even where images are blocked.
 Every dynamic value is escaped. One-time codes never go in the subject, which shows on lock screens.
 """
 
@@ -16,8 +17,16 @@ SURFACE = "#ffffff"
 FOREGROUND = "#111111"
 MUTED = "#6b6b66"
 BORDER = "#dadbd2"
+BORDER_STRONG = "#c7c8bf"
 PRIMARY = "#1d72e8"
 PRIMARY_STRONG = "#1559bd"
+# the logo mark's two blues
+LOGO_CORE = "#055eab"
+LOGO_ORBIT = "#108cf9"
+# the platform's icon accents, as a stripe across the top of every card
+ACCENTS = ("#1d72e8", "#7c4dff", "#d99a00", "#e8590c", "#388600")
+# the raised "chrome" bottom edge the platform's buttons and cards sit on
+EDGE = 4
 FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
 # keeps subjects single-line: a header can't be split by a name carrying a newline
@@ -36,10 +45,51 @@ def _a(noun: str) -> str:
     return f"{'an' if noun[0].lower() in 'aeiou' else 'a'} {noun}"
 
 
+def _dot(size: int, color: str) -> str:
+    return (
+        f'<div style="display:inline-block;width:{size}px;height:{size}px;border-radius:50%;background:{color};'
+        'font-size:0;line-height:0;">&nbsp;</div>'
+    )
+
+
+def _logo() -> str:
+    """The mark: a core with four dots orbiting it, as a 3x3 grid of cells (24px)."""
+    orbit, core = _dot(5, LOGO_ORBIT), _dot(10, LOGO_CORE)
+    cell = 'style="font-size:0;line-height:0;padding:0;"'
+    return (
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">'
+        f'<tr><td width="7" height="7" {cell}></td><td width="10" align="center" valign="bottom" {cell}>{orbit}</td>'
+        f'<td width="7" {cell}></td></tr>'
+        f'<tr><td height="10" align="right" valign="middle" {cell}>{orbit}</td>'
+        f'<td align="center" valign="middle" {cell}>{core}</td>'
+        f'<td align="left" valign="middle" {cell}>{orbit}</td></tr>'
+        f'<tr><td height="7" {cell}></td><td align="center" valign="top" {cell}>{orbit}</td>'
+        f'<td {cell}></td></tr></table>'
+    )
+
+
+def _accent_stripe() -> str:
+    last = len(ACCENTS) - 1
+    cells = "".join(
+        f'<td height="4" style="height:4px;font-size:0;line-height:0;background:{color};'
+        f'border-radius:{"11px 0 0 0" if i == 0 else "0 11px 0 0" if i == last else "0"};">&nbsp;</td>'
+        for i, color in enumerate(ACCENTS)
+    )
+    return (
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>{cells}</tr></table>'
+    )
+
+
 def _layout(title: str, preheader: str, body: str, footer: str | None = None) -> str:
     product = _product()
     footer = footer or (
         f"You're receiving this because of activity on your {product} account. This mailbox isn't monitored."
+    )
+    brand = (
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+        f'<td valign="middle" style="padding-right:8px;">{_logo()}</td>'
+        f'<td valign="middle" style="font-family:{FONT};font-size:19px;color:{FOREGROUND};letter-spacing:-0.01em;">'
+        f"{escape(product)}</td></tr></table>"
     )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -49,10 +99,14 @@ def _layout(title: str, preheader: str, body: str, footer: str | None = None) ->
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:{BACKGROUND};">
 <tr><td align="center" style="padding:40px 16px;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
-<tr><td style="padding:0 4px 20px;font-family:{FONT};font-size:18px;font-weight:700;color:{FOREGROUND};letter-spacing:-0.01em;">{escape(product)}</td></tr>
-<tr><td style="background:{SURFACE};border:1px solid {BORDER};border-radius:12px;padding:32px;font-family:{FONT};font-size:15px;line-height:1.6;color:{FOREGROUND};">
-<h1 style="margin:0 0 16px;font-size:20px;line-height:1.3;font-weight:600;">{escape(title)}</h1>
+<tr><td style="padding:0 4px 20px;">{brand}</td></tr>
+<tr><td style="background:{SURFACE};border:1px solid {BORDER};border-bottom:{EDGE}px solid {BORDER_STRONG};
+border-radius:12px;">
+{_accent_stripe()}
+<div style="padding:32px;font-family:{FONT};font-size:15px;line-height:1.6;color:{FOREGROUND};">
+<h1 style="margin:0 0 16px;font-size:22px;line-height:1.3;font-weight:700;letter-spacing:-0.01em;">{escape(title)}</h1>
 {body}
+</div>
 </td></tr>
 <tr><td style="padding:20px 4px 0;font-family:{FONT};font-size:12px;line-height:1.5;color:{MUTED};">
 {escape(footer)}
@@ -70,8 +124,9 @@ def _muted(text: str) -> str:
 
 def _code_block(code: str) -> str:
     return (
-        f'<div style="margin:8px 0 20px;padding:16px;background:{BACKGROUND};border:1px solid {BORDER};border-radius:8px;'
-        f'text-align:center;font-family:{MONO};font-size:30px;font-weight:600;letter-spacing:8px;color:{FOREGROUND};">'
+        f'<div style="margin:8px 0 20px;padding:16px;background:{BACKGROUND};border:1px solid {BORDER};'
+        f'border-bottom:{EDGE}px solid {BORDER_STRONG};border-radius:8px;text-align:center;font-family:{MONO};'
+        f'font-size:30px;font-weight:600;letter-spacing:8px;color:{PRIMARY_STRONG};">'
         f"{escape(code)}</div>"
     )
 
@@ -79,7 +134,8 @@ def _code_block(code: str) -> str:
 def _button(label: str, url: str) -> str:
     return (
         f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 20px;"><tr>'
-        f'<td style="background:{PRIMARY};border:1px solid {PRIMARY_STRONG};border-radius:8px;">'
+        f'<td style="background:{PRIMARY};border:1px solid {PRIMARY_STRONG};border-bottom:{EDGE}px solid {PRIMARY_STRONG};'
+        'border-radius:8px;">'
         f'<a href="{escape(url)}" style="display:inline-block;padding:11px 20px;font-family:{FONT};font-size:15px;'
         f'font-weight:600;color:#ffffff;text-decoration:none;">{escape(label)}</a></td></tr></table>'
     )
