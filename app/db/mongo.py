@@ -7,6 +7,12 @@ _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
 
 
+def typed(value: object, bson_type: str) -> dict:
+    """An equality on a field whose unique index is partial on `$type`: Mongo only uses that index when the query
+    repeats the type, so a plain `{field: value}` would scan the collection."""
+    return {"$eq": value, "$type": bson_type}
+
+
 def connect() -> AsyncIOMotorDatabase:
     global _client, _db
     settings = get_settings()

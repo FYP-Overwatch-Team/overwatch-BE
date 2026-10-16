@@ -51,7 +51,7 @@ MESSAGES = {
 
 async def is_taken(username: str) -> bool:
     # a covered query: answered from the username index without reading the user
-    return await mongo.users().find_one({"username": username}, {"_id": 0, "username": 1}) is not None
+    return await mongo.users().find_one({"username": mongo.typed(username, "string")}, {"_id": 0, "username": 1}) is not None
 
 
 async def availability(username: str) -> str | None:

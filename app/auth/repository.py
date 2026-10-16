@@ -16,7 +16,7 @@ async def upsert_github_user(profile: dict, username: str | None) -> dict:
     # a linked email account keeps its own name and picture when GitHub has none
     refreshed |= {key: profile[key] for key in ("name", "avatar_url") if profile.get(key)}
     return await mongo.users().find_one_and_update(
-        {"github_id": profile["id"]},
+        {"github_id": mongo.typed(profile["id"], "number")},
         {"$set": refreshed, "$setOnInsert": {"_id": uuid.uuid4().hex, "created_at": now, "username": username}},
         upsert=True,
         return_document=ReturnDocument.AFTER,
@@ -24,7 +24,7 @@ async def upsert_github_user(profile: dict, username: str | None) -> dict:
 
 
 async def find_user_by_email(email: str) -> dict | None:
-    return await mongo.users().find_one({"email": email})
+    return await mongo.users().find_one({"email": mongo.typed(email, "string")})
 
 
 async def insert_user(doc: dict) -> dict:
@@ -105,7 +105,7 @@ async def get_user(user_id: str) -> dict | None:
 
 
 async def find_user_by_github_id(github_id: int) -> dict | None:
-    return await mongo.users().find_one({"github_id": github_id})
+    return await mongo.users().find_one({"github_id": mongo.typed(github_id, "number")})
 
 
 async def insert_refresh_token(token_hash: str, user_id: str, family_id: str, expires_at: datetime) -> None:
