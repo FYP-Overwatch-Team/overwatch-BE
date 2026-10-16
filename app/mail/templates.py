@@ -98,6 +98,33 @@ def password_reset_email(to: str, code: str, minutes: int) -> Email:
     )
 
 
+def add_address_email(to: str, code: str, minutes: int) -> Email:
+    return _code_email(
+        to, "Add this email to your Overwatch account", "Enter this code to add this address to your Overwatch account:", code,
+        minutes, "Didn't ask for this? Ignore this email; nothing changes without the code. If this address already has an "
+        "Overwatch account, you'll be offered to merge the two.",
+    )
+
+
+def accounts_merged_email(to: str, username: str | None) -> Email:
+    origin = get_settings().frontend_origin
+    subject = "Your Overwatch accounts were merged"
+    who = f" into @{_clean(username)}" if username else ""
+    settings_url = f"{origin}/settings/profile"
+    html = _layout(subject, "Two Overwatch accounts are now one.", "".join([
+        _paragraph(f"Two Overwatch accounts that sign in with this address were merged{escape(who)}. Your workspaces, "
+                   "repositories, documents and tickets are all in the merged account."),
+        _button("Review sign-in methods", settings_url),
+        _muted("If you didn't do this, reset your password and sign out everywhere from your profile settings."),
+    ]))
+    text = (
+        f"{subject}\n\nTwo Overwatch accounts that sign in with this address were merged{who}. Your workspaces, "
+        f"repositories, documents and tickets are all in the merged account.\n\nReview sign-in methods: {settings_url}\n\n"
+        "If you didn't do this, reset your password and sign out everywhere from your profile settings.\n"
+    )
+    return Email(to=to, subject=subject, html=html, text=text)
+
+
 def account_exists_email(to: str) -> Email:
     origin = get_settings().frontend_origin
     subject = "You already have an Overwatch account"

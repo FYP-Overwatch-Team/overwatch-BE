@@ -50,7 +50,10 @@ async def test_signing_up_and_verifying_signs_the_user_in(client, outbox):
     me = (await client.get("/me", headers={"Authorization": f"Bearer {access}"})).json()["data"]
 
     assert "overwatch_refresh" in client.cookies
-    assert me | {"id": None} == {"id": None, "username": "ada", "email": EMAIL, "github_login": None, "name": "Ada Lovelace", "avatar_url": None}
+    assert me | {"id": None} == {
+        "id": None, "username": "ada", "email": EMAIL, "github_login": None, "name": "Ada Lovelace", "avatar_url": None,
+        "email_verified": True, "has_password": True,
+    }
     assert await mongo.workspaces().find_one({"_id": me["id"], "personal": True})
     user = await mongo.users().find_one({"_id": me["id"]})
     assert user["email_verified_at"] and "unverified_expires_at" not in user

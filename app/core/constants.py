@@ -161,10 +161,12 @@ class WorkItemIcon(StrEnum):
 
 
 class ChallengePurpose(StrEnum):
-    """What an emailed one-time code proves: a new account's address, or the right to reset a password."""
+    """What an emailed one-time code proves: a new account's address, the right to reset a password, or an address
+    added to a signed-in account."""
 
     VERIFY_EMAIL = "verify_email"
     RESET_PASSWORD = "reset_password"
+    ADD_EMAIL = "add_email"
 
 
 class InviteKind(StrEnum):
@@ -187,3 +189,30 @@ class AuthErrorCode(StrEnum):
     USERNAME_ALREADY_SET = "username_already_set"
     GITHUB_ACCOUNT_IN_USE = "github_account_in_use"
     ACCOUNT_EXISTS = "account_exists"
+    EMAIL_ALREADY_SET = "email_already_set"
+    MERGE_NOT_FOUND = "merge_not_found"
+    MERGE_CONFLICT = "merge_conflict"
+    MERGE_IN_PROGRESS = "merge_in_progress"
+    ACCOUNT_MERGING = "account_merging"
+    LAST_LOGIN_METHOD = "last_login_method"
+
+
+class MergeStatus(StrEnum):
+    """A merge in the audit trail: still running (and resumed if interrupted), or finished."""
+
+    RUNNING = "running"
+    DONE = "done"
+
+
+class MergeProof(StrEnum):
+    """How the other account was proven: its emailed code, or signing in to its GitHub."""
+
+    EMAIL_OTP = "email_otp"
+    GITHUB_OAUTH = "github_oauth"
+
+
+class KeepProfile(StrEnum):
+    """Whose name, username and picture a merged account keeps."""
+
+    CURRENT = "current"
+    OTHER = "other"

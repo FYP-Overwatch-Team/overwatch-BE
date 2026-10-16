@@ -15,8 +15,9 @@ from datetime import timedelta
 from fastapi import BackgroundTasks
 from pymongo.errors import DuplicateKeyError
 
+from app.accounts import service as accounts
 from app.auth import otp, passwords, repository, usernames
-from app.core.constants import AuthErrorCode, ChallengePurpose
+from app.core.constants import AuthErrorCode, ChallengePurpose, MergeProof
 from app.core.exceptions import AppError, FieldValidationError, UnauthorizedError
 from app.core.rate_limit import Limit, allow, cooldown_error, retry_after, take
 from app.core.time import utcnow
@@ -40,6 +41,11 @@ CODE_ENTRIES_PER_IP = Limit("verify:ip", 30, 15 * MINUTE)
 RESENDS_PER_IP = Limit("resend:ip", 20, HOUR)
 RESETS_PER_IP = Limit("forgot:ip", 20, HOUR)
 RESETS_PER_EMAIL = Limit("forgot:email", 5, HOUR)
+ADDED_EMAILS_PER_USER = Limit("add_email:user", 5, HOUR)
+ADDED_EMAILS_PER_IP = Limit("add_email:ip", 20, HOUR)
+# codes sent to one address, so it can't be flooded through someone's account
+ADDED_EMAILS_PER_ADDRESS = Limit("add_email:email", 5, HOUR)
+UNLINKS_PER_USER = Limit("unlink:user", 10, 15 * MINUTE)
 
 
 async def _check_new_password(password: str, email: str | None) -> None:
@@ -76,7 +82,7 @@ async def _save_account(existing: dict | None, email: str, username: str, fields
         raise
 
 
-async def _issue(background: BackgroundTasks, purpose: str, email: str, user: dict | None) -> dict:
+async def _issue(background: BackgroundTasks, purpose: str, email: str, user: dict | None, extra: dict | None = None) -> dict:
     """A fresh challenge, replacing the user's earlier ones; a decoy when there's no user. Only real ones are mailed."""
     code = otp.new_code()
     now = utcnow()
@@ -84,7 +90,7 @@ async def _issue(background: BackgroundTasks, purpose: str, email: str, user: di
         "_id": secrets.token_urlsafe(24), "user_id": user["_id"] if user else None, "purpose": purpose,
         "email_key": otp.email_key(email), "code_hash": otp.hash_code(code, purpose) if user else otp.unmatchable_hash(purpose),
         "attempts": 0, "resend_count": 0, "sent_at": now,
-        "code_expires_at": now + otp.CODE_TTL, "expires_at": now + otp.CHALLENGE_TTL,
+        "code_expires_at": now + otp.CODE_TTL, "expires_at": now + otp.CHALLENGE_TTL, **(extra or {}),
     }
     if user:
         await repository.delete_challenges(user["_id"], purpose)
@@ -93,10 +99,15 @@ async def _issue(background: BackgroundTasks, purpose: str, email: str, user: di
     return _issued(doc, email)
 
 
+CODE_EMAILS = {
+    ChallengePurpose.VERIFY_EMAIL: templates.verification_email,
+    ChallengePurpose.RESET_PASSWORD: templates.password_reset_email,
+    ChallengePurpose.ADD_EMAIL: templates.add_address_email,
+}
+
+
 def _code_email(purpose: str, email: str, code: str):
-    minutes = int(otp.CODE_TTL.total_seconds() // 60)
-    build = templates.verification_email if purpose == ChallengePurpose.VERIFY_EMAIL else templates.password_reset_email
-    return build(email, code, minutes)
+    return CODE_EMAILS[purpose](email, code, int(otp.CODE_TTL.total_seconds() // 60))
 
 
 def _issued(challenge: dict, email: str) -> dict:
@@ -133,6 +144,8 @@ async def login(background: BackgroundTasks, ip: str, email: str, password: str)
     if not await passwords.verify_password((user or {}).get("password_hash"), password):
         raise UnauthorizedError(INVALID_CREDENTIALS, error_code=AuthErrorCode.INVALID_CREDENTIALS)
     assert user is not None
+    if user.get("merge_id"):
+        raise accounts.merging_error()
     if not user.get("email_verified_at"):
         await repository.update_user(user["_id"], {"unverified_expires_at": utcnow() + UNVERIFIED_TTL})
         challenge = await repository.latest_challenge(user["_id"], ChallengePurpose.VERIFY_EMAIL)
@@ -206,7 +219,8 @@ async def resend(background: BackgroundTasks, ip: str, challenge_id: str) -> dic
     if not renewed:
         raise cooldown_error(RESEND_WAIT, AuthErrorCode.OTP_RESEND_COOLDOWN, cooldown)
     if user:
-        background.add_task(deliver, _code_email(purpose, user["email"], code))
+        # an address being added is the challenge's, not yet the user's
+        background.add_task(deliver, _code_email(purpose, challenge.get("email") or user["email"], code))
     return {"resend_available_in": cooldown}
 
 
@@ -267,3 +281,79 @@ async def set_username(user: dict, username: str) -> dict:
     except DuplicateKeyError as exc:
         raise _username_error(usernames.Reason.TAKEN) from exc
     return {**user, "username": username}
+
+
+async def start_add_email(background: BackgroundTasks, ip: str, user: dict, email: str, password: str) -> dict:
+    """Email a code to an address being added to the signed-in account, with the password it will sign in with.
+
+    The same answer whether or not the address has an account; only its inbox learns that.
+    """
+    await take(ADDED_EMAILS_PER_USER, user["_id"])
+    await take(ADDED_EMAILS_PER_IP, ip)
+    await take(ADDED_EMAILS_PER_ADDRESS, otp.email_key(email))
+    if user.get("email_verified_at"):
+        raise AppError("Your account already has an email address.", error_code=AuthErrorCode.EMAIL_ALREADY_SET, status_code=409)
+    await _check_new_password(password, email)
+    # kept on the challenge until the code proves the address: an unverified address on the account itself would
+    # set off the clean-up of unverified accounts
+    extra = {"email": email, "password_hash": await passwords.hash_password(password)}
+    return await _issue(background, ChallengePurpose.ADD_EMAIL, email, user, extra)
+
+
+async def finish_add_email(ip: str, user: dict, challenge_id: str, code: str) -> tuple[str, dict]:
+    """Add the proven address, or, when another verified account holds it, propose merging that account in.
+
+    Returns ("added", the updated user) or ("merge_required", the merge preview).
+    """
+    await take(CODE_ENTRIES_PER_IP, ip)
+    challenge = await repository.find_challenge(challenge_id, ChallengePurpose.ADD_EMAIL)
+    if challenge is None or challenge["user_id"] != user["_id"]:
+        raise _invalid_code()
+    await _redeem(challenge_id, ChallengePurpose.ADD_EMAIL, code)
+    email = challenge["email"]
+    holder = await repository.find_user_by_email(email)
+    if holder and holder["_id"] != user["_id"]:
+        if holder.get("email_verified_at"):
+            # the code proved this inbox, which already controls that account (it could reset its password)
+            return "merge_required", await accounts.propose(user, holder, MergeProof.EMAIL_OTP, email)
+        # never verified, so it owns nothing yet: the address goes to the account that proved it
+        await repository.delete_challenges(holder["_id"])
+        await repository.delete_user(holder["_id"])
+    fields = {"email": email, "email_verified_at": utcnow()}
+    if not user.get("password_hash"):
+        fields |= {"password_hash": challenge["password_hash"], "password_changed_at": utcnow()}
+    updated = await repository.update_user(user["_id"], fields)
+    return "added", updated or user
+
+
+async def _confirm_password(user: dict, password: str) -> None:
+    await take(UNLINKS_PER_USER, user["_id"])
+    if not await passwords.verify_password(user.get("password_hash"), password):
+        raise UnauthorizedError("That password is incorrect.", error_code=AuthErrorCode.INVALID_CREDENTIALS)
+
+
+def _last_method() -> AppError:
+    return AppError(
+        "This is the only way you sign in. Add another before removing it.", error_code=AuthErrorCode.LAST_LOGIN_METHOD,
+        status_code=409,
+    )
+
+
+async def unlink_github(user: dict, password: str) -> dict:
+    """Stop signing in with GitHub; the account must keep its email and password, which the password proves."""
+    if not (user.get("email_verified_at") and user.get("password_hash")):
+        raise _last_method()
+    await _confirm_password(user, password)
+    await repository.unlink_github(user["_id"])
+    return await repository.get_user(user["_id"]) or user
+
+
+async def unlink_email(user: dict, password: str) -> dict:
+    """Stop signing in with email and password; GitHub stays as the way in."""
+    if not user.get("github_id"):
+        raise _last_method()
+    await _confirm_password(user, password)
+    updated = await repository.update_user(
+        user["_id"], {}, unset=("email", "email_verified_at", "password_hash", "password_changed_at"),
+    )
+    return updated or user

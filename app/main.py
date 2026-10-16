@@ -5,6 +5,8 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.accounts import merge as merge_engine
+from app.accounts.router import router as accounts_router
 from app.auth.router import router as auth_router
 from app.boards.router import router as boards_router
 from app.comments.router import router as comments_router
@@ -41,6 +43,16 @@ async def _tracker_sync_loop(interval_seconds: int) -> None:
         except Exception:
             structlog.get_logger("app.jobs").exception("tracker_sync_loop_error")
         await asyncio.sleep(interval_seconds)
+
+
+async def _merge_loop() -> None:
+    """Finish account merges a crash or restart interrupted: at once, then every few minutes."""
+    while True:
+        try:
+            await merge_engine.resume_stalled()
+        except Exception:
+            structlog.get_logger("app.accounts").exception("merge_loop_error")
+        await asyncio.sleep(merge_engine.STALL_AFTER.total_seconds())
 
 
 async def _docs_loop(push_seconds: int) -> None:
@@ -95,9 +107,11 @@ async def lifespan(app: FastAPI):
         _tracker_sync_loop(get_settings().ticket_sync_interval_seconds)
     )
     docs_task = asyncio.create_task(_docs_loop(get_settings().doc_push_interval_seconds))
+    merge_task = asyncio.create_task(_merge_loop())
     yield
     sync_task.cancel()
     docs_task.cancel()
+    merge_task.cancel()
     mongo.close()
 
 
@@ -120,6 +134,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     register_exception_handlers(app)
 
     app.include_router(auth_router)
+    app.include_router(accounts_router)
     app.include_router(github_router)
     app.include_router(jira_router)
     app.include_router(onboarding_router)

@@ -5,6 +5,7 @@ from datetime import datetime
 
 from pymongo import ReturnDocument
 
+from app.core.constants import Provider
 from app.core.time import utcnow
 from app.db import mongo
 
@@ -54,6 +55,16 @@ async def link_github(user_id: str, profile: dict) -> None:
     fields = {"github_id": profile["id"], "github_login": profile["login"]}
     fields |= {key: profile[key] for key in ("name", "avatar_url") if profile.get(key) and not user.get(key)}
     await update_user(user_id, fields)
+
+
+async def unlink_github(user_id: str) -> None:
+    """Forget the user's GitHub account and its token; repos keep syncing through the GitHub App installation."""
+    await update_user(user_id, {}, unset=("github_id", "github_login"))
+    await mongo.oauth_tokens().delete_many({"owner_id": user_id, "provider": Provider.GITHUB})
+
+
+async def delete_user(user_id: str) -> None:
+    await mongo.users().delete_one({"_id": user_id})
 
 
 async def insert_challenge(doc: dict) -> None:

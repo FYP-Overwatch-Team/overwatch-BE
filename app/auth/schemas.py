@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from app.accounts.schemas import MergePreview
 from app.auth.passwords import PASSWORD_MAX_LENGTH
 from app.auth.usernames import USERNAME_MAX_LENGTH
 from app.core.constants import Role
@@ -24,6 +25,17 @@ class Me(BaseModel):
     github_login: str | None
     name: str | None
     avatar_url: str | None
+    # which sign-in methods the account has, for the settings that add and remove them
+    email_verified: bool
+    has_password: bool
+
+    @classmethod
+    def of(cls, user: dict) -> "Me":
+        return cls(
+            id=user["_id"], username=user.get("username"), email=user.get("email"), github_login=user.get("github_login"),
+            name=user.get("name"), avatar_url=user.get("avatar_url"),
+            email_verified=bool(user.get("email") and user.get("email_verified_at")), has_password=bool(user.get("password_hash")),
+        )
 
 
 class _Email(BaseModel):
@@ -109,8 +121,24 @@ class SetUsername(BaseModel):
 
 
 class LinkGithubRequest(BaseModel):
-    return_to: Literal["onboarding", "settings"] = "settings"
+    return_to: Literal["onboarding", "settings", "profile"] = "settings"
 
 
 class AuthorizationUrl(BaseModel):
     authorization_url: str
+
+
+class AddEmailRequest(_Email):
+    password: str = Password
+
+
+class AddEmailResult(BaseModel):
+    """The address was added (`me`), or it belongs to another account, which can now be merged in (`merge`)."""
+
+    outcome: Literal["added", "merge_required"]
+    me: Me | None = None
+    merge: MergePreview | None = None
+
+
+class ConfirmPassword(BaseModel):
+    password: str = Password

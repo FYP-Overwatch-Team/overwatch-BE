@@ -4,8 +4,9 @@ from fastapi import Depends, Header, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.auth.repository import get_user
+from app.core.config import get_settings
 from app.core.constants import Role
-from app.core.exceptions import AppError, UnauthorizedError
+from app.core.exceptions import AppError, ForbiddenError, UnauthorizedError
 from app.core.security import TokenError, verify_access_token
 from app.github.repository import get_readable
 from app.workspaces.service import require_member
@@ -16,6 +17,14 @@ _bearer = HTTPBearer(auto_error=False)
 def client_ip(request: Request) -> str:
     """The caller's address, for rate limits; uvicorn takes it from the proxy's X-Forwarded-For."""
     return request.client.host if request.client else "unknown"
+
+
+def same_origin(request: Request) -> None:
+    """Endpoints that set the session cookie, or change how an account signs in, only answer our frontend; CORS stops
+    reads, this stops writes."""
+    origin = request.headers.get("origin")
+    if origin and origin != get_settings().frontend_origin:
+        raise ForbiddenError("cross-origin request refused", error_code="bad_origin")
 
 
 async def get_current_user_id(

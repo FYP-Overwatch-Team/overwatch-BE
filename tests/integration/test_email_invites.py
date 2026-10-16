@@ -173,11 +173,13 @@ async def test_an_email_account_connects_github_without_changing_its_session(cli
     assert me["email"] == "ada@example.com"
 
 
-async def test_a_github_account_can_only_belong_to_one_user(client, outbox):
+async def test_a_github_account_with_its_own_user_is_offered_as_a_merge(client, outbox):
     await login(client)  # octocat signs in with GitHub
     ada = auth_headers(await verified_account(client, outbox))
     resp = await _link(client, ada)
-    assert resp.headers["location"].endswith("/onboarding?github=in_use")
+    # never linked twice: proving it proposes merging that account in (tests/integration/test_account_linking.py)
+    assert resp.headers["location"].endswith("/settings/profile?github=merge")
+    assert (await mongo.users().find_one({"email": "ada@example.com"})).get("github_id") is None
 
 
 async def test_a_forged_state_cookie_is_refused(client, outbox):

@@ -5,12 +5,15 @@ from datetime import timedelta
 from fastapi import BackgroundTasks, Depends, Query, Request, Response
 from fastapi.responses import RedirectResponse
 
-from app.api.deps import client_ip, get_current_user, get_current_user_id
+from app.api.deps import client_ip, get_current_user, get_current_user_id, same_origin
 from app.auth import native, service, usernames
 from app.auth.schemas import (
     AccessToken,
+    AddEmailRequest,
+    AddEmailResult,
     AuthorizationUrl,
     ChallengeIssued,
+    ConfirmPassword,
     ForgotPasswordRequest,
     InviteSession,
     InviteSignupRequest,
@@ -28,7 +31,7 @@ from app.auth.schemas import (
 from app.core import security
 from app.core.config import get_settings
 from app.core.cookies import cookie_samesite, cookie_secure
-from app.core.exceptions import AppError, ForbiddenError, UnauthorizedError
+from app.core.exceptions import AppError, UnauthorizedError
 from app.core.rate_limit import Limit, take
 from app.core.responses import api_router
 from app.integrations.github_app import get_github_app
@@ -41,15 +44,8 @@ COOKIE_PATH = "/auth"
 REFRESH_MAX_AGE = int(service.REFRESH_TOKEN_TTL.total_seconds())
 STATE_MAX_AGE = 600
 # where a "connect GitHub" round trip lands afterwards
-LINK_RETURN = {"onboarding": "/onboarding", "settings": "/settings/integrations"}
+LINK_RETURN = {"onboarding": "/onboarding", "settings": "/settings/integrations", "profile": "/settings/profile"}
 USERNAME_CHECKS_PER_IP = Limit("username:ip", 60, timedelta(minutes=1))
-
-
-def same_origin(request: Request) -> None:
-    """Endpoints that set the session cookie only answer our frontend; CORS stops reads, this stops writes."""
-    origin = request.headers.get("origin")
-    if origin and origin != get_settings().frontend_origin:
-        raise ForbiddenError("cross-origin request refused", error_code="bad_origin")
 
 
 async def _start_session(response: Response, user_id: str) -> str:
@@ -128,13 +124,17 @@ async def github_callback(
     if link_user:
         # linking never touches the session cookie
         try:
-            await service.link_github(link_user, profile, tokens)
+            merge = await service.link_github(link_user, profile, tokens)
         except AppError:
             return _to_frontend(f"{back}?github=in_use")
-        return _to_frontend(f"{back}?github=linked")
+        # a merge is confirmed where sign-in methods are managed, wherever the round trip started
+        return _to_frontend(f"{LINK_RETURN['profile']}?github=merge" if merge else f"{back}?github=linked")
 
     # no token in the URL: the frontend calls /auth/refresh with the cookie set here
-    raw_refresh = await service.sign_in_with_github(profile, tokens)
+    try:
+        raw_refresh = await service.sign_in_with_github(profile, tokens)
+    except AppError as exc:
+        return _to_frontend(f"/sign-in?error={exc.error_code}")
     response = _to_frontend("/auth/complete")
     _set_cookie(response, REFRESH_COOKIE, raw_refresh, max_age=REFRESH_MAX_AGE)
     return response
@@ -216,18 +216,40 @@ async def logout_all(response: Response, user_id: str = Depends(get_current_user
     response.delete_cookie(REFRESH_COOKIE, path=COOKIE_PATH)
 
 
-def _me(user: dict) -> Me:
-    return Me(
-        id=user["_id"], username=user.get("username"), email=user.get("email"), github_login=user.get("github_login"),
-        name=user.get("name"), avatar_url=user.get("avatar_url"),
-    )
-
-
 @router.get("/me")
 async def me(user: dict = Depends(get_current_user)) -> Me:
-    return _me(user)
+    return Me.of(user)
 
 
 @router.put("/me/username")
 async def set_username(body: SetUsername, user: dict = Depends(get_current_user)) -> Me:
-    return _me(await native.set_username(user, body.username))
+    return Me.of(await native.set_username(user, body.username))
+
+
+@router.post("/me/email", status_code=202, dependencies=[Depends(same_origin)])
+async def add_email(
+    body: AddEmailRequest, background: BackgroundTasks, ip: str = Depends(client_ip), user: dict = Depends(get_current_user),
+) -> ChallengeIssued:
+    """Start adding an email and password to the account: a code goes to the address, whoever holds it."""
+    return await native.start_add_email(background, ip, user, body.email, body.password)
+
+
+@router.post("/me/email/verify", dependencies=[Depends(same_origin)])
+async def verify_added_email(
+    body: VerifyEmailRequest, ip: str = Depends(client_ip), user: dict = Depends(get_current_user),
+) -> AddEmailResult:
+    outcome, result = await native.finish_add_email(ip, user, body.challenge_id, body.code)
+    if outcome == "merge_required":
+        return AddEmailResult(outcome=outcome, merge=result)
+    return AddEmailResult(outcome=outcome, me=Me.of(result))
+
+
+@router.delete("/me/github", dependencies=[Depends(same_origin)])
+async def unlink_github(body: ConfirmPassword, user: dict = Depends(get_current_user)) -> Me:
+    return Me.of(await native.unlink_github(user, body.password))
+
+
+@router.delete("/me/email", dependencies=[Depends(same_origin)])
+async def unlink_email(body: ConfirmPassword, user: dict = Depends(get_current_user)) -> Me:
+    return Me.of(await native.unlink_email(user, body.password))
+

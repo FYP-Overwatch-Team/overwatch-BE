@@ -12,9 +12,10 @@ from typing import NoReturn
 import structlog
 from pymongo.errors import DuplicateKeyError
 
+from app.accounts import service as accounts
 from app.auth import repository, usernames
 from app.core import security
-from app.core.constants import AuthErrorCode, Provider
+from app.core.constants import AuthErrorCode, MergeProof, Provider
 from app.core.exceptions import ConflictError, UnauthorizedError
 from app.core.time import utcnow
 from app.db import oauth_tokens
@@ -31,6 +32,8 @@ REUSE_GRACE = timedelta(seconds=20)
 async def sign_in_with_github(profile: dict, github_tokens: dict) -> str:
     """Upsert the user, keep their GitHub user token, start a session. Returns the raw refresh token."""
     existing = await repository.find_user_by_github_id(profile["id"])
+    if existing and existing.get("merge_id"):
+        raise accounts.merging_error()
     username = None
     if existing is None and (candidate := usernames.default_from(profile["login"])) and not await usernames.is_taken(candidate):
         username = candidate
@@ -96,18 +99,27 @@ async def _reject(token_hash: str) -> NoReturn:
     raise UnauthorizedError("refresh token expired", error_code="refresh_token_expired")
 
 
-async def link_github(user_id: str, profile: dict, github_tokens: dict) -> None:
-    """Attach a GitHub account to a signed-in user, unless it already belongs to someone else."""
+async def link_github(user_id: str, profile: dict, github_tokens: dict) -> bool:
+    """Attach a GitHub account to a signed-in user. When it has an Overwatch account of its own, signing in to it just
+    proved that account too, so a merge is proposed instead: returns True then. Raises when they can't be merged.
+    """
     in_use = ConflictError("that GitHub account belongs to another user", error_code=AuthErrorCode.GITHUB_ACCOUNT_IN_USE)
     owner = await repository.find_user_by_github_id(profile["id"])
     if owner and owner["_id"] != user_id:
-        raise in_use
+        user = await repository.get_user(user_id)
+        if user is None or owner.get("merge_id") or accounts.conflicts(user, owner):
+            raise in_use
+        # the fresh token belongs to the GitHub identity, which is the other account's until the merge
+        await oauth_tokens.save(owner["_id"], Provider.GITHUB, github_tokens)
+        await accounts.propose(user, owner, MergeProof.GITHUB_OAUTH, profile["id"])
+        return True
     try:
         await repository.link_github(user_id, profile)
     except DuplicateKeyError as exc:
         # another user linked it in between
         raise in_use from exc
     await oauth_tokens.save(user_id, Provider.GITHUB, github_tokens)
+    return False
 
 
 async def logout(raw_refresh: str) -> None:

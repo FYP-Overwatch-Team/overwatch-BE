@@ -52,6 +52,16 @@ def auth_challenges():
     return get_db()["auth_challenges"]
 
 
+def merge_proposals():
+    """A proven, not yet confirmed merge of another account into the signed-in one; short-lived."""
+    return get_db()["merge_proposals"]
+
+
+def account_merges():
+    """Every merge of one account into another, kept as the audit trail; also how an interrupted merge resumes."""
+    return get_db()["account_merges"]
+
+
 def oauth_tokens():
     return get_db()["oauth_tokens"]
 
@@ -187,6 +197,12 @@ async def ensure_indexes() -> None:
     await users().create_index("unverified_expires_at", expireAfterSeconds=0)
     await auth_challenges().create_index([("user_id", 1), ("purpose", 1)])
     await auth_challenges().create_index("expires_at", expireAfterSeconds=0)
+    # one pending merge per account; a proof unconfirmed for a while lapses
+    await merge_proposals().create_index("survivor_id", unique=True)
+    await merge_proposals().create_index("expires_at", expireAfterSeconds=0)
+    await account_merges().create_index([("status", 1), ("updated_at", 1)])
+    await account_merges().create_index("absorbed_id")
+    await account_merges().create_index("survivor_id")
     await workspace_members().create_index([("workspace_id", 1), ("user_id", 1)], unique=True)
     await workspace_members().create_index("user_id")
     await workspace_invites().create_index("token_hash", unique=True)
