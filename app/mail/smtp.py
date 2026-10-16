@@ -19,7 +19,7 @@ class SmtpSender:
     def _send(self, email: Email) -> None:
         settings = self.settings
         message = EmailMessage()
-        message["From"] = formataddr((settings.email_from_name, settings.email_from))
+        message["From"] = formataddr((settings.email_from_name or settings.product, settings.email_from))
         message["To"] = email.to
         message["Subject"] = email.subject
         message["Message-ID"] = make_msgid(domain=settings.email_from.partition("@")[2] or None)
