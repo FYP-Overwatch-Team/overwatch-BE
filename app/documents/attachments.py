@@ -96,7 +96,7 @@ async def start_upload(node_id: str, body: NewAttachment, member: dict = Depends
         "filename": body.filename, "content_type": body.content_type, "size": body.size,
         "status": PENDING, "created_by": member["user_id"], "created_at": utcnow(),
     })
-    target = get_object_store().upload_target(attachment_id, key, body.content_type, MAX_BYTES)
+    target = get_object_store().upload_target(attachment_id, key, body.content_type, body.size)
     return {"id": attachment_id, "upload": target}
 
 
