@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.constants import PRODUCT_NAMES, Product
@@ -57,14 +58,16 @@ class Settings(BaseSettings):
     # can be reclaimed, so a restart mid-parse cannot wedge a repository.
     parse_lock_stale_minutes: int = 15
 
-    # Where uploaded files (doc images) live: "local" (a folder, for dev) or "s3".
-    # S3 credentials come from the standard AWS sources (env vars, instance role), never from here.
+    # Where uploaded files (doc images) live: "local" (a folder, for dev), "s3" (AWS) or "r2" (Cloudflare).
+    # Bucket credentials come from the standard AWS sources (env vars, instance role), never from here; an R2
+    # API token supplies the same AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY pair.
     storage_backend: str = "local"
     uploads_dir: str = "./uploads"
-    s3_bucket: str = ""
-    s3_region: str = ""
-    # only for S3-compatible stores (MinIO, R2); empty for AWS
-    s3_endpoint_url: str = ""
+    # the S3_* names are read too, until deploys have moved to STORAGE_*
+    storage_bucket: str = Field("", validation_alias=AliasChoices("STORAGE_BUCKET", "S3_BUCKET"))
+    storage_region: str = Field("", validation_alias=AliasChoices("STORAGE_REGION", "S3_REGION"))
+    # required for R2 (https://<account_id>.r2.cloudflarestorage.com) and other S3-compatible stores; empty for AWS
+    storage_endpoint_url: str = Field("", validation_alias=AliasChoices("STORAGE_ENDPOINT_URL", "S3_ENDPOINT_URL"))
 
     # How emails go out: "console" (logged, for dev and tests) or "smtp" (Gmail: an App Password, port 587 with STARTTLS)
     email_backend: str = "console"

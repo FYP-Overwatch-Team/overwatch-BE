@@ -2,6 +2,11 @@
 
 from urllib.parse import urlsplit
 
+import pytest
+
+from app.db import mongo
+from app.documents import attachments
+
 from tests.integration.test_auth_flow import auth_headers, login
 from tests.integration.test_documents_api import create
 from tests.integration.test_workspaces import in_workspace, team, user
@@ -83,3 +88,46 @@ async def test_uploads_belong_to_their_workspace(client):
     stolen = await client.post(f"/attachments/{attachment['id']}/complete", headers=in_workspace(bob, bobs_own))
 
     assert stolen.json()["meta"]["error_code"] == "attachment_not_found"
+
+
+async def test_files_are_stored_under_their_workspace_and_page(client):
+    headers = auth_headers(await login(client))
+    page = await create(client, headers, title="P")
+    attachment, _ = await upload(client, headers, page["id"])
+
+    record = await mongo.doc_attachments().find_one({"_id": attachment["id"]})
+    assert record["key"] == f"workspaces/{record['workspace_id']}/docs/{page['id']}/images/{attachment['id']}.png"
+
+
+async def test_a_recopied_source_image_replaces_its_old_file(object_store):
+    old_key = "ws/w1/docs/p1/a1"
+    await object_store.write(old_key, PNG, "image/png")
+    await mongo.doc_attachments().insert_one({
+        "_id": "a1", "workspace_id": "w1", "node_id": "p1", "key": old_key, "source": "confluence", "external_id": "e1",
+    })
+
+    attachment_id = await attachments.copy_from_source("w1", "p1", "confluence", {"external_id": "e1", "filename": "x.png"}, PNG)
+
+    assert attachment_id == "a1"
+    assert set(object_store.files) == {"workspaces/w1/docs/p1/images/a1.png"}
+
+
+async def test_a_failed_save_keeps_the_old_file_the_record_points_to(object_store, monkeypatch):
+    old_key = "ws/w1/docs/p1/a1"
+    await object_store.write(old_key, PNG, "image/png")
+    await mongo.doc_attachments().insert_one({
+        "_id": "a1", "workspace_id": "w1", "node_id": "p1", "key": old_key, "source": "confluence", "external_id": "e1",
+    })
+    collection = mongo.doc_attachments()
+
+    class SaveFails:
+        find_one = collection.find_one
+
+        async def update_one(self, *args, **kwargs):
+            raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(mongo, "doc_attachments", SaveFails)
+    with pytest.raises(RuntimeError):
+        await attachments.copy_from_source("w1", "p1", "confluence", {"external_id": "e1", "filename": "x.png"}, PNG)
+
+    assert old_key in object_store.files

@@ -1,6 +1,6 @@
 """Where uploaded files live, behind one interface: the rest of the app never names a provider.
 
-Adding a provider is one adapter module (see `s3.py`) registered in `BACKENDS`, then
+Adding a provider is one adapter module (see `s3.py`, or `r2.py` for one built on it) registered in `BACKENDS`, then
 `STORAGE_BACKEND=<name>`. Records keep each file's `key`, never a URL, so moving providers is copying
 the objects and flipping the setting.
 """
@@ -27,8 +27,8 @@ class StoredFile(TypedDict):
 
 
 class ObjectStore(Protocol):
-    def upload_target(self, attachment_id: str, key: str, content_type: str, max_bytes: int) -> UploadTarget:
-        """A one-time way to upload `key`, bound to its type and size where the provider allows."""
+    def upload_target(self, attachment_id: str, key: str, content_type: str, size: int) -> UploadTarget:
+        """A one-time way to upload `key`, bound to its type and exact size where the provider allows."""
 
     def download_url(self, attachment_id: str, key: str, ttl: int) -> str:
         """A link that reads `key` for `ttl` seconds, without the user's login (images can't send it)."""
@@ -58,11 +58,19 @@ def _local(settings: Settings) -> ObjectStore:
 def _s3(settings: Settings) -> ObjectStore:
     from app.storage.s3 import S3Store
 
-    return S3Store(settings.s3_bucket, settings.s3_region, settings.s3_endpoint_url)
+    return S3Store(settings.storage_bucket, settings.storage_region, settings.storage_endpoint_url)
+
+
+def _r2(settings: Settings) -> ObjectStore:
+    from app.storage.r2 import R2Store
+
+    if not settings.storage_endpoint_url:
+        raise RuntimeError("STORAGE_BACKEND=r2 needs STORAGE_ENDPOINT_URL (https://<account_id>.r2.cloudflarestorage.com)")
+    return R2Store(settings.storage_bucket, settings.storage_region, settings.storage_endpoint_url)
 
 
 #: STORAGE_BACKEND name -> how to build its adapter; imported lazily so unused SDKs never load
-BACKENDS: dict[str, Callable[[Settings], ObjectStore]] = {"local": _local, "s3": _s3}
+BACKENDS: dict[str, Callable[[Settings], ObjectStore]] = {"local": _local, "s3": _s3, "r2": _r2}
 
 _store: ObjectStore | None = None
 
