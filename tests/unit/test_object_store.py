@@ -1,4 +1,4 @@
-"""Storage adapters: S3 and R2 sign uploads and links locally; the backend is picked by name."""
+"""Storage adapters: S3 and R2 sign uploads and links locally; the backend is picked by name; keys read as folders."""
 
 import base64
 import json
@@ -11,6 +11,7 @@ import pytest
 from app.core.config import Settings, get_settings
 from app.storage.local import LocalStore
 from app.storage.memory import InMemoryStore
+from app.storage import keys
 from app.storage.r2 import R2Store
 from app.storage.s3 import S3Store
 from app.storage.store import ProxiedStore, get_object_store, use_object_store
@@ -79,6 +80,10 @@ def test_storage_settings_still_read_the_old_s3_names(monkeypatch):
     monkeypatch.setenv("STORAGE_BUCKET", "new-bucket")
     assert Settings().storage_bucket == "new-bucket"
 
+
+def test_files_are_kept_under_their_workspace_by_kind():
+    assert keys.doc_image("w1", "p1", "a1", "image/jpeg") == "workspaces/w1/docs/p1/images/a1.jpg"
+    assert keys.doc_image("w1", "p1", "a1", "image/png").startswith(keys.workspace_prefix("w1"))
 
 
 def test_a_download_link_is_signed_and_expires(monkeypatch):
