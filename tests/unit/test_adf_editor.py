@@ -85,6 +85,44 @@ def test_copied_images_become_editor_images_and_go_back_as_they_came():
     assert editor_to_adf({**editor, "content": [*editor["content"], uploaded]}) == doc(media, unknown)
 
 
+def image_block(**single_attrs) -> dict:
+    return {"type": "mediaSingle", "attrs": {"layout": "center", **single_attrs}, "content": [{"type": "media", "attrs": {"id": "file-1", "type": "file", "alt": "chart"}}]}
+
+
+def test_an_image_brings_its_width_as_a_percent_of_the_column():
+    def width(block):
+        return adf_to_editor(doc(block), {"file-1": "att-1"})["content"][0]["attrs"].get("width")
+
+    assert width(image_block(width=50, widthType="percentage")) == 50
+    assert width(image_block(width=66.6)) == 67
+    assert width(image_block(width=380, widthType="pixel")) == 50
+    assert width(image_block(width=5)) == 10
+    assert width(image_block()) is None
+
+
+def test_an_untouched_image_goes_back_exactly_as_it_came():
+    block = image_block(width=380, widthType="pixel")
+    editor = adf_to_editor(doc(block), {"file-1": "att-1"})
+
+    assert editor_to_adf(editor) == doc(block)
+
+
+def test_a_resized_or_described_image_goes_back_changed():
+    block = image_block(layout="wide")
+    editor = adf_to_editor(doc(block), {"file-1": "att-1"})
+    image = editor["content"][0]
+
+    image["attrs"].update(width=40, alt="Code graph")
+    sent = editor_to_adf(editor)["content"][0]
+    assert sent["attrs"] == {"layout": "center", "width": 40, "widthType": "percentage"}
+    assert sent["content"][0]["attrs"]["alt"] == "Code graph"
+    assert block["attrs"] == {"layout": "wide"}, "the original stays untouched"
+
+    image["attrs"].update(width=None, alt=None)
+    sent = editor_to_adf(editor)["content"][0]
+    assert "width" not in sent["attrs"] and "alt" not in sent["content"][0]["attrs"]
+
+
 def test_an_empty_page_is_one_empty_paragraph():
     assert adf_to_editor(None) == {"type": "doc", "content": [{"type": "paragraph"}]}
     assert adf_to_editor(doc()) == {"type": "doc", "content": [{"type": "paragraph"}]}
