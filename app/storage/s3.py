@@ -1,7 +1,7 @@
-"""AWS S3, and anything that speaks its API (Cloudflare R2, MinIO, Wasabi) through `S3_ENDPOINT_URL`.
+"""AWS S3, and the base for stores that speak its API through `STORAGE_ENDPOINT_URL` (R2 in `r2.py`, MinIO, Wasabi).
 
-The browser uploads straight to the bucket with a signed form bound to the file's type and size, and
-reads through presigned links; signing is local, so neither costs a request to AWS.
+The browser uploads straight to the bucket with a signed request bound to the file's type and exact size,
+and reads through presigned links; signing is local, so neither costs a request to the provider.
 """
 
 import asyncio
@@ -16,18 +16,25 @@ UPLOAD_WINDOW_SECONDS = 600
 
 
 class S3Store:
+    #: when the SDK adds integrity checksums to requests; S3-compatible stores may not accept them
+    checksums = "when_supported"
+
     def __init__(self, bucket: str, region: str, endpoint_url: str = "") -> None:
         self.bucket = bucket
         self.client = boto3.client(
             "s3", region_name=region or None, endpoint_url=endpoint_url or None,
-            config=Config(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"}),
+            config=Config(
+                signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"},
+                request_checksum_calculation=self.checksums, response_checksum_validation=self.checksums,
+            ),
         )
 
-    def upload_target(self, attachment_id: str, key: str, content_type: str, max_bytes: int) -> UploadTarget:
+    def upload_target(self, attachment_id: str, key: str, content_type: str, size: int) -> UploadTarget:
+        """A signed form: S3 checks the policy's type and size before it stores anything."""
         post = self.client.generate_presigned_post(
             self.bucket, key,
             Fields={"Content-Type": content_type},
-            Conditions=[{"Content-Type": content_type}, ["content-length-range", 1, max_bytes]],
+            Conditions=[{"Content-Type": content_type}, ["content-length-range", size, size]],
             ExpiresIn=UPLOAD_WINDOW_SECONDS,
         )
         return {"method": "POST", "url": post["url"], "fields": post["fields"], "headers": {}, "via_api": False}
@@ -46,5 +53,9 @@ class S3Store:
             raise
         return {"size": meta["ContentLength"], "content_type": meta.get("ContentType", "")}
 
+    async def write(self, key: str, data: bytes, content_type: str) -> None:
+        await asyncio.to_thread(self.client.put_object, Bucket=self.bucket, Key=key, Body=data, ContentType=content_type)
+
     async def delete(self, key: str) -> None:
         await asyncio.to_thread(self.client.delete_object, Bucket=self.bucket, Key=key)
+

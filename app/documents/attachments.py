@@ -12,12 +12,13 @@ from app.core.responses import api_router
 from app.core.time import utcnow
 from app.db import mongo
 from app.documents import repository
+from app.storage import keys
 from app.storage.proxied import valid_signature
 from app.storage.store import ProxiedStore, get_object_store
 
 MAX_BYTES = 10 * 1024 * 1024
 #: what a page may show; no SVG, which can carry scripts
-IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+IMAGE_TYPES = set(keys.IMAGE_EXTENSIONS)
 #: how long a link to a file works; the page asks for fresh ones each time it loads
 LINK_TTL_SECONDS = 12 * 3600
 PENDING, READY = "pending", "ready"
@@ -90,13 +91,13 @@ async def start_upload(node_id: str, body: NewAttachment, member: dict = Depends
     if node["kind"] != DocumentKind.PAGE or node["source"] != NATIVE_SOURCE:
         raise ConflictError("Images can only be added to pages written here", error_code="read_only")
     attachment_id = uuid.uuid4().hex
-    key = f"ws/{workspace_id}/docs/{node_id}/{attachment_id}"
+    key = keys.doc_image(workspace_id, node_id, attachment_id, body.content_type)
     await mongo.doc_attachments().insert_one({
         "_id": attachment_id, "workspace_id": workspace_id, "node_id": node_id, "key": key,
         "filename": body.filename, "content_type": body.content_type, "size": body.size,
         "status": PENDING, "created_by": member["user_id"], "created_at": utcnow(),
     })
-    target = get_object_store().upload_target(attachment_id, key, body.content_type, MAX_BYTES)
+    target = get_object_store().upload_target(attachment_id, key, body.content_type, body.size)
     return {"id": attachment_id, "upload": target}
 
 
@@ -167,3 +168,50 @@ def image_ids(content: dict) -> list[str]:
             found[attachment_id] = None
         stack.extend(reversed(node.get("content") or []))
     return list(found)
+
+
+async def source_copies(workspace_id: str, source: str, external_ids: list[str]) -> dict[str, dict]:
+    """Images already copied from a docs source, by their id there."""
+    cursor = mongo.doc_attachments().find({"workspace_id": workspace_id, "source": source, "external_id": {"$in": external_ids}})
+    return {doc["external_id"]: doc async for doc in cursor}
+
+
+async def copy_from_source(workspace_id: str, node_id: str, source: str, file: dict, data: bytes) -> str | None:
+    """Keep our own copy of an image from a docs source, so pages show it without the source's auth.
+
+    `file` is the source's description ({external_id, media_id, filename, content_type, external_version}).
+    None when it isn't an image we can show.
+    """
+    content_type = _sniffed_type(data)
+    if content_type not in IMAGE_TYPES or len(data) > MAX_BYTES:
+        return None
+    existing = await mongo.doc_attachments().find_one({"workspace_id": workspace_id, "source": source, "external_id": file["external_id"]})
+    attachment_id = existing["_id"] if existing else uuid.uuid4().hex
+    key = keys.doc_image(workspace_id, node_id, attachment_id, content_type)
+    store = get_object_store()
+    await store.write(key, data, content_type)
+    await mongo.doc_attachments().update_one({"_id": attachment_id}, {"$set": {
+        "workspace_id": workspace_id, "node_id": node_id, "key": key, "filename": file["filename"][:255],
+        "content_type": content_type, "size": len(data), "status": READY, "source": source,
+        "external_id": file["external_id"], "media_id": file.get("media_id"), "external_version": file.get("external_version"),
+        "created_by": None, "created_at": utcnow(),
+    }}, upsert=True)
+    if existing and existing["key"] != key:
+        # the copy moved (a new layout, page or type); only now that the record points at it is the old file unused
+        await store.delete(existing["key"])
+    return attachment_id
+
+
+async def media_map(workspace_id: str, node_id: str) -> dict[str, str]:
+    """A mirrored page's copied images: the source's media id → our attachment id."""
+    cursor = mongo.doc_attachments().find({"workspace_id": workspace_id, "node_id": node_id, "media_id": {"$ne": None}}, {"media_id": 1})
+    return {doc["media_id"]: doc["_id"] async for doc in cursor if doc.get("media_id")}
+
+
+async def delete_for(workspace_id: str, node_ids: list[str]) -> None:
+    """Remove the files of deleted pages, then their records."""
+    store = get_object_store()
+    cursor = mongo.doc_attachments().find({"workspace_id": workspace_id, "node_id": {"$in": node_ids}}, {"key": 1})
+    async for doc in cursor:
+        await store.delete(doc["key"])
+    await mongo.doc_attachments().delete_many({"workspace_id": workspace_id, "node_id": {"$in": node_ids}})

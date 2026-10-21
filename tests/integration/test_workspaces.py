@@ -38,7 +38,7 @@ async def team(client, owner: dict, name: str = "Acme") -> str:
 async def invite(client, admin: dict, workspace_id: str, **body) -> str:
     resp = await client.post(f"/workspaces/{workspace_id}/invites", json=body, headers=bearer(admin))
     assert resp.status_code == 201
-    return resp.json()["data"]["url"].rsplit("/", 1)[1]
+    return resp.json()["data"]["url"].rsplit("#", 1)[1]
 
 
 async def join(client, owner: dict, member: dict, workspace_id: str, role: str = "member") -> None:

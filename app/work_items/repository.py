@@ -2,17 +2,15 @@
 
 import uuid
 
-from pymongo import ReturnDocument
+from pymongo import ReturnDocument, UpdateOne
 
 from app.core.time import utcnow
 from app.db import mongo
 
 
-async def upsert_synced(workspace_id: str, fields: dict) -> None:
-    """Write a tracker item as the tracker has it; its board position is ours and kept."""
-    now = utcnow()
+def _synced_write(workspace_id: str, fields: dict, now) -> UpdateOne:
     item = {k: v for k, v in fields.items() if k != "rank"}
-    await mongo.work_items().update_one(
+    return UpdateOne(
         {"workspace_id": workspace_id, "source": item["source"], "external_id": item["external_id"]},
         {
             "$set": {**item, "updated_at": now},
@@ -20,6 +18,18 @@ async def upsert_synced(workspace_id: str, fields: dict) -> None:
         },
         upsert=True,
     )
+
+
+async def upsert_synced(workspace_id: str, fields: dict) -> None:
+    """Write a tracker item as the tracker has it; its board position is ours and kept."""
+    await upsert_many_synced(workspace_id, [fields])
+
+
+async def upsert_many_synced(workspace_id: str, items: list[dict]) -> None:
+    """`upsert_synced` for a page of items, in one round trip."""
+    if items:
+        now = utcnow()
+        await mongo.work_items().bulk_write([_synced_write(workspace_id, fields, now) for fields in items], ordered=False)
 
 
 async def sweep(workspace_id: str, source: str, target_key: str, keep_ids: list[str]) -> None:

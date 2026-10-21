@@ -49,7 +49,8 @@ async def test_validation_errors_use_the_envelope(client):
     assert resp.status_code == 422
     assert resp.json() == {
         "status": "error", "code": 422, "data": None,
-        "meta": {"error_code": "validation_error", "message": "Request validation failed"},
+        "meta": {"error_code": "validation_error", "message": "Request validation failed",
+                 "fields": {"page": "Input should be greater than or equal to 1"}},
     }
 
 

@@ -1,4 +1,4 @@
-"""Background jobs: repository indexing and tracker (Jira) sync.
+"""Background jobs: repository indexing, connector syncs, and pushing docs edits back to their source.
 
 Indexing runs under a per-repo lock held in Mongo (`index_locks`), shared by every
 workspace that connected the repo:
@@ -10,16 +10,18 @@ The indexing itself lives in `app/knowledge_graph/pipeline.py`; this module
 owns when it runs and what happens if it fails.
 """
 
+import asyncio
 from datetime import timedelta
 
 import structlog
 from pymongo.errors import DuplicateKeyError
 
-from app.connectors import repository as connectors, sync
+from app.connectors import doc_sync, registry, repository as connectors, sync
 from app.core.config import get_settings
-from app.core.constants import JobStatus
+from app.core.constants import ConnectorCategory, JobStatus
 from app.core.time import utcnow
 from app.db import mongo
+from app.documents import service as documents
 from app.github import checkout, repository
 from app.integrations import git_cli
 from app.integrations.github_app import InstallationGone, get_github_app
@@ -131,11 +133,33 @@ async def _take_pending(repo_full_name: str) -> bool | None:
 
 
 async def run_connector_sync(workspace_id: str, provider: str, target_key: str) -> None:
-    """Sync one tracker target (a Jira project) into work_items."""
-    await sync.run_work_item_sync(workspace_id, provider, target_key)
+    """Sync one target: a tracker project into work_items, or a docs space into documents."""
+    if registry.get(provider).category == ConnectorCategory.DOCUMENTS:
+        await doc_sync.run_document_sync(workspace_id, provider, target_key)
+    else:
+        await sync.run_work_item_sync(workspace_id, provider, target_key)
+
+
+# targets synced at once by the polling loop, so one slow space or project doesn't hold up the rest
+RESYNC_CONCURRENCY = 4
 
 
 async def resync_all_targets() -> None:
     """One polling pass over every connected target (polling, not webhooks: see app/connectors/sync.py)."""
-    async for target in connectors.all_targets():
-        await run_connector_sync(target["workspace_id"], target["provider"], target["key"])
+    limit = asyncio.Semaphore(RESYNC_CONCURRENCY)
+
+    async def one(target: dict) -> None:
+        async with limit:
+            await run_connector_sync(target["workspace_id"], target["provider"], target["key"])
+
+    await asyncio.gather(*[one(target) async for target in connectors.all_targets()], return_exceptions=True)
+
+
+async def push_documents() -> None:
+    """Send settled edits of mirrored pages back to their source."""
+    await doc_sync.push_due()
+
+
+async def purge_archived_documents() -> None:
+    """Delete archived docs for good once they've been in the Archive past the retention period."""
+    await documents.purge_expired(timedelta(days=get_settings().doc_archive_retention_days))

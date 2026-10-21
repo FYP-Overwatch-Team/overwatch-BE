@@ -56,6 +56,14 @@ scopes): `read:board-scope:jira-software`, `write:board-scope:jira-software`, `r
 `read:sprint:jira-software`, `write:sprint:jira-software`, `read:issue:jira-software`.
 Then set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`.
 
+### Email
+
+Sign-up codes, password resets and workspace invites are emailed. Locally `EMAIL_BACKEND=console` logs them
+(with the code, in dev only). In production use `EMAIL_BACKEND=smtp` with a Gmail account: turn on 2-step
+verification, create an App Password, and set `SMTP_USERNAME` (the address), `SMTP_PASSWORD` (the App Password)
+and `EMAIL_FROM` (the same address or a verified "send as" alias). Gmail allows about 500 recipients a day;
+`INVITE_EMAIL_DAILY_LIMIT_*` keep invites well under it.
+
 ## API responses
 
 Every endpoint returns the same envelope. Routes just return their data and declare its type
@@ -92,20 +100,20 @@ git config core.hooksPath .githooks
 Every push runs the full backend test suite and is blocked if any test fails.
 Use `git push --no-verify` only for exceptional, intentional bypasses.
 
-## EC2 deployment
+## Deployment
 
-The production stack runs the API and Caddy on EC2. MongoDB Atlas and Neo4j
-Aura remain external. Pushes to `main` are tested, published to GHCR, deployed
-to EC2, health checked, and rolled back on failure by `.github/workflows/ci.yml`.
+The production API runs in Docker on an AWS Lightsail server behind the
+Cloudflare proxy. MongoDB Atlas and Neo4j Aura remain external. Pushes to `main`
+are tested, published to GHCR, deployed to the server, health checked, and
+rolled back on failure by `.github/workflows/ci.yml`.
 
 ### One-time server setup
 
 Install Docker, create `/opt/overwatch`, and save the production environment at
 `/opt/overwatch/.env` with mode `600`. In addition to the application settings
-shown in `.env.example`, it must contain Compose deployment values:
+shown in `.env.example`, it must contain the image to deploy:
 
 ```env
-API_DOMAIN=overwatch-api.duckdns.org
 BACKEND_IMAGE=ghcr.io/rizwan521/overwatch-be
 ```
 
@@ -113,28 +121,33 @@ Use the public API URL for `APP_BASE_URL`. Set `FRONTEND_ORIGIN` to the exact
 deployed frontend origin. Keep Atlas, Aura, GitHub App, Jira, Gemini, JWT, and
 Fernet credentials only in this server-side file.
 
-The EC2 security group must allow ports 80 and 443 publicly and port 22 only
-from trusted addresses. Port 8000 is internal to the Compose network.
+Cloudflare terminates HTTPS for visitors (SSL mode Full (strict)). The API serves
+HTTPS to Cloudflare with a Cloudflare Origin CA certificate saved as
+`/opt/overwatch/certs/origin.pem` and `origin.key` (mode `600`). The DNS record
+for the API must be proxied, and the server firewall must allow port 443 only
+from [Cloudflare's IP ranges](https://www.cloudflare.com/ips-v4) and port 22 for
+SSH. `compose.prod.yml` trusts `X-Forwarded-For` from the same ranges, so update
+both if Cloudflare changes them.
 
 ### GitHub production environment
 
 Create a GitHub environment named `production` with these secrets:
 
 - `EC2_SSH_PRIVATE_KEY` — a dedicated deployment private key
-- `EC2_SSH_KNOWN_HOSTS` — output from `ssh-keyscan -H <api-domain>`
+- `EC2_SSH_KNOWN_HOSTS` — output from `ssh-keyscan -H <server-ip>`
 
-Add these environment variables:
+Add these environment variables. `EC2_HOST` is the server's static IP, since the
+proxied API domain resolves to Cloudflare rather than the server:
 
 ```text
-EC2_HOST=overwatch-api.duckdns.org
-EC2_USER=ubuntu
+EC2_HOST=<server-static-ip>
+EC2_USER=admin
 EC2_APP_DIR=/opt/overwatch
-HEALTH_URL=https://overwatch-api.duckdns.org/health
+HEALTH_URL=https://api.usebearings.app/health
 ```
 
-The workflow copies `compose.prod.yml`, `Caddyfile`, and `scripts/deploy.sh` to
-the server. Caddy obtains and renews HTTPS certificates automatically. The
-application `.env` is never copied from GitHub.
+The workflow copies `compose.prod.yml` and `scripts/deploy.sh` to the server.
+The application `.env` and the origin certificate are never copied from GitHub.
 
 ### Rollout steps
 
@@ -170,7 +183,11 @@ application `.env` is never copied from GitHub.
    `uv run python scripts/migrate_boards.py` (dry run) and again with `--apply`, and have an admin reconnect
    Jira so its board columns and sprints can be read. Until they reconnect, columns are offered from the
    project's statuses instead.
-9. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
+9. Email and password sign-in: set the email variables above, deploy, then run
+   `uv run python scripts/migrate_native_auth.py` (dry run) and again with `--apply`. It replaces the
+   `github_id` index (the API also does this on boot), gives GitHub users their login as username, and marks
+   existing invites' kind. Users whose login couldn't be used choose a username the next time they sign in.
+10. Deploy, then hit `GET /health` to confirm the app booted and connected to Mongo/Neo4j.
 
 **Note on ticket freshness:** Jira issues sync on a polling loop
 (`ticket_sync_interval_seconds`, default 5 min) rather than via Jira webhooks, which need a

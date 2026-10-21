@@ -8,6 +8,7 @@ what shows who wrote it and lets only them change it.
 
 import uuid
 
+from app.auth import usernames
 from app.auth.repository import get_user
 from app.connectors import registry
 from app.connectors import repository as connectors
@@ -24,7 +25,7 @@ ATTRIBUTION = "\n\n_Posted from Overwatch by {name}_"
 
 async def _author(member: dict) -> dict:
     user = await get_user(member["user_id"])
-    return {"id": member["user_id"], "name": (user or {}).get("name") or (user or {}).get("github_login")}
+    return {"id": member["user_id"], "name": usernames.display_name(user)}
 
 
 def _rights(member: dict, author_id: str | None, local: bool) -> dict:
@@ -37,7 +38,7 @@ async def _item_and_tracker(member: dict, item_id: str) -> tuple[dict, tuple | N
     if item["source"] == NATIVE_SOURCE:
         return item, None
     conn = await work_items.writable_connection(member["workspace_id"], item["source"])
-    return item, (registry.get(item["source"]).adapter, registry.auth_for(conn), conn)
+    return item, (registry.work_item_source(item["source"]), registry.auth_for(conn), conn)
 
 
 async def list_comments(member: dict, item_id: str) -> list[dict]:
@@ -49,7 +50,7 @@ async def list_comments(member: dict, item_id: str) -> list[dict]:
     conn = await connectors.active_connection(member["workspace_id"], item["source"])
     if conn is None:
         raise ConflictError(f"{item['source']} is not connected", error_code=f"{item['source']}_not_connected")
-    adapter, auth = registry.get(item["source"]).adapter, registry.auth_for(conn)
+    adapter, auth = registry.work_item_source(item["source"]), registry.auth_for(conn)
     ours = {doc["external_id"]: doc for doc in stored}
     comments = []
     for comment in await adapter.list_comments(auth, conn, item["external_id"]):

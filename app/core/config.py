@@ -1,12 +1,17 @@
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.constants import PRODUCT_NAMES, Product
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_env: str = "dev"
+    # the brand users see (emails, sender name); internal names such as cookies and the database never change
+    product_name: Product = Product.OVERWATCH
     app_base_url: str = "http://localhost:8000"
     frontend_origin: str = "http://localhost:3000"
 
@@ -38,7 +43,14 @@ class Settings(BaseSettings):
 
     repos_dir: str = "./repos"
 
-    ticket_sync_interval_seconds: int = 300
+    ticket_sync_interval_seconds: int = 120
+    # a target sync running longer than this was lost (a restart mid-sync) and may be taken over
+    sync_lock_stale_minutes: int = 15
+    # a mirrored page's edits go to its source once nobody has typed for this long, as one version
+    doc_push_idle_seconds: int = 60
+    doc_push_interval_seconds: int = 10
+    # archived docs are deleted for good this long after archiving
+    doc_archive_retention_days: int = 30
 
     # Every git invocation is bounded; a hung clone must not pin a worker.
     git_command_timeout_seconds: int = 300
@@ -46,14 +58,36 @@ class Settings(BaseSettings):
     # can be reclaimed, so a restart mid-parse cannot wedge a repository.
     parse_lock_stale_minutes: int = 15
 
-    # Where uploaded files (doc images) live: "local" (a folder, for dev) or "s3".
-    # S3 credentials come from the standard AWS sources (env vars, instance role), never from here.
+    # Where uploaded files (doc images) live: "local" (a folder, for dev), "s3" (AWS) or "r2" (Cloudflare).
+    # Bucket credentials come from the standard AWS sources (env vars, instance role), never from here; an R2
+    # API token supplies the same AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY pair.
     storage_backend: str = "local"
     uploads_dir: str = "./uploads"
-    s3_bucket: str = ""
-    s3_region: str = ""
-    # only for S3-compatible stores (MinIO, R2); empty for AWS
-    s3_endpoint_url: str = ""
+    # the S3_* names are read too, until deploys have moved to STORAGE_*
+    storage_bucket: str = Field("", validation_alias=AliasChoices("STORAGE_BUCKET", "S3_BUCKET"))
+    storage_region: str = Field("", validation_alias=AliasChoices("STORAGE_REGION", "S3_REGION"))
+    # required for R2 (https://<account_id>.r2.cloudflarestorage.com) and other S3-compatible stores; empty for AWS
+    storage_endpoint_url: str = Field("", validation_alias=AliasChoices("STORAGE_ENDPOINT_URL", "S3_ENDPOINT_URL"))
+
+    # How emails go out: "console" (logged, for dev and tests) or "smtp" (Gmail: an App Password, port 587 with STARTTLS)
+    email_backend: str = "console"
+    email_from: str = "noreply@overwatch.local"
+    # empty sends as the product name
+    email_from_name: str = ""
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    # new passwords are checked against Have I Been Pwned's breach corpus (k-anonymity: only a hash prefix leaves)
+    hibp_enabled: bool = True
+    # invite emails a workspace or one admin may send a day; Gmail caps an account at about 500 recipients a day
+    invite_email_daily_limit_workspace: int = 50
+    invite_email_daily_limit_user: int = 100
+
+    @property
+    def product(self) -> str:
+        """The product name as users see it."""
+        return PRODUCT_NAMES[self.product_name]
 
 
 @lru_cache
