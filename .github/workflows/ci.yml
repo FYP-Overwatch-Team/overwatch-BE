@@ -104,7 +104,7 @@ jobs:
           ssh -i ~/.ssh/overwatch-deploy "$EC2_USER@$EC2_HOST" \
             "mkdir -p '$EC2_APP_DIR/scripts'"
           scp -i ~/.ssh/overwatch-deploy \
-            compose.prod.yml Caddyfile scripts/deploy.sh \
+            compose.prod.yml scripts/deploy.sh \
             "$EC2_USER@$EC2_HOST:$EC2_APP_DIR/"
           ssh -i ~/.ssh/overwatch-deploy "$EC2_USER@$EC2_HOST" \
             "mv '$EC2_APP_DIR/deploy.sh' '$EC2_APP_DIR/scripts/deploy.sh' && chmod 700 '$EC2_APP_DIR/scripts/deploy.sh'"
