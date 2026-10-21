@@ -1,5 +1,6 @@
 """Atlassian Document Format (ADF), the rich text Jira and Confluence share, to and from Markdown."""
 
+import copy
 import re
 import uuid
 from contextvars import ContextVar
@@ -343,7 +344,12 @@ def _adf_text(text: str, marks: tuple[dict, ...]) -> dict:
 # holding the original ADF, shown read-only and written back exactly as it came.
 SOURCE_BLOCK, SOURCE_INLINE, SOURCE_MARK = "sourceBlock", "sourceInline", "sourceMark"
 # raise when `adf_to_editor` turns ADF into something new, so mirrored pages are converted again
-EDITOR_FORMAT = 2
+EDITOR_FORMAT = 3
+# an image's width in the editor is a percent of the page column; Confluence may give pixels on its fixed-width body
+IMAGE_WIDTH_MIN, IMAGE_WIDTH_MAX = 10, 100
+CONFLUENCE_BODY_PX = 760
+# image layouts that honour a width; wide and full-width images span the page whatever it says
+_SIZED_LAYOUTS = {"center", "align-start", "align-end", "wrap-left", "wrap-right"}
 _SAME_BLOCKS = {"paragraph", "heading", "bulletList", "orderedList", "listItem", "blockquote", "codeBlock", "table", "tableRow", "tableHeader", "tableCell"}
 # blocks the editor has under its own shape (see `_block`); ADF's nested expand is an expand there
 _EDITOR_BLOCKS = _SAME_BLOCKS | {"panel", "expand", "nestedExpand", "layoutSection", "layoutColumn"}
@@ -413,7 +419,10 @@ def _block(node: dict, images: dict[str, str]) -> list[dict]:
         attachment_id = media and images.get((media.get("attrs") or {}).get("id", ""))
         if attachment_id:
             alt = (media.get("attrs") or {}).get("alt")
-            return [{"type": "image", "attrs": {"src": None, "alt": alt, "attachmentId": attachment_id, "raw": node}}]
+            image = {"src": None, "alt": alt, "attachmentId": attachment_id, "raw": node}
+            if width := _image_width(attrs):
+                image["width"] = width
+            return [{"type": "image", "attrs": image}]
     if kind == "taskList":
         return [_task_list(node, images)]
     if kind == "rule":
@@ -539,6 +548,46 @@ def _unwrap(blocks: list[dict], kinds: set[str]) -> list[dict]:
     return out
 
 
+def _image_width(attrs: dict) -> int | None:
+    """A `mediaSingle`'s width as a percent of the column; None when it has none."""
+    width = attrs.get("width")
+    if isinstance(width, bool) or not isinstance(width, int | float) or width <= 0:
+        return None
+    if attrs.get("widthType") == "pixel":
+        width = width / CONFLUENCE_BODY_PX * 100
+    return max(IMAGE_WIDTH_MIN, min(IMAGE_WIDTH_MAX, round(width)))
+
+
+def _media(single: dict) -> dict | None:
+    return next((child for child in single.get("content") or [] if child.get("type") == "media"), None)
+
+
+def _adf_image(attrs: dict) -> dict:
+    """A source image as it goes back: exactly as it came, unless its width or alt text changed here."""
+    raw = attrs["raw"]
+    media = _media(raw)
+    width, alt = attrs.get("width"), attrs.get("alt") or None
+    old_alt = ((media or {}).get("attrs") or {}).get("alt") or None
+    if width == _image_width(raw.get("attrs") or {}) and alt == old_alt:
+        return raw
+    single = copy.deepcopy(raw)
+    single_attrs = single.setdefault("attrs", {})
+    if width:
+        single_attrs.update(width=width, widthType="percentage")
+        if single_attrs.get("layout") not in _SIZED_LAYOUTS:
+            single_attrs["layout"] = "center"
+    else:
+        single_attrs.pop("width", None)
+        single_attrs.pop("widthType", None)
+    if media_copy := _media(single):
+        media_attrs = media_copy.setdefault("attrs", {})
+        if alt:
+            media_attrs["alt"] = alt
+        else:
+            media_attrs.pop("alt", None)
+    return single
+
+
 def _adf_from_block(node: dict) -> list[dict]:
     kind, attrs = node.get("type"), node.get("attrs") or {}
     children = node.get("content") or []
@@ -546,7 +595,7 @@ def _adf_from_block(node: dict) -> list[dict]:
         return [attrs["raw"]] if attrs.get("raw") else []
     if kind == "image":
         # only images that came from the source go back; new uploads stay here until upload is supported
-        return [attrs["raw"]] if attrs.get("raw") else []
+        return [_adf_image(attrs)] if attrs.get("raw") else []
     if kind == "horizontalRule":
         return [{"type": "rule"}]
     if kind == "taskList":
