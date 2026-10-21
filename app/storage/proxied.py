@@ -18,7 +18,7 @@ def valid_signature(attachment_id: str, expires: int, signature: str) -> bool:
 
 
 class ThroughApi:
-    def upload_target(self, attachment_id: str, key: str, content_type: str, max_bytes: int) -> UploadTarget:
+    def upload_target(self, attachment_id: str, key: str, content_type: str, size: int) -> UploadTarget:
         return {"method": "PUT", "url": f"/attachments/{attachment_id}/content", "fields": {}, "headers": {"Content-Type": content_type}, "via_api": True}
 
     def download_url(self, attachment_id: str, key: str, ttl: int) -> str:

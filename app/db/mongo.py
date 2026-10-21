@@ -62,6 +62,11 @@ def account_merges():
     return get_db()["account_merges"]
 
 
+def waitlist():
+    """People waiting for access, one per (lowercased) email."""
+    return get_db()["waitlist"]
+
+
 def oauth_tokens():
     return get_db()["oauth_tokens"]
 
@@ -203,6 +208,7 @@ async def ensure_indexes() -> None:
     await account_merges().create_index([("status", 1), ("updated_at", 1)])
     await account_merges().create_index("absorbed_id")
     await account_merges().create_index("survivor_id")
+    await waitlist().create_index("email", unique=True)
     await workspace_members().create_index([("workspace_id", 1), ("user_id", 1)], unique=True)
     await workspace_members().create_index("user_id")
     await workspace_invites().create_index("token_hash", unique=True)

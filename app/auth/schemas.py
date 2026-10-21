@@ -38,7 +38,9 @@ class Me(BaseModel):
         )
 
 
-class _Email(BaseModel):
+class EmailAddress(BaseModel):
+    """A request carrying one email, normalized the way accounts and lookups store it."""
+
     email: EmailStr = Field(max_length=254)
 
     @field_validator("email")
@@ -60,7 +62,7 @@ class _NewAccount(BaseModel):
         return value.strip()
 
 
-class SignupRequest(_NewAccount, _Email):
+class SignupRequest(_NewAccount, EmailAddress):
     pass
 
 
@@ -68,11 +70,11 @@ class InviteSignupRequest(_NewAccount):
     token: str = Field(min_length=1, max_length=128)
 
 
-class LoginRequest(_Email):
+class LoginRequest(EmailAddress):
     password: str = Password
 
 
-class ForgotPasswordRequest(_Email):
+class ForgotPasswordRequest(EmailAddress):
     pass
 
 
@@ -128,7 +130,7 @@ class AuthorizationUrl(BaseModel):
     authorization_url: str
 
 
-class AddEmailRequest(_Email):
+class AddEmailRequest(EmailAddress):
     password: str = Password
 
 
