@@ -16,7 +16,10 @@ costs more than parsing a handful of files.
 """
 
 import os
-import resource
+try:
+    import resource
+except ImportError:
+    resource = None
 import signal
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, wait
@@ -101,11 +104,14 @@ def _available_memory_mb() -> int | None:
 def _init_worker(memory_mb: int) -> None:
     """Cap this worker's memory and stop it reacting to the parent's signals."""
     limit_bytes = memory_mb * 1024 * 1024
-    try:
-        _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-        ceiling = limit_bytes if hard == resource.RLIM_INFINITY else min(limit_bytes, hard)
-        resource.setrlimit(resource.RLIMIT_AS, (ceiling, hard))
-    except (ValueError, OSError):  # not supported on this platform
+    if resource is not None:
+        try:
+            _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+            ceiling = limit_bytes if hard == resource.RLIM_INFINITY else min(limit_bytes, hard)
+            resource.setrlimit(resource.RLIMIT_AS, (ceiling, hard))
+        except (ValueError, OSError):  # not supported on this platform
+            logger.info("worker_memory_limit_unavailable")
+    else:
         logger.info("worker_memory_limit_unavailable")
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 

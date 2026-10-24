@@ -40,9 +40,20 @@ async def _tracker_sync_loop(interval_seconds: int) -> None:
     # a pass at once, so a restart doesn't leave boards a whole interval behind
     while True:
         try:
-            await jobs.resync_all_targets()
+            await jobs.resync_tracker_targets()
         except Exception:
             structlog.get_logger("app.jobs").exception("tracker_sync_loop_error")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _doc_sync_loop(interval_seconds: int) -> None:
+    """Poll document sources (Confluence etc.) on their own shorter interval."""
+    # a pass at once, so a restart doesn't leave spaces a whole interval behind
+    while True:
+        try:
+            await jobs.resync_doc_targets()
+        except Exception:
+            structlog.get_logger("app.jobs").exception("doc_sync_loop_error")
         await asyncio.sleep(interval_seconds)
 
 
@@ -107,10 +118,14 @@ async def lifespan(app: FastAPI):
     sync_task = asyncio.create_task(
         _tracker_sync_loop(get_settings().ticket_sync_interval_seconds)
     )
+    doc_sync_task = asyncio.create_task(
+        _doc_sync_loop(get_settings().doc_sync_interval_seconds)
+    )
     docs_task = asyncio.create_task(_docs_loop(get_settings().doc_push_interval_seconds))
     merge_task = asyncio.create_task(_merge_loop())
     yield
     sync_task.cancel()
+    doc_sync_task.cancel()
     docs_task.cancel()
     merge_task.cancel()
     mongo.close()
