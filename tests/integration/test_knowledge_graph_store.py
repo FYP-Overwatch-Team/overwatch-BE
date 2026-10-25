@@ -470,3 +470,75 @@ async def test_rollup_is_scoped_to_one_repository(store):
 async def test_rollup_rejects_an_edge_type_we_do_not_define(store):
     with pytest.raises(ValueError):
         await store.rollup_edges(REPO, edge_types=["DROP DATABASE"])
+
+
+async def test_follow_takes_one_hop_along_the_asked_edges_each_way(store):
+    await store.apply(detail_delta())
+    file, handler, helper = f"{REPO}:api/handlers.py", f"{REPO}:api/handlers.py#handle", f"{REPO}:api/handlers.py#helper"
+
+    defined = await store.follow(REPO, [file], out_types=["DEFINES"])
+    called = await store.follow(REPO, [handler], out_types=["CALLS"])
+    callers = await store.follow(REPO, [helper], in_types=["CALLS"])
+
+    assert {row["id"] for row in defined} == {handler, helper}
+    assert [(row["origin"], row["source"], row["target"], row["type"], row["count"]) for row in called] == [
+        (handler, handler, helper, "CALLS", 2),
+    ]
+    assert called[0]["name"] == "helper" and "Symbol" in called[0]["labels"]
+    assert [row["id"] for row in callers] == [handler]
+
+
+async def test_follow_keeps_the_most_used_edges_of_each_node(store):
+    await store.apply(detail_delta())
+    file = f"{REPO}:api/handlers.py"
+
+    rows = await store.follow(REPO, [file], out_types=["DEFINES"], per_node=1)
+
+    assert len(rows) == 1
+
+
+async def test_follow_doesnt_let_a_busy_node_crowd_out_the_others(store):
+    hub, quiet = f"{REPO}:a.py#hub", f"{REPO}:b.py#quiet"
+    callees = [f"{REPO}:c.py#f{index}" for index in range(5)]
+    await store.apply(GraphDelta(
+        repo_full_name=REPO, version="sha-1",
+        upserted_nodes=tuple(
+            GraphNode(node_id, NodeLabel.SYMBOL, {"name": node_id.rsplit("#", 1)[1]}) for node_id in [hub, quiet, *callees]
+        ),
+        upserted_edges=(
+            *(GraphEdge(hub, callee, EdgeType.CALLS, {"count": 9}) for callee in callees),
+            GraphEdge(quiet, callees[0], EdgeType.CALLS, {"count": 1}),
+        ),
+    ))
+
+    rows = await store.follow(REPO, [hub, quiet], out_types=["CALLS"], per_node=2, limit=3)
+
+    assert sorted(row["origin"] for row in rows) == [hub, hub, quiet]
+
+
+async def test_follow_stays_inside_its_repository(store):
+    await store.apply(detail_delta())
+    await store.apply(detail_delta(OTHER_REPO))
+
+    rows = await store.follow(REPO, [f"{OTHER_REPO}:api/handlers.py"], out_types=["DEFINES"])
+
+    assert rows == []
+
+
+async def test_repo_map_lists_files_near_the_given_folders_then_the_most_used(store):
+    await store.apply(GraphDelta(
+        repo_full_name=REPO, version="sha-1",
+        upserted_nodes=tuple(
+            GraphNode(f"{REPO}:{path}", NodeLabel.FILE, {"path": path, "rank": rank, "key_symbols": symbols})
+            for path, rank, symbols in (
+                ("api/handlers.py", 1, ["handle"]), ("lib/db.py", 9, ["query", "connect"]), ("lib/log.py", 3, []),
+            )
+        ),
+    ))
+
+    anywhere = await store.repo_map(REPO)
+    near_api = await store.repo_map(REPO, near=["api"], limit=2)
+
+    assert [row["path"] for row in anywhere] == ["lib/db.py", "lib/log.py", "api/handlers.py"]
+    assert anywhere[0]["key_symbols"] == ["query", "connect"]
+    assert [row["path"] for row in near_api] == ["api/handlers.py", "lib/db.py"]

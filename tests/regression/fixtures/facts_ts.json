@@ -35,6 +35,7 @@
       }
     ],
     "content_hash": "b86d290f9719f6458fccdb506e0f39351879d0a9b4e0b1d386b6c9070b77ba16",
+    "default_export": null,
     "definitions": [
       {
         "docstring": null,
@@ -53,6 +54,8 @@
     "imports": [
       {
         "alias": "express",
+        "exported_as": [],
+        "is_reexport": false,
         "is_type_only": false,
         "is_wildcard": false,
         "line": 1,
@@ -63,6 +66,8 @@
       },
       {
         "alias": null,
+        "exported_as": [],
+        "is_reexport": false,
         "is_type_only": false,
         "is_wildcard": false,
         "line": 2,
@@ -75,7 +80,7 @@
     "inheritance": [],
     "language": "typescript",
     "loc": 10,
-    "parser_version": 2,
+    "parser_version": 3,
     "path": "api/server.ts",
     "renders": [],
     "routes": [
@@ -101,12 +106,15 @@
       }
     ],
     "content_hash": "83c5be0a53f217b76179a353d973a6068585df6c40363499a83cdcaac10cf47c",
+    "default_export": null,
     "definitions": [],
     "has_syntax_errors": false,
     "http_calls": [],
     "imports": [
       {
         "alias": null,
+        "exported_as": [],
+        "is_reexport": false,
         "is_type_only": false,
         "is_wildcard": false,
         "line": 1,
@@ -119,7 +127,7 @@
     "inheritance": [],
     "language": "typescript",
     "loc": 4,
-    "parser_version": 2,
+    "parser_version": 3,
     "path": "index.ts",
     "renders": [],
     "routes": [],
@@ -145,6 +153,7 @@
       }
     ],
     "content_hash": "0b49983f2eb3999886a03f54ee5a0cb1aebca85d5da8ca418d347dcba2a9ece2",
+    "default_export": null,
     "definitions": [
       {
         "docstring": null,
@@ -185,6 +194,8 @@
     "imports": [
       {
         "alias": null,
+        "exported_as": [],
+        "is_reexport": false,
         "is_type_only": false,
         "is_wildcard": false,
         "line": 1,
@@ -197,7 +208,7 @@
     "inheritance": [],
     "language": "typescript",
     "loc": 12,
-    "parser_version": 2,
+    "parser_version": 3,
     "path": "services/user.ts",
     "renders": [],
     "routes": [],
@@ -215,6 +226,7 @@
       }
     ],
     "content_hash": "b09506c0c9adab9cc3566852f301542fddbd1f1e046d43de0141b0d1486245f8",
+    "default_export": null,
     "definitions": [
       {
         "docstring": null,
@@ -234,7 +246,7 @@
     "inheritance": [],
     "language": "typescript",
     "loc": 2,
-    "parser_version": 2,
+    "parser_version": 3,
     "path": "utils/format.ts",
     "renders": [],
     "routes": [],

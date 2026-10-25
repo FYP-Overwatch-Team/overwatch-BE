@@ -253,3 +253,14 @@ def test_full_delta_writes_everything():
 def test_diffing_across_repositories_is_refused():
     with pytest.raises(ValueError):
         diff_snapshots(snapshot_of(), replace(snapshot_of(), repo_full_name="someone/else"))
+
+
+def test_files_are_ranked_by_how_much_other_code_uses_them():
+    files = {node.properties["path"]: node.properties for node in snapshot_of().nodes if node.label == "File"}
+
+    # imported once and called once; it uses nothing itself
+    assert files["services/users.py"]["rank"] == 2
+    assert files["services/users.py"]["key_symbols"] == ["get_user"]
+    # imported once, and imports and calls into another file
+    assert files["api/handlers.py"]["rank"] == 2
+    assert files["main.py"]["rank"] == 0.5

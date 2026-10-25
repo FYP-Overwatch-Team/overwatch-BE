@@ -4,7 +4,7 @@ import pytest
 
 from app.knowledge_graph.link.imports import TargetKind, npm_package_name, resolve_import
 from app.knowledge_graph.link.module_index import ModuleIndex
-from app.knowledge_graph.project_config import ProjectConfig
+from app.knowledge_graph.project_config import ProjectConfig, TsScope, WorkspacePackage
 
 JS_FILES = [
     "app/page.tsx",
@@ -180,3 +180,58 @@ def test_third_party_python_imports_become_packages():
 
 def test_empty_specifier_is_unresolved():
     assert resolve("main.py", "   ").kind is TargetKind.UNRESOLVED
+
+
+# -- packages of this repository (monorepos) ----------------------------------
+
+MONOREPO = [
+    "apps/web/app/page.tsx",
+    "apps/web/lib/api.ts",
+    "packages/features/src/auth/SignupForm/index.tsx",
+    "packages/features/src/billing/index.ts",
+    "packages/ui/src/index.ts",
+    "packages/ui/src/button.tsx",
+]
+WORKSPACE = ProjectConfig(
+    workspace_packages={
+        "@acme/features": WorkspacePackage(
+            "packages/features",
+            exports={"./auth/signup": ("./src/auth/SignupForm/index.tsx",), "./*": ("./src/*/index.ts",)},
+        ),
+        "@acme/ui": WorkspacePackage("packages/ui", entry=("./dist/index.js",)),
+    },
+    ts_scopes=(TsScope("apps/web", None, {"@/*": ("./*",)}),),
+)
+
+
+@pytest.mark.parametrize(
+    "specifier,expected",
+    [
+        ("@acme/features/auth/signup", "packages/features/src/auth/SignupForm/index.tsx"),  # exact export
+        ("@acme/features/billing", "packages/features/src/billing/index.ts"),  # wildcard export
+        ("@acme/ui", "packages/ui/src/index.ts"),  # no exports, built entry missing: src/index
+        ("@acme/ui/src/button", "packages/ui/src/button.tsx"),  # no exports: the path under the package
+    ],
+)
+def test_a_package_of_this_repository_resolves_to_its_file(specifier, expected):
+    target = resolve("apps/web/app/page.tsx", specifier, MONOREPO, WORKSPACE)
+
+    assert (target.kind, target.value) == (TargetKind.FILE, expected)
+
+
+def test_an_export_this_repository_doesnt_have_is_still_a_package():
+    target = resolve("apps/web/app/page.tsx", "@acme/features/missing/thing", MONOREPO, WORKSPACE)
+
+    assert (target.kind, target.value) == (TargetKind.PACKAGE, "@acme/features")
+
+
+def test_a_nested_tsconfig_applies_to_the_files_under_it():
+    assert resolve("apps/web/app/page.tsx", "@/lib/api", MONOREPO, WORKSPACE).value == "apps/web/lib/api.ts"
+    # outside apps/web the root tsconfig, which has no alias, applies
+    assert resolve("packages/ui/src/index.ts", "@/lib/api", MONOREPO, WORKSPACE).kind is TargetKind.PACKAGE
+
+
+def test_an_alias_inherited_from_a_parent_tsconfig_resolves_from_where_it_was_declared():
+    config = ProjectConfig(ts_scopes=(TsScope("apps/web", None, {"@ui/*": ("../../packages/ui/src/*",)}),))
+
+    assert resolve("apps/web/app/page.tsx", "@ui/index", MONOREPO, config).value == "packages/ui/src/index.ts"

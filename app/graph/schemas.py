@@ -10,6 +10,9 @@ from app.knowledge_graph.view.model import VIEWABLE_EDGE_TYPES, VIEWABLE_NODE_LA
 #: so a larger list is rejected at the edge rather than silently ignored.
 MAX_EXPANDED = 64
 MAX_NODE_ID = 512
+MAX_SOURCE_PATH = 1024
+#: Lines of a file sent for reading; longer files are cut, which is plenty for any citation.
+MAX_SOURCE_FILE_LINES = 5_000
 
 #: A node id as it arrives from a client. Bounded, and never concatenated into a query.
 NodeId = Annotated[str, Field(min_length=1, max_length=MAX_NODE_ID)]
@@ -201,3 +204,18 @@ class GraphStats(BaseModel):
     symbol_layer: Any
     resolution: Any
     skipped: Any
+
+
+class SourceFile(BaseModel):
+    """A file of the repository as of one commit, for reading the code an answer cites."""
+
+    path: str
+    commit_sha: str
+    #: what to highlight it as; null when unknown
+    language: str | None
+    #: the first `MAX_SOURCE_FILE_LINES` lines at most
+    content: str
+    line_count: int
+    truncated: bool
+    #: whether `commit_sha` is the commit the graph is built from now
+    is_current: bool

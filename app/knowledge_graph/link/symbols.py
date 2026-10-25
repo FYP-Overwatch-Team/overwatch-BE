@@ -34,6 +34,10 @@ from app.knowledge_graph.project_config import ProjectConfig
 
 #: Receivers that mean "the class this code is in".
 SELF_RECEIVERS = frozenset({"self", "this"})
+#: The name a default import or `export default` stands for.
+DEFAULT_EXPORT = "default"
+#: Barrels re-exporting barrels: how many files a name is followed through.
+MAX_REEXPORT_DEPTH = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +70,12 @@ class _FileTable:
         #: but known destinations, so they are reported separately from
         #: references we genuinely cannot resolve.
         self.packages: dict[str, str] = {}
+        #: What `export default` names here, followed like any other name.
+        self.default_export = facts.default_export
+        #: Names this file passes on from others (`export { a } from "./x"`),
+        #: and files it passes everything on from (`export * from "./x"`).
+        self.reexports: dict[str, _Binding] = {}
+        self.star_reexports: list[str] = []
 
     def package_for(self, callee: str) -> str | None:
         """The package a reference comes from, if its root name was imported."""
@@ -172,6 +182,14 @@ def _bind_imports(
         counters["imports_total"] += 1
         target = resolve_import(facts.path, reference.specifier, index, config)
 
+        if reference.is_reexport:
+            # passes names on rather than using them; counted and linked like an import
+            if target.kind is TargetKind.FILE:
+                _bind_reexports(table, reference, target.value)
+            elif target.kind is TargetKind.PACKAGE:
+                counters["imports_to_packages"] += 1
+                continue
+
         if target.kind is TargetKind.PACKAGE:
             counters["imports_to_packages"] += 1
             package_uses[(facts.path, target.value)].update(reference.names)
@@ -192,7 +210,18 @@ def _bind_imports(
                     line=reference.line,
                 )
             )
-        _bind_file_names(table, reference, target.value)
+        if not reference.is_reexport:
+            _bind_file_names(table, reference, target.value)
+
+
+def _bind_reexports(table: _FileTable, reference, target_file: str) -> None:
+    """Record what a barrel passes on, so a name imported from it reaches its definition."""
+    if reference.is_wildcard:
+        if reference.alias is None:  # `export * as ns` names a module, not a definition
+            table.star_reexports.append(target_file)
+        return
+    for name, exported in zip(reference.names, reference.exported_as, strict=False):
+        table.reexports[exported] = _Binding(target_file, name)
 
 
 def _bind_file_names(table: _FileTable, reference, target_file: str) -> None:
@@ -202,11 +231,12 @@ def _bind_file_names(table: _FileTable, reference, target_file: str) -> None:
         return
 
     for name in reference.names:
-        if name == "default":
-            # `import express from "express"`: the local alias stands for the
-            # module, not for a definition we can name.
+        if name == DEFAULT_EXPORT:
+            # `import SignupForm from "./form"`: the alias is the file's default
+            # export, and for a module object (`express.Router()`) the module.
             if reference.alias:
                 table.namespaces[reference.alias] = _Binding(target_file)
+                table.imports[reference.alias] = _Binding(target_file, DEFAULT_EXPORT)
         else:
             table.imports[name] = _Binding(target_file, name)
 
@@ -330,15 +360,43 @@ def _resolve_simple(
 
 
 def _resolve_in_file(
-    name: str, file: str, tables: Mapping[str, _FileTable],
+    name: str, file: str, tables: Mapping[str, _FileTable], depth: int = 0,
 ) -> SymbolRef | None:
+    """A name as another file exports it: defined there, its default export, or passed on by it."""
     target_table = tables.get(file)
     if target_table is None:
         return None
+    if name == DEFAULT_EXPORT:
+        reexported = target_table.reexports.get(DEFAULT_EXPORT)
+        if reexported is not None:
+            return _follow(reexported, tables, depth)
+        if target_table.default_export is None:
+            return None
+        name = target_table.default_export
+        # `import login from "./x"; export default login`
+        imported = target_table.imports.get(name)
+        if name not in target_table.by_name and imported is not None and imported.symbol is not None:
+            return _follow(imported, tables, depth)
     qualified = target_table.by_name.get(name)
-    if qualified is None:
+    if qualified is not None:
+        return SymbolRef(file, qualified)
+
+    reexported = target_table.reexports.get(name)
+    if reexported is not None:
+        return _follow(reexported, tables, depth)
+    if depth >= MAX_REEXPORT_DEPTH:
         return None
-    return SymbolRef(file, qualified)
+    for star in target_table.star_reexports:
+        found = _resolve_in_file(name, star, tables, depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+def _follow(binding: _Binding, tables: Mapping[str, _FileTable], depth: int) -> SymbolRef | None:
+    if depth >= MAX_REEXPORT_DEPTH or binding.symbol is None:
+        return None
+    return _resolve_in_file(binding.symbol, binding.file, tables, depth + 1)
 
 
 def _resolve_member_of_enclosing_class(

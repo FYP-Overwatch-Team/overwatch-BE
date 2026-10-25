@@ -105,6 +105,28 @@ class KnowledgeGraphStore(Protocol):
     ) -> dict:
         """What a node references and what references it."""
 
+    async def follow(
+        self,
+        repo_full_name: str,
+        node_ids: Sequence[str],
+        *,
+        out_types: Sequence[str] = (),
+        in_types: Sequence[str] = (),
+        per_node: int = 6,
+        limit: int = 40,
+    ) -> list[dict]:
+        """One hop from each node: along `out_types` edges it starts, back along `in_types` edges that end at it.
+
+        Each row is `origin` (the node followed from), the edge (`source`, `target`,
+        `type`, `count`) and the node reached, with what's needed to read its code.
+        The most used edges come first, at most `per_node` from each node.
+        """
+
+    async def repo_map(
+        self, repo_full_name: str, *, near: Sequence[str] = (), limit: int = 40,
+    ) -> list[dict]:
+        """Files as `id`, `path`, `rank`, `key_symbols`: those under the `near` folders first, then the most used."""
+
     async def search(
         self, repo_full_name: str, term: str, *, limit: int = 20,
     ) -> list[dict]:

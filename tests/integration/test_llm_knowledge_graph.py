@@ -1,13 +1,26 @@
 """Grounding on the knowledge graph: retrieved context, validated answers."""
 
+import asyncio
+import json
+
 import pytest
 
 from app.core.config import get_settings
 from app.knowledge_graph.build.model import EdgeType, GraphDelta, GraphEdge, GraphNode, NodeLabel
 from app.query import service as grounding
-from app.integrations.gemini_client import Turn
-from app.query.context import Relation, build_ask_context, build_flow_context, keywords, owning_module_id
-from app.query.grounding import CANNOT_DETERMINE
+from app.integrations.llm import Turn
+from app.query.context import (
+    Relation,
+    ShownSource,
+    open_ask_context,
+    owning_module_id,
+    rank_matches,
+    search_terms,
+)
+from app.integrations.llm import ToolCall
+from app.query.grounding import CANNOT_DETERMINE, ground
+from app.query.tools import ALREADY_LOOKED_UP, GREP_CODE, NO_CODE, READ_CODE, SEARCH_GRAPH, Lookups
+from tests.git_fixtures import commit_all
 from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
     use_knowledge_graph_store,
@@ -19,6 +32,21 @@ FILE = f"{REPO}:api/handlers.py"
 HANDLER = f"{FILE}#handle_login"
 HELPER = f"{REPO}:services/auth.py#verify_password"
 OTHER_REPO = "someone/else"
+
+
+async def build_ask_context(store, repo_full_name, question, **options):
+    return (await open_ask_context(store, repo_full_name, question, **options)).build()
+
+
+def keywords(question: str) -> list[str]:
+    return search_terms(question)[0]
+
+
+async def answer(repo_full_name, question, **options):
+    async for event in grounding.answer_stream(repo_full_name, question, **options):
+        if isinstance(event, grounding.Answered):
+            return event.result
+    raise AssertionError("the stream ended without an answer")
 
 
 @pytest.fixture(autouse=True)
@@ -161,10 +189,10 @@ def test_keywords_trim_plurals_but_not_double_s():
 def checkout(tmp_path, monkeypatch):
     monkeypatch.setenv("REPOS_DIR", str(tmp_path / "repos"))
     get_settings.cache_clear()
-    root = tmp_path / "repos" / "octocat__hello-world" / "api"
-    root.mkdir(parents=True)
-    (root / "handlers.py").write_text("import x\n\ndef handle_login(request):\n    return verify_password(request.hash)\n")
-    yield root
+    root = tmp_path / "repos" / "octocat__hello-world"
+    (root / "api").mkdir(parents=True)
+    (root / "api" / "handlers.py").write_text("import x\n\ndef handle_login(request):\n    return verify_password(request.hash)\n")
+    yield commit_all(root)
     get_settings.cache_clear()
 
 
@@ -181,17 +209,22 @@ async def with_lines(graph):
 async def test_context_shows_the_code_of_the_selected_function(graph, checkout):
     await with_lines(graph)
 
-    context = await build_ask_context(graph, REPO, "how does this work?", selected_node_id=HANDLER)
+    context = await build_ask_context(graph, REPO, "how does this work?", selected_node_id=HANDLER, commit=checkout)
 
-    assert f"Source of [{ref_of(context, HANDLER)}] handle_login (api/handlers.py:3-4):" in context.text
+    assert f"Source s1 of [{ref_of(context, HANDLER)}] handle_login (api/handlers.py:3-4):" in context.text
     assert "      3 | def handle_login(request):" in context.text
     assert "      4 |     return verify_password(request.hash)" in context.text
+    assert context.commit == checkout
+    assert context.sources["s1"] == ShownSource(
+        "api/handlers.py", 3, 4, ("def handle_login(request):", "    return verify_password(request.hash)"),
+        HANDLER, "python",
+    )
 
 
 async def test_context_shows_the_code_of_a_matched_function(graph, checkout):
     await with_lines(graph)
 
-    context = await build_ask_context(graph, REPO, "explain handle_login")
+    context = await build_ask_context(graph, REPO, "explain handle_login", commit=checkout)
 
     assert "def handle_login(request):" in context.text
 
@@ -199,20 +232,50 @@ async def test_context_shows_the_code_of_a_matched_function(graph, checkout):
 async def test_context_shows_the_code_of_functions_in_an_open_folder(graph, checkout):
     await with_lines(graph)
 
-    context = await build_ask_context(graph, REPO, "explain everything here", open_folder_ids=[MODULE])
+    context = await build_ask_context(graph, REPO, "explain everything here", open_folder_ids=[MODULE], commit=checkout)
 
-    assert f"Source of [{ref_of(context, HANDLER)}] handle_login (api/handlers.py:3-4):" in context.text
+    assert f"Source s1 of [{ref_of(context, HANDLER)}] handle_login (api/handlers.py:3-4):" in context.text
 
 
 async def test_context_keeps_source_within_its_budget(monkeypatch, graph, checkout):
     await with_lines(graph)
     monkeypatch.setattr("app.query.context.MAX_SOURCE_LINES", 1)
 
-    context = await build_ask_context(graph, REPO, "how?", selected_node_id=HANDLER)
+    context = await build_ask_context(graph, REPO, "how?", selected_node_id=HANDLER, commit=checkout)
 
     assert "def handle_login(request):" in context.text
     assert "return verify_password" not in context.text
     assert "  … 1 more lines" in context.text
+    # only the line that was shown can be cited
+    assert (context.sources["s1"].start_line, context.sources["s1"].end_line) == (3, 3)
+
+
+async def test_source_lines_cut_by_the_context_budget_cant_be_cited(monkeypatch, graph, checkout):
+    await with_lines(graph)
+    monkeypatch.setattr("app.query.context.MAX_CONTEXT_LINES", 3)
+
+    context = await build_ask_context(graph, REPO, "how?", selected_node_id=HANDLER, commit=checkout)
+
+    shown = context.sources.get("s1")
+    assert shown is None or all(f"{n:>5} | " in context.text for n in range(shown.start_line, shown.end_line + 1))
+
+
+async def test_code_an_earlier_answer_cited_is_shown_again(graph, checkout):
+    context = await build_ask_context(
+        graph, REPO, "and then?", earlier_ranges=[("api/handlers.py", 3, 4)], commit=checkout,
+    )
+
+    assert "Source s1 (api/handlers.py:3-4), cited earlier:" in context.text
+    assert context.sources["s1"].node_id is None
+
+
+async def test_context_without_a_commit_shows_no_code(graph, checkout):
+    await with_lines(graph)
+
+    context = await build_ask_context(graph, REPO, "how?", selected_node_id=HANDLER)
+
+    assert "Source s" not in context.text
+    assert context.sources == {}
 
 
 async def test_context_without_a_checkout_has_no_source(graph):
@@ -220,7 +283,7 @@ async def test_context_without_a_checkout_has_no_source(graph):
 
     context = await build_ask_context(graph, REPO, "how?", selected_node_id=HANDLER)
 
-    assert "Source of" not in context.text
+    assert "Source s" not in context.text
     assert HANDLER in context.nodes.values()
 
 
@@ -234,6 +297,29 @@ async def test_context_is_bounded_and_only_counts_what_was_shown(monkeypatch, gr
     # nothing cut by the budget can be cited or relied on
     assert all(f"[{ref}]" in context.text for ref in context.nodes)
     assert context.relations == frozenset()
+
+
+def test_a_verb_and_its_particle_are_searched_as_one_word_first():
+    assert search_terms("Walk me through what happens when a student signs up") == (
+        ["signup", "student", "sign"], frozenset({"signup"}),
+    )
+    assert keywords("how do users log in?") == ["login", "user", "log"]
+
+
+def test_keywords_drop_verb_endings():
+    assert keywords("uploading embedded running") == ["upload", "embed", "run"]
+
+
+def test_names_that_fit_the_question_rank_first():
+    rows = [
+        {"id": "r:a/design.ts#design", "name": "design", "path": None},
+        {"id": "r:auth/signup/page.tsx", "name": "page.tsx", "path": "auth/signup/page.tsx"},
+        {"id": "r:auth/form.tsx#SignupForm", "name": "SignupForm", "path": None},
+    ]
+
+    ranked = rank_matches(rows, ["signup", "sign"], frozenset({"signup"}))
+
+    assert [row["name"] for row in ranked] == ["SignupForm", "page.tsx", "design"]
 
 
 def test_keywords_ignore_filler_words():
@@ -254,78 +340,266 @@ def test_owning_module_is_derived_from_a_file_or_symbol_id():
 # -- Answers ---------------------------------------------------------------
 
 
-async def test_answer_cites_nodes_with_their_modules(graph, fake_gemini):
+async def test_answer_cites_nodes_with_their_modules(graph, fake_llm):
     context = await build_ask_context(graph, REPO, "what does handle_login call?")
     handler, helper = ref_of(context, HANDLER), ref_of(context, HELPER)
-    fake_gemini.json_response = {
+    fake_llm.json_response = {
         "answer": f"handle_login [{handler}] calls verify_password [{helper}].",
         "answerable": True,
-        "cited_refs": [handler, helper],
         "relations": [{"source": handler, "type": "calls", "target": helper}],
     }
 
-    result = await grounding.answer(REPO, "what does handle_login call?")
+    result = await answer(REPO, "what does handle_login call?")
 
     assert result.grounded
     assert [(c.node_id, c.module_id) for c in result.citations] == [(HANDLER, MODULE), (HELPER, f"{REPO}:services")]
 
 
-async def test_answer_refuses_a_relationship_the_graph_lacks(graph, fake_gemini):
+async def test_answer_refuses_a_relationship_the_graph_lacks(graph, fake_llm):
     context = await build_ask_context(graph, REPO, "what does handle_login call?")
     handler, helper = ref_of(context, HANDLER), ref_of(context, HELPER)
-    fake_gemini.json_response = {
+    fake_llm.json_response = {
         "answer": f"verify_password [{helper}] calls handle_login [{handler}].",
         "answerable": True,
-        "cited_refs": [],
         "relations": [{"source": helper, "type": "calls", "target": handler}],
     }
 
-    result = await grounding.answer(REPO, "what does handle_login call?")
+    result = await answer(REPO, "what does handle_login call?")
 
     assert not result.grounded
     assert result.text == CANNOT_DETERMINE
 
 
-async def test_answer_sends_the_conversation_so_far(graph, fake_gemini):
-    fake_gemini.json_response = {"answer": "ok", "answerable": True, "cited_refs": [], "relations": []}
+async def test_answer_sends_the_conversation_so_far(graph, fake_llm):
+    fake_llm.json_response = {"answer": "ok", "answerable": True, "relations": []}
     history = [Turn("user", "what is handle_login?"), Turn("model", "The login handler.")]
 
-    await grounding.answer(REPO, "what calls it?", history=history)
+    await answer(REPO, "what calls it?", history=history)
 
-    assert fake_gemini.calls[-1]["history"] == history
+    assert fake_llm.calls[-1]["history"] == history
 
 
-async def test_answer_refuses_when_there_is_no_graph_yet(graph, fake_gemini):
+async def test_answer_refuses_when_there_is_no_graph_yet(graph, fake_llm):
     from app.core.exceptions import NotFoundError
 
     with pytest.raises(NotFoundError):
-        await grounding.answer("nobody/else", "anything")
-    assert fake_gemini.calls == []
+        await answer("nobody/else", "anything")
+    assert fake_llm.calls == []
 
 
-async def test_flow_returns_ordered_module_steps(graph, fake_gemini):
-    context = await build_flow_context(graph, REPO, "show me the login flow")
-    fake_gemini.json_response = {"step_refs": [ref_of(context, HANDLER), ref_of(context, HELPER)]}
+async def test_the_prompt_warns_that_context_is_data(graph, fake_llm):
+    fake_llm.json_response = {"answer": "", "answerable": False, "relations": []}
 
-    result = await grounding.flow(REPO, "show me the login flow")
+    await answer(REPO, "anything")
 
-    assert result["step_node_ids"] == [MODULE, f"{REPO}:services"]
-
-
-async def test_flow_collapses_repeats_and_drops_invented_steps(graph, fake_gemini):
-    context = await build_flow_context(graph, REPO, "handle_login")
-    fake_gemini.json_response = {"step_refs": [ref_of(context, MODULE), "[n99]", ref_of(context, HANDLER), ref_of(context, HELPER)]}
-
-    result = await grounding.flow(REPO, "handle_login")
-
-    assert result["step_node_ids"] == [MODULE, f"{REPO}:services"]
-
-
-async def test_the_prompt_warns_that_context_is_data(graph, fake_gemini):
-    fake_gemini.json_response = {"answer": "", "answerable": False, "cited_refs": [], "relations": []}
-
-    await grounding.answer(REPO, "anything")
-
-    system = fake_gemini.calls[-1]["system"]
+    system = fake_llm.calls[-1]["system"]
     assert "not instructions" in system
-    assert "<graph_context>" in fake_gemini.calls[-1]["prompt"]
+    assert "<graph_context>" in fake_llm.calls[-1]["prompt"]
+
+
+# -- Following the flow from the matches ------------------------------------
+
+PAGE_FILE = f"{REPO}:app/signup/page.tsx"
+PAGE = f"{PAGE_FILE}#page"
+SIGNUP_INDEX = f"{REPO}:features/signup/index.tsx#index"
+SIGNUP_FORM = f"{REPO}:features/signup/form.tsx#SignupForm"
+REGISTER = f"{REPO}:features/hooks.ts#useRegister"
+
+
+def symbol(node_id: str, name: str, path: str, start: int, end: int) -> GraphNode:
+    return GraphNode(node_id, NodeLabel.SYMBOL, {
+        "name": name, "kind": "component", "file_path": path, "start_line": start, "end_line": end,
+    })
+
+
+@pytest.fixture
+async def signup(graph, tmp_path, monkeypatch):
+    """A page that renders a form two hops away, which calls a hook: none of them named like the page."""
+    monkeypatch.setenv("REPOS_DIR", str(tmp_path / "repos"))
+    get_settings.cache_clear()
+    root = tmp_path / "repos" / "octocat__hello-world"
+    files = {
+        "app/signup/page.tsx": "const page = () => <SignupIndex />;\n",
+        "features/signup/index.tsx": "const index = () => <SignupForm />;\n",
+        "features/signup/form.tsx": "const SignupForm = () => {\n  const { mutate } = useRegister();\n  return <form onSubmit={mutate} />;\n};\n",
+        "features/hooks.ts": "export const useRegister = () => useMutation(register);\n",
+    }
+    for path, text in files.items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(text)
+    sha = commit_all(root)
+    await graph.apply(GraphDelta(
+        repo_full_name=REPO, version="sha-3",
+        upserted_nodes=(
+            GraphNode(PAGE_FILE, NodeLabel.FILE, {"name": "page.tsx", "path": "app/signup/page.tsx"}),
+            GraphNode(f"{REPO}:features/signup/form.tsx", NodeLabel.FILE, {"name": "form.tsx", "path": "features/signup/form.tsx"}),
+            symbol(PAGE, "page", "app/signup/page.tsx", 1, 1),
+            symbol(SIGNUP_INDEX, "index", "features/signup/index.tsx", 1, 1),
+            symbol(SIGNUP_FORM, "SignupForm", "features/signup/form.tsx", 1, 4),
+            symbol(REGISTER, "useRegister", "features/hooks.ts", 1, 1),
+        ),
+        upserted_edges=(
+            GraphEdge(PAGE_FILE, PAGE, EdgeType.DEFINES),
+            GraphEdge(PAGE, SIGNUP_INDEX, EdgeType.RENDERS, {"count": 1}),
+            GraphEdge(SIGNUP_INDEX, SIGNUP_FORM, EdgeType.RENDERS, {"count": 1}),
+            GraphEdge(SIGNUP_FORM, REGISTER, EdgeType.CALLS, {"count": 1}),
+        ),
+    ))
+    yield sha
+    get_settings.cache_clear()
+
+
+async def test_code_a_few_hops_from_the_match_is_shown(graph, signup):
+    context = await build_ask_context(graph, REPO, "what happens when a student signs up?", commit=signup)
+
+    assert "Followed from the matches:" in context.text
+    assert {PAGE, SIGNUP_INDEX, SIGNUP_FORM, REGISTER} <= set(context.nodes.values())
+    page, form, register = ref_of(context, PAGE), ref_of(context, SIGNUP_FORM), ref_of(context, REGISTER)
+    assert Relation(form, "calls", register) in context.relations
+    assert Relation(page, "renders", ref_of(context, SIGNUP_INDEX)) in context.relations
+    assert "const { mutate } = useRegister();" in context.text
+    assert any(source.node_id == SIGNUP_FORM for source in context.sources.values())
+
+
+async def test_following_stops_at_its_depth(graph, signup, monkeypatch):
+    monkeypatch.setattr("app.query.context.FLOW_DEPTH", 1)
+
+    context = await build_ask_context(graph, REPO, "how does this work?", mentioned_node_ids=[PAGE], commit=signup)
+
+    assert SIGNUP_INDEX in context.nodes.values()
+    assert SIGNUP_FORM not in context.nodes.values()
+
+
+async def test_files_beyond_whats_shown_are_listed_with_what_they_define(graph):
+    await graph.apply(GraphDelta(
+        repo_full_name=REPO, version="sha-4",
+        upserted_nodes=(GraphNode(f"{REPO}:lib/mailer.py", NodeLabel.FILE, {
+            "name": "mailer.py", "path": "lib/mailer.py", "rank": 5, "key_symbols": ["send_mail", "Template"],
+        }),),
+    ))
+
+    context = await build_ask_context(graph, REPO, "what does handle_login call?")
+
+    assert "Files in the repository:" in context.text
+    assert f"- [{ref_of(context, f'{REPO}:lib/mailer.py')}] lib/mailer.py: send_mail, Template" in context.text
+
+
+# -- Lookups the model makes while answering ----------------------------------
+
+
+async def lookups_for(graph, question: str, commit: str | None) -> Lookups:
+    builder = await open_ask_context(graph, REPO, question, commit=commit)
+    return Lookups(builder, graph, REPO, commit)
+
+
+def call(name: str, **arguments) -> ToolCall:
+    return ToolCall("c1", name, json.dumps(arguments))
+
+
+async def test_code_read_by_a_lookup_continues_the_numbering_and_can_be_cited(graph, signup):
+    lookups = await lookups_for(graph, "anything", signup)
+    before = lookups.builder.build()
+
+    found = await lookups.run(call(SEARCH_GRAPH, query="SignupForm"))
+    ref = next(r for r, node in lookups.builder.build().nodes.items() if node == SIGNUP_FORM)
+    read = await lookups.run(call(READ_CODE, ref=ref))
+
+    assert f"[{ref}] SignupForm" in found
+    source = f"s{len(before.sources) + 1}"
+    assert read.startswith(f"Source {source} of [{ref}] SignupForm (features/signup/form.tsx:1-4):")
+    after = lookups.builder.build()
+    assert after.text == before.text  # what was sent first stays as it was
+    assert after.sources[source].node_id == SIGNUP_FORM
+    result = ground(after, f"It registers [{source}:2] in SignupForm [{ref}].")
+    assert result.code_citations[0].code == "  const { mutate } = useRegister();"
+
+
+async def test_a_lookup_only_reads_files_the_graph_indexed(graph, signup):
+    lookups = await lookups_for(graph, "anything", signup)
+
+    assert await lookups.run(call(READ_CODE, path="features/hooks.ts")) == "error: that file isn't in the repository's index"
+    assert await lookups.run(call(READ_CODE, path="../../etc/passwd")) == "error: that file isn't in the repository's index"
+    assert (await lookups.run(call(READ_CODE, path="app/signup/page.tsx"))).startswith("Source ")
+
+
+async def test_bad_lookups_get_an_error_back(graph, signup):
+    lookups = await lookups_for(graph, "anything", signup)
+
+    assert await lookups.run(ToolCall("c1", READ_CODE, "not json")) == "error: the arguments must be a JSON object"
+    assert await lookups.run(call("delete_everything")) == "error: there is no tool called delete_everything"
+    assert await lookups.run(call(GREP_CODE, query="ab")) == "error: give at least three characters to search for"
+
+
+async def test_code_lookups_say_when_there_is_no_code_to_read(graph):
+    lookups = await lookups_for(graph, "anything", None)
+
+    assert await lookups.run(call(GREP_CODE, query="signup")) == NO_CODE
+    assert await lookups.run(call(READ_CODE, path="app/signup/page.tsx")) == NO_CODE
+
+
+async def test_a_lookup_finds_text_in_the_code(graph, signup):
+    lookups = await lookups_for(graph, "anything", signup)
+
+    found = await lookups.run(call(GREP_CODE, query="useRegister"))
+
+    assert "- features/signup/form.tsx:2" in found and "- features/hooks.ts:1" in found
+
+
+async def test_code_already_shown_gets_a_pointer_instead_of_a_second_copy(graph, signup):
+    lookups = await lookups_for(graph, "anything", signup)
+    await lookups.run(call(READ_CODE, path="features/signup/form.tsx"))
+    sources = len(lookups.builder.build().sources)
+
+    again = await lookups.run(call(READ_CODE, path="features/signup/form.tsx", start_line=2, end_line=3))
+
+    assert again == "already shown as s1 (features/signup/form.tsx, lines 1–4); cite it from there, or read on from line 5"
+    assert len(lookups.builder.build().sources) == sources
+    assert lookups.repeats == 1
+
+
+async def test_a_read_overlapping_whats_shown_reads_only_the_rest(graph, signup):
+    lookups = await lookups_for(graph, "anything", signup)
+    await lookups.run(call(READ_CODE, path="features/signup/form.tsx", start_line=1, end_line=2))
+
+    rest = await lookups.run(call(READ_CODE, path="features/signup/form.tsx", start_line=1, end_line=4))
+
+    assert rest.startswith("lines 1–2 are already shown as s1; reading on from line 3:\nSource s2")
+    assert lookups.builder.build().sources["s2"].start_line == 3
+
+
+async def test_the_same_read_twice_at_once_is_read_once(graph, signup):
+    lookups = await lookups_for(graph, "anything", signup)
+    read = call(READ_CODE, path="features/signup/form.tsx")
+
+    results = await asyncio.gather(lookups.run(read), lookups.run(read))
+
+    assert sorted(result[:6] for result in results) == ["Source", "alread"]
+    assert len(lookups.builder.build().sources) == 1
+
+
+async def test_a_repeated_search_or_relation_lookup_points_back(graph, signup):
+    lookups = await lookups_for(graph, "anything", signup)
+
+    first = await lookups.run(call(SEARCH_GRAPH, query="SignupForm"))
+    again = await lookups.run(call(SEARCH_GRAPH, query="  signupform "))
+
+    assert first.startswith("Matching definitions")
+    assert again == ALREADY_LOOKED_UP
+
+
+async def test_a_long_function_is_read_150_lines_at_a_time_and_says_where_to_go_on(graph, tmp_path, monkeypatch):
+    monkeypatch.setenv("REPOS_DIR", str(tmp_path / "repos"))
+    get_settings.cache_clear()
+    root = tmp_path / "repos" / "octocat__hello-world"
+    (root / "big.py").parent.mkdir(parents=True, exist_ok=True)
+    (root / "big.py").write_text("".join(f"x{n} = {n}\n" for n in range(1, 201)))
+    sha = commit_all(root)
+    await graph.apply(GraphDelta(repo_full_name=REPO, version="sha-5", upserted_nodes=(
+        GraphNode(f"{REPO}:big.py", NodeLabel.FILE, {"name": "big.py", "path": "big.py"}),
+    )))
+    lookups = await lookups_for(graph, "anything", sha)
+
+    read = await lookups.run(call(READ_CODE, path="big.py"))
+
+    assert "    150 | x150 = 150" in read and "x151" not in read
+    get_settings.cache_clear()

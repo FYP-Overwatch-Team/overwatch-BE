@@ -204,3 +204,44 @@ def test_unresolved_references_are_reported_rather_than_hidden():
     assert stats.calls_resolved == 0
     assert stats.calls_to_packages == 1  # thing() came from a package
     assert stats.calls_accounted == 0.5  # client.send() is genuinely unknown
+
+
+def render_edges(links):
+    return {
+        (e.source_file, e.source_symbol, e.target.file, e.target.qualified_name)
+        for e in links.edges_of(EdgeKind.RENDERS)
+    }
+
+
+def test_a_default_import_renders_the_default_export():
+    links = link({
+        "form.tsx": "const SignupForm = () => <form />;\nexport default SignupForm;\n",
+        "page.tsx": 'import Form from "./form";\nconst page = () => <Form />;\n',
+    })
+
+    assert render_edges(links) == {("page.tsx", "page", "form.tsx", "SignupForm")}
+
+
+def test_names_are_followed_through_barrels():
+    links = link({
+        "auth/form.tsx": "export default function SignupForm() { return <form />; }\n",
+        "auth/hooks.ts": "export function useRegister() {}\n",
+        "auth/index.ts": 'export { default as SignupForm } from "./form";\nexport * from "./hooks";\n',
+        "page.tsx": (
+            'import { SignupForm, useRegister } from "./auth";\n'
+            "const page = () => { useRegister(); return <SignupForm />; };\n"
+        ),
+    })
+
+    assert render_edges(links) == {("page.tsx", "page", "auth/form.tsx", "SignupForm")}
+    assert call_edges(links) == {("page.tsx", "page", "auth/hooks.ts", "useRegister")}
+
+
+def test_barrels_that_re_export_each_other_in_a_loop_resolve_nothing():
+    links = link({
+        "a.ts": 'export * from "./b";\n',
+        "b.ts": 'export * from "./a";\n',
+        "page.ts": 'import { missing } from "./a";\nfunction page() { missing(); }\n',
+    })
+
+    assert call_edges(links) == set()

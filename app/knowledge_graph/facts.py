@@ -20,7 +20,7 @@ from typing import Any
 
 # Bump whenever extraction changes shape or meaning. It is part of the cache
 # key, so a bump re-parses every file instead of mixing old and new facts.
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 
 # Symbol kinds. `component` is a function that returns JSX — worth its own kind
 # because React repositories are mostly components.
@@ -59,6 +59,10 @@ class ImportRef:
     line: int = 0
     is_wildcard: bool = False
     is_type_only: bool = False
+    #: `export { a as b } from "./x"`: passes names on rather than using them here.
+    is_reexport: bool = False
+    #: For a re-export, the name each of `names` is exported as, in the same order.
+    exported_as: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +143,8 @@ class FileFacts:
     inheritance: tuple[InheritanceRef, ...] = ()
     routes: tuple[RouteDef, ...] = ()
     http_calls: tuple[HttpCall, ...] = ()
+    #: The name `export default` points at, when it names a definition or an import.
+    default_export: str | None = None
     #: A cap was hit; the lists above are complete only up to that cap.
     truncated: bool = False
     #: The parser recovered from syntax errors. Facts are still usable —
@@ -197,6 +203,7 @@ class FactsBuilder:
     inheritance: list[InheritanceRef] = field(default_factory=list)
     routes: list[RouteDef] = field(default_factory=list)
     http_calls: list[HttpCall] = field(default_factory=list)
+    default_export: str | None = None
     truncated: bool = False
     has_syntax_errors: bool = False
 
@@ -244,6 +251,7 @@ class FactsBuilder:
             inheritance=tuple(sorted(self.inheritance, key=lambda i: (i.line, i.parent_name))),
             routes=tuple(sorted(self.routes, key=lambda r: (r.line, r.method, r.path))),
             http_calls=tuple(sorted(self.http_calls, key=lambda c: (c.line, c.method, c.path))),
+            default_export=self.default_export,
             truncated=self.truncated,
             has_syntax_errors=self.has_syntax_errors,
         )

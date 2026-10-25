@@ -6,8 +6,9 @@ tsconfig; in the user's own repository that is 98 of 173 internal imports.
 
 Resolution order follows what the toolchains actually do:
 
-* **JavaScript/TypeScript** — relative paths, then `paths` aliases, then
-  `baseUrl`, then a package name.
+* **JavaScript/TypeScript** — relative paths, then `paths` aliases and
+  `baseUrl` (from the nearest tsconfig), then a package of this repository
+  (a monorepo's own `@acme/ui`), then a package name.
 * **Python** — explicit relative imports, then each configured import root,
   then a distribution name.
 
@@ -15,11 +16,12 @@ Everything is computed against `ModuleIndex`; nothing here reads from disk.
 """
 
 import posixpath
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
 from app.knowledge_graph.link.module_index import ModuleIndex
-from app.knowledge_graph.project_config import ProjectConfig
+from app.knowledge_graph.project_config import ProjectConfig, TsScope, WorkspacePackage
 
 
 class TargetKind(StrEnum):
@@ -76,45 +78,79 @@ def _resolve_javascript(
             else ImportTarget(TargetKind.UNRESOLVED, specifier)
         )
 
-    for candidate in _alias_candidates(specifier, config):
+    scope = _scope_of(importer_path, config)
+    for candidate in _alias_candidates(specifier, scope):
         resolved = index.resolve_javascript(candidate)
         if resolved:
             return ImportTarget(TargetKind.FILE, resolved)
 
-    if config.ts_base_url is not None:
-        resolved = index.resolve_javascript(posixpath.join(config.ts_base_url, specifier))
+    if scope.base_url is not None:
+        resolved = index.resolve_javascript(posixpath.join(scope.base_url, specifier))
         if resolved:
             return ImportTarget(TargetKind.FILE, resolved)
 
-    return ImportTarget(TargetKind.PACKAGE, npm_package_name(specifier))
+    name = npm_package_name(specifier)
+    package = config.workspace_packages.get(name)
+    if package is not None:
+        resolved = _resolve_workspace(package, "." + specifier[len(name):], index)
+        if resolved:
+            return ImportTarget(TargetKind.FILE, resolved)
+
+    return ImportTarget(TargetKind.PACKAGE, name)
 
 
-def _alias_candidates(specifier: str, config: ProjectConfig) -> list[str]:
-    """Paths a tsconfig alias maps this specifier to, most specific first.
+def _scope_of(importer_path: str, config: ProjectConfig) -> TsScope:
+    """The tsconfig that applies to a file: the deepest one above it, else the root's."""
+    for scope in config.ts_scopes:
+        if importer_path.startswith(f"{scope.dir}/"):
+            return scope
+    return TsScope("", config.ts_base_url, config.ts_paths)
 
-    TypeScript allows one `*` per pattern; `@/*` -> `./src/*` means the text
-    matched by `*` is substituted into each target.
-    """
+
+def _resolve_workspace(package: WorkspacePackage, subpath: str, index: ModuleIndex) -> str | None:
+    """`./auth/signup` inside a package of this repository, as its `exports` map it."""
+    targets = list(_pattern_targets(subpath, package.exports))
+    if not package.exports:
+        # no `exports`: the entry for the package itself, else the path under it
+        targets += package.entry if subpath == "." else [subpath, f"./src/{subpath.removeprefix('./')}"]
+        targets.append("./src/index" if subpath == "." else "")
+    for target in targets:
+        if target:
+            resolved = index.resolve_javascript(posixpath.normpath(posixpath.join(package.dir, target)))
+            if resolved:
+                return resolved
+    return index.resolve_javascript(package.dir or ".") if subpath == "." else None
+
+
+def _pattern_targets(specifier: str, patterns: Mapping[str, tuple[str, ...]]) -> list[str]:
+    """Targets a pattern map (`{"./*": ["./src/*"]}`) gives this specifier, most specific first."""
     candidates: list[tuple[int, str]] = []
-    for pattern, targets in config.ts_paths.items():
+    for pattern, targets in patterns.items():
         if "*" in pattern:
             prefix, _, suffix = pattern.partition("*")
             if not specifier.startswith(prefix) or not specifier.endswith(suffix):
                 continue
             matched = specifier[len(prefix): len(specifier) - len(suffix) or None]
-            for target in targets:
-                candidates.append((len(prefix), _with_base(target.replace("*", matched), config)))
+            candidates += [(len(prefix), target.replace("*", matched)) for target in targets]
         elif specifier == pattern:
-            for target in targets:
-                candidates.append((len(pattern), _with_base(target, config)))
-
+            candidates += [(len(pattern), target) for target in targets]
     # Longer prefixes win, as in TypeScript's own resolution.
     candidates.sort(key=lambda item: item[0], reverse=True)
-    return [path for _, path in candidates]
+    return [target for _, target in candidates]
 
 
-def _with_base(target: str, config: ProjectConfig) -> str:
-    return posixpath.join(config.ts_base_url or "", target.removeprefix("./"))
+def _alias_candidates(specifier: str, scope: TsScope) -> list[str]:
+    """Paths a tsconfig alias maps this specifier to, most specific first.
+
+    TypeScript allows one `*` per pattern; `@/*` -> `./src/*` means the text
+    matched by `*` is substituted into each target. Targets are relative to
+    `baseUrl`, or to the tsconfig's own directory when it has none.
+    """
+    base = scope.base_url if scope.base_url is not None else scope.dir
+    return [
+        posixpath.normpath(posixpath.join(base, target.removeprefix("./")))
+        for target in _pattern_targets(specifier, scope.paths)
+    ]
 
 
 def npm_package_name(specifier: str) -> str:

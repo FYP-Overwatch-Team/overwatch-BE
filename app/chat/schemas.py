@@ -34,11 +34,55 @@ class NodeRef(BaseModel):
     name: str
 
 
+class CodeCitation(BaseModel):
+    """Lines of the repository an answer points at with `[cN]`, copied from the file, never from the model."""
+
+    #: the `cN` used inline in the answer
+    ref: str
+    path: str
+    #: the commit the lines were read at
+    commit_sha: str
+    start_line: int
+    end_line: int
+    code: str
+    #: what to highlight it as; null when unknown
+    language: str | None = None
+    #: the node the code belongs to; null for a range an earlier answer cited
+    node_id: str | None = None
+
+
+class FlowStep(BaseModel):
+    """One step of a flow an answer walks through."""
+
+    #: the step's `nX`; its node is among the message's nodes
+    ref: str
+    node_id: str
+    #: Markdown; may hold further `[nX]` and `[cN]`
+    text: str
+    #: a `cN` among the message's citations
+    citation_ref: str | None = None
+
+
+class ClarifyingQuestion(BaseModel):
+    """A question back, asked only when the question could mean different things."""
+
+    question: str
+    options: list[str]
+
+
 class ChatMessage(BaseModel):
     id: str
     role: Literal["user", "assistant"]
     text: str
     nodes: list[NodeRef]
+    #: code an answer cites; empty for questions and answers saved before code was cited
+    citations: list[CodeCitation] = []
+    #: in order; empty for questions, answers not about a flow and answers saved before steps
+    steps: list[FlowStep] = []
+    #: questions to go deeper; empty for questions and answers saved before them
+    follow_ups: list[str] = []
+    #: a question back instead of an answer; null almost always
+    ask: ClarifyingQuestion | None = None
     #: false when the answer was refused or the graph couldn't answer it
     grounded: bool = True
     created_at: datetime

@@ -14,6 +14,7 @@ path must resolve inside the checkout.
 """
 
 import json
+import os
 import re
 import tomllib
 from collections.abc import Mapping
@@ -22,7 +23,7 @@ from pathlib import Path
 
 import structlog
 
-from app.knowledge_graph.discovery import resolve_within
+from app.knowledge_graph.discovery import IGNORED_DIRECTORIES, resolve_within
 
 logger = structlog.get_logger("app.knowledge_graph.config")
 
@@ -32,7 +33,37 @@ MAX_CONFIG_BYTES = 256 * 1024
 MAX_EXTENDS_DEPTH = 5
 
 TS_CONFIG_NAMES = ("tsconfig.json", "jsconfig.json")
+PACKAGE_JSON = "package.json"
+#: A monorepo's own packages and the tsconfigs below its root, found by walking the checkout.
+MAX_WORKSPACE_PACKAGES = 200
+MAX_TS_SCOPES = 50
+#: Which target of a conditional `exports` entry to try first: types usually point at source.
+EXPORT_CONDITIONS = ("types", "import", "module", "default", "require", "node")
+#: What a package without `exports` names as its entry.
+ENTRY_FIELDS = ("source", "types", "module", "main")
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspacePackage:
+    """A package that lives in this repository and is imported by its `name` elsewhere in it."""
+
+    #: Repo-relative directory holding its package.json, "" for the root.
+    dir: str
+    #: Subpath ("." or "./auth/signup", at most one `*`) -> targets as written, preferred first.
+    exports: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: Entry files named outside `exports`, preferred first.
+    entry: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TsScope:
+    """A tsconfig below the root: files under `dir` resolve with it rather than the root's."""
+
+    dir: str
+    #: Repo-relative `baseUrl`, or None when it declares none (aliases then start at `dir`).
+    base_url: str | None
+    paths: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,15 +76,22 @@ class ProjectConfig:
     ts_paths: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     #: Repo-relative directories that are Python import roots, "" being the root.
     python_roots: tuple[str, ...] = ("",)
+    #: The repository's own packages by name, so `@acme/ui/button` resolves to its file.
+    workspace_packages: Mapping[str, WorkspacePackage] = field(default_factory=dict)
+    #: tsconfigs below the root, deepest first.
+    ts_scopes: tuple[TsScope, ...] = ()
 
 
 def load(root: Path) -> ProjectConfig:
     """Read whatever configuration the repository provides, tolerating absence."""
     base_url, paths = _load_typescript_paths(root)
+    packages, scopes = _load_workspace(root)
     return ProjectConfig(
         ts_base_url=base_url,
         ts_paths=paths,
         python_roots=_load_python_roots(root),
+        workspace_packages=packages,
+        ts_scopes=scopes,
     )
 
 
@@ -64,36 +102,122 @@ def load(root: Path) -> ProjectConfig:
 
 def _load_typescript_paths(root: Path) -> tuple[str, Mapping[str, tuple[str, ...]]]:
     for name in TS_CONFIG_NAMES:
-        config_path = root / name
-        if not config_path.is_file() or config_path.is_symlink():
-            continue
-        options = _read_compiler_options(root, config_path, depth=0)
-        if options is None:
-            continue
-
-        # `baseUrl` is relative to the file that declares it; we normalise to a
-        # repo-relative directory so the linker deals in one kind of path.
-        declared_base = options.get("baseUrl")
-        base_dir = config_path.parent
-        base_url = ""
-        if isinstance(declared_base, str):
-            resolved = resolve_within(root, _join_relative(root, base_dir, declared_base))
-            base_url = resolved.relative_to(root.resolve()).as_posix() if resolved else ""
-
-        raw_paths = options.get("paths")
-        paths: dict[str, tuple[str, ...]] = {}
-        if isinstance(raw_paths, dict):
-            for pattern, targets in raw_paths.items():
-                if isinstance(pattern, str) and isinstance(targets, list):
-                    values = tuple(t for t in targets if isinstance(t, str))
-                    if values:
-                        paths[pattern] = values
-        return base_url, paths
+        settings = _typescript_settings(root, root / name)
+        if settings is not None:
+            base_url, paths = settings
+            return base_url or "", paths
     return "", {}
 
 
-def _read_compiler_options(root: Path, config_path: Path, depth: int) -> dict | None:
-    """compilerOptions for a tsconfig, merged with what it extends."""
+def _typescript_settings(
+    root: Path, config_path: Path,
+) -> tuple[str | None, Mapping[str, tuple[str, ...]]] | None:
+    """(`baseUrl`, `paths`) of one tsconfig, merged with what it extends; None if unreadable."""
+    if not config_path.is_file() or config_path.is_symlink():
+        return None
+    read = _read_compiler_options(root, config_path, depth=0)
+    if read is None:
+        return None
+    options, declared_in = read
+
+    # `baseUrl` is relative to the file that declares it, which an extended one may be; we
+    # normalise to a repo-relative directory so the linker deals in one kind of path.
+    declared_base = options.get("baseUrl")
+    base_url = None
+    if isinstance(declared_base, str):
+        resolved = resolve_within(root, _join_relative(root, declared_in["baseUrl"], declared_base))
+        base_url = resolved.relative_to(root.resolve()).as_posix() if resolved else ""
+
+    # without a `baseUrl`, targets are relative to the file declaring `paths`; the linker reads
+    # them from this tsconfig's directory, so inherited ones are rewritten to start there
+    paths_dir = declared_in.get("paths", config_path.parent)
+    rebase = base_url is None and paths_dir.resolve() != config_path.parent.resolve()
+    raw_paths = options.get("paths")
+    paths: dict[str, tuple[str, ...]] = {}
+    if isinstance(raw_paths, dict):
+        for pattern, targets in raw_paths.items():
+            if isinstance(pattern, str) and isinstance(targets, list):
+                values = tuple(
+                    os.path.relpath(paths_dir / t, config_path.parent).replace(os.sep, "/") if rebase else t
+                    for t in targets if isinstance(t, str)
+                )
+                if values:
+                    paths[pattern] = values
+    return base_url, paths
+
+
+def _load_workspace(root: Path) -> tuple[dict[str, WorkspacePackage], tuple[TsScope, ...]]:
+    """The repository's own packages, and the tsconfigs below its root.
+
+    Every `package.json` with a name counts, whatever declares the workspace
+    (pnpm, npm, yarn): that needs no YAML, and a name nothing imports costs nothing.
+    """
+    resolved_root = root.resolve()
+    packages: dict[str, WorkspacePackage] = {}
+    scopes: list[TsScope] = []
+    for dirpath, dirnames, filenames in os.walk(resolved_root, followlinks=False):
+        current = Path(dirpath)
+        dirnames[:] = sorted(
+            name for name in dirnames
+            if name not in IGNORED_DIRECTORIES and not (current / name).is_symlink()
+        )
+        directory = current.relative_to(resolved_root).as_posix()
+        directory = "" if directory == "." else directory
+
+        if PACKAGE_JSON in filenames and len(packages) < MAX_WORKSPACE_PACKAGES:
+            found = _workspace_package(current / PACKAGE_JSON, directory)
+            if found is not None:
+                packages.setdefault(*found)
+        if directory and len(scopes) < MAX_TS_SCOPES:
+            for name in TS_CONFIG_NAMES:
+                if name in filenames:
+                    settings = _typescript_settings(resolved_root, current / name)
+                    if settings is not None:
+                        scopes.append(TsScope(directory, *settings))
+                    break
+    # the deepest scope holding a file is the one that applies to it
+    scopes.sort(key=lambda scope: scope.dir.count("/"), reverse=True)
+    return packages, tuple(scopes)
+
+
+def _workspace_package(path: Path, directory: str) -> tuple[str, WorkspacePackage] | None:
+    if path.is_symlink():
+        return None
+    data = _read_jsonc(path)
+    name = data.get("name") if data else None
+    if not isinstance(name, str) or not name:
+        return None
+    entry = tuple(data[field] for field in ENTRY_FIELDS if isinstance(data.get(field), str))
+    return name, WorkspacePackage(directory, _exports(data.get("exports")), entry)
+
+
+def _exports(raw: object) -> dict[str, tuple[str, ...]]:
+    """`exports` as subpath -> targets: a string, a list, a subpath map or a map of conditions."""
+    if isinstance(raw, dict) and any(isinstance(key, str) and key.startswith(".") for key in raw):
+        return {
+            key: targets for key, value in raw.items()
+            if isinstance(key, str) and key.startswith(".") and (targets := _export_targets(value))
+        }
+    targets = _export_targets(raw)
+    return {".": targets} if targets else {}
+
+
+def _export_targets(value: object, depth: int = 0) -> tuple[str, ...]:
+    """The files one `exports` entry may point at, preferred condition first."""
+    if depth > MAX_EXTENDS_DEPTH:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list):
+        return tuple(target for item in value for target in _export_targets(item, depth + 1))
+    if isinstance(value, dict):
+        keys = sorted(value, key=lambda key: EXPORT_CONDITIONS.index(key) if key in EXPORT_CONDITIONS else len(EXPORT_CONDITIONS))
+        return tuple(target for key in keys for target in _export_targets(value[key], depth + 1))
+    return ()
+
+
+def _read_compiler_options(root: Path, config_path: Path, depth: int) -> tuple[dict, dict[str, Path]] | None:
+    """compilerOptions for a tsconfig, merged with what it extends, and the directory declaring each one."""
     if depth > MAX_EXTENDS_DEPTH:
         logger.warning("tsconfig_extends_too_deep", path=str(config_path))
         return None
@@ -103,16 +227,19 @@ def _read_compiler_options(root: Path, config_path: Path, depth: int) -> dict | 
         return None
 
     options: dict = {}
+    declared_in: dict[str, Path] = {}
     extends = data.get("extends")
     if isinstance(extends, str):
         parent_path = _resolve_extends(root, config_path.parent, extends)
-        if parent_path is not None:
-            options |= _read_compiler_options(root, parent_path, depth + 1) or {}
+        inherited = _read_compiler_options(root, parent_path, depth + 1) if parent_path is not None else None
+        if inherited is not None:
+            options, declared_in = inherited
 
     own = data.get("compilerOptions")
     if isinstance(own, dict):
         options |= own
-    return options
+        declared_in |= dict.fromkeys(own, config_path.parent)
+    return options, declared_in
 
 
 def _resolve_extends(root: Path, base_dir: Path, extends: str) -> Path | None:

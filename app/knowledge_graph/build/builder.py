@@ -57,7 +57,14 @@ from app.knowledge_graph.link.http import route_key
 #:
 #: 1 — folders nest at every depth, and a top-level file is held by the
 #:     repository rather than by an invented `root` folder.
-GRAPH_BUILD_VERSION = 1
+#: 2 — files carry `rank` and `key_symbols`, and imports of the repository's
+#:     own packages, default exports and barrels resolve to files.
+GRAPH_BUILD_VERSION = 2
+
+#: How much a file is used: each import or reference into it counts 1, each one out of it this much.
+OUTWARD_RANK = 0.5
+#: The most used exported definitions listed for a file.
+MAX_KEY_SYMBOLS = 5
 
 _EDGE_TYPE_BY_KIND = {
     EdgeKind.CALLS: EdgeType.CALLS,
@@ -110,7 +117,7 @@ def build_snapshot(
     )
 
     symbol_ids = _add_files_and_symbols(
-        repo_full_name, facts_by_path, nodes, edges, include_symbols=include_symbols,
+        repo_full_name, facts_by_path, nodes, edges, include_symbols=include_symbols, usage=_file_usage(facts_by_path, links),
     )
     _add_packages(repo_full_name, facts_by_path, links, nodes, edges)
     _add_imports(repo_full_name, links, edges)
@@ -135,6 +142,36 @@ def build_snapshot(
     )
 
 
+def _file_usage(
+    facts_by_path: Mapping[str, FileFacts], links: RepositoryLinks,
+) -> dict[str, tuple[float, list[str]]]:
+    """Each file's `rank` (how much other code uses it) and its most used exported definitions.
+
+    What a repository map lists first: a file many others import or call into is
+    one a reader needs to know exists.
+    """
+    into: Counter[str] = Counter()
+    out_of: Counter[str] = Counter()
+    by_symbol: Counter[tuple[str, str]] = Counter()
+    for found in links.imports:
+        into[found.target_file] += 1
+        out_of[found.source_file] += 1
+    for edge in links.edges:
+        if edge.target.file != edge.source_file:
+            into[edge.target.file] += 1
+            out_of[edge.source_file] += 1
+            by_symbol[(edge.target.file, edge.target.qualified_name)] += edge.count
+
+    usage = {}
+    for path, facts in facts_by_path.items():
+        top_level = [d for d in facts.definitions if d.parent is None]
+        # `export { Button }` at the end of a file isn't seen as an export; its definitions still are
+        names = [d.name for d in top_level if d.exported] or [d.name for d in top_level]
+        key = sorted(dict.fromkeys(names), key=lambda name: -by_symbol[(path, name)])[:MAX_KEY_SYMBOLS]
+        usage[path] = (into[path] + OUTWARD_RANK * out_of[path], key)
+    return usage
+
+
 def _counted(values) -> dict[str, int]:
     return dict(sorted(Counter(values).items()))
 
@@ -146,6 +183,7 @@ def _add_files_and_symbols(
     edges: list[GraphEdge],
     *,
     include_symbols: bool,
+    usage: Mapping[str, tuple[float, list[str]]],
 ) -> dict[tuple[str, str], str]:
     """File nodes, their symbols, and the containment edges between them.
 
@@ -169,6 +207,8 @@ def _add_files_and_symbols(
                     "content_hash": facts.content_hash,
                     "definition_count": len(facts.definitions),
                     "has_syntax_errors": facts.has_syntax_errors,
+                    "rank": usage[path][0],
+                    "key_symbols": usage[path][1],
                 },
             )
         )

@@ -291,3 +291,28 @@ def test_content_hash_and_path_are_carried_through():
     assert facts.path == "pkg/module.py"
     assert facts.content_hash == file.content_hash
     assert facts.parser_version >= 1
+
+
+def test_a_barrels_re_exports_and_a_default_export_are_recorded():
+    code = (
+        'export { default as SignupForm, check as verify } from "./form";\n'
+        'export * from "./hooks";\n'
+        'export * as api from "./api";\n'
+        "const index = () => null;\n"
+        "export default index;\n"
+    )
+    facts = extract(source(code, "typescript", "auth/index.ts"))
+
+    reexports = [(i.specifier, i.names, i.exported_as, i.is_wildcard, i.alias) for i in facts.imports]
+    assert reexports == [
+        ("./form", ("default", "check"), ("SignupForm", "verify"), False, None),
+        ("./hooks", (), (), True, None),
+        ("./api", (), (), True, "api"),
+    ]
+    assert all(i.is_reexport for i in facts.imports)
+    assert facts.default_export == "index"
+
+
+def test_a_default_exported_declaration_is_named_and_an_anonymous_one_is_not():
+    assert extract(source("export default function SignupForm() {}\n", "typescript", "a.ts")).default_export == "SignupForm"
+    assert extract(source("export default () => 1;\n", "typescript", "b.ts")).default_export is None

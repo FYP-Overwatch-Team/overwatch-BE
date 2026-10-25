@@ -28,6 +28,7 @@ from app.knowledge_graph.extract.languages.base import (
     CAPTURE_CALLEE,
     CAPTURE_COMPONENT,
     CAPTURE_CONSTRUCTION,
+    CAPTURE_DEFAULT_EXPORT,
     CAPTURE_IMPORT,
     CAPTURE_NAME,
     DEFINITION_PREFIX,
@@ -198,6 +199,9 @@ def _emit_references(
         if CAPTURE_IMPORT in captures:
             for reference in spec.imports_from(captures[CAPTURE_IMPORT][0], source):
                 builder.add_import(reference)
+            continue
+        if CAPTURE_DEFAULT_EXPORT in captures:
+            builder.default_export = spec.default_export(captures[CAPTURE_DEFAULT_EXPORT][0], source)
             continue
 
         call_node = (captures.get(CAPTURE_CALL) or captures.get(CAPTURE_CONSTRUCTION) or [None])[0]

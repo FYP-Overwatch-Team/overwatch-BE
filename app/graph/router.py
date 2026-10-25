@@ -13,6 +13,7 @@ from app.core.responses import WithMeta, api_router
 from app.graph import service
 from app.graph.schemas import (
     MAX_NODE_ID,
+    MAX_SOURCE_PATH,
     GraphStats,
     GraphView,
     GraphViewBody,
@@ -20,6 +21,7 @@ from app.graph.schemas import (
     Neighbourhood,
     NodeDetail,
     SearchResult,
+    SourceFile,
     ViewOptions,
 )
 from app.knowledge_graph.build.model import EdgeType
@@ -90,6 +92,16 @@ async def search_graph(
     """Find files and symbols by name."""
     results = await service.search(repo, q, limit)
     return WithMeta(results, {"count": len(results)})
+
+
+@router.get("/source")
+async def get_source(
+    repo: ConnectedRepo,
+    path: Annotated[str, Query(min_length=1, max_length=MAX_SOURCE_PATH)],
+    commit_sha: Annotated[str | None, Query(pattern="^([0-9a-f]{40}|[0-9a-f]{64})$")] = None,
+) -> SourceFile:
+    """A file as of a commit (by default the indexed one), for reading the code an answer cites."""
+    return await service.source(repo, path, commit_sha)
 
 
 @router.get("/stats")

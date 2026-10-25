@@ -82,6 +82,9 @@ class PythonSpec:
         # what readers and linters treat as private.
         return not name.startswith("_")
 
+    def default_export(self, node: Node, source: bytes) -> str | None:
+        return None  # Python modules have no default export
+
     def imports_from(self, node: Node, source: bytes) -> list[ImportRef]:
         line = node.start_point[0] + 1
         if node.type == "import_statement":

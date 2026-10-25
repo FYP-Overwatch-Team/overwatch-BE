@@ -133,3 +133,48 @@ def test_oversized_config_is_ignored(tmp_path, monkeypatch):
     write(tmp_path, "tsconfig.json", '{"compilerOptions": {"paths": {"@/*": ["./*"]}}}')
 
     assert project_config.load(tmp_path).ts_paths == {}
+
+
+def test_finds_the_repositorys_own_packages_and_nested_tsconfigs(tmp_path):
+    write(tmp_path, "package.json", '{ "name": "acme-monorepo" }')
+    write(tmp_path, "packages/features/package.json", """
+    { "name": "@acme/features",
+      "exports": { "./auth/signup": { "types": "./src/signup.tsx", "default": "./dist/signup.js" }, "./*": "./src/*.ts" } }
+    """)
+    write(tmp_path, "packages/ui/package.json", '{ "name": "@acme/ui", "main": "./dist/index.js", "types": "./src/index.ts" }')
+    write(tmp_path, "packages/ui/node_modules/dep/package.json", '{ "name": "dep" }')
+    write(tmp_path, "apps/web/tsconfig.json", '{ "compilerOptions": { "paths": { "@/*": ["./*"] } } }')
+
+    config = project_config.load(tmp_path)
+
+    assert set(config.workspace_packages) == {"acme-monorepo", "@acme/features", "@acme/ui"}
+    features = config.workspace_packages["@acme/features"]
+    assert features.dir == "packages/features"
+    assert features.exports == {"./auth/signup": ("./src/signup.tsx", "./dist/signup.js"), "./*": ("./src/*.ts",)}
+    assert config.workspace_packages["@acme/ui"].entry == ("./src/index.ts", "./dist/index.js")
+    assert [(s.dir, s.base_url, dict(s.paths)) for s in config.ts_scopes] == [("apps/web", None, {"@/*": ("./*",)})]
+
+
+def test_an_inherited_base_url_stays_relative_to_the_tsconfig_declaring_it(tmp_path):
+    write(tmp_path, "tsconfig.json", '{ "compilerOptions": { "baseUrl": ".", "paths": { "@shared/*": ["packages/shared/*"] } } }')
+    write(tmp_path, "apps/web/tsconfig.json", '{ "extends": "../../tsconfig.json" }')
+
+    (scope,) = project_config.load(tmp_path).ts_scopes
+
+    assert (scope.dir, scope.base_url, dict(scope.paths)) == ("apps/web", "", {"@shared/*": ("packages/shared/*",)})
+
+
+def test_inherited_paths_without_a_base_url_stay_relative_to_the_tsconfig_declaring_them(tmp_path):
+    write(tmp_path, "tsconfig.base.json", '{ "compilerOptions": { "paths": { "@shared/*": ["./packages/shared/*"] } } }')
+    write(tmp_path, "apps/web/tsconfig.json", '{ "extends": "../../tsconfig.base.json" }')
+
+    (scope,) = project_config.load(tmp_path).ts_scopes
+
+    assert (scope.base_url, dict(scope.paths)) == (None, {"@shared/*": ("../../packages/shared/*",)})
+
+
+def test_a_package_json_without_a_name_or_unreadable_is_skipped(tmp_path):
+    write(tmp_path, "a/package.json", '{ "private": true }')
+    write(tmp_path, "b/package.json", "not json")
+
+    assert project_config.load(tmp_path).workspace_packages == {}

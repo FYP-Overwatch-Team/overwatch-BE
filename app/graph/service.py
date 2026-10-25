@@ -5,7 +5,7 @@ store, which filters on it: an id from another repository finds nothing.
 """
 
 from app.core.exceptions import NotFoundError
-from app.graph.schemas import MAX_EXPANDED, GraphViewBody
+from app.graph.schemas import MAX_EXPANDED, MAX_SOURCE_FILE_LINES, GraphViewBody
 from app.knowledge_graph.view.model import (
     VIEWABLE_EDGE_TYPES,
     VIEWABLE_NODE_LABELS,
@@ -16,6 +16,7 @@ from app.knowledge_graph.view.model import (
 )
 from app.graph.view_service import build_view
 from app.db.knowledge_graph_store import get_knowledge_graph_store, validate_depth
+from app.query.source import language_of, read_file
 
 
 async def module_graph(repo: dict) -> dict:
@@ -137,4 +138,24 @@ def _serialise(view: ViewGraph) -> dict:
             for node in view.expanded
         ],
         "truncated": view.truncated,
+    }
+
+
+async def source(repo: dict, path: str, commit_sha: str | None) -> dict:
+    """A file as of `commit_sha`, or of the commit the graph is built from when none is given."""
+    current = repo.get("graph_version")
+    commit = commit_sha or current
+    text = await read_file(repo["repo_full_name"], commit, path) if commit else None
+    if text is None:
+        # gone from the checkout (an old commit, a moved file) or never readable; the client links to GitHub instead
+        raise NotFoundError("this file isn't available at that commit", error_code="source_unavailable")
+    lines = text.splitlines()
+    return {
+        "path": path,
+        "commit_sha": commit,
+        "language": language_of(path),
+        "content": "\n".join(lines[:MAX_SOURCE_FILE_LINES]),
+        "line_count": len(lines),
+        "truncated": len(lines) > MAX_SOURCE_FILE_LINES,
+        "is_current": commit == current,
     }

@@ -24,6 +24,7 @@ CAPTURE_NAME = "name"
 CAPTURE_CALLEE = "callee"
 CAPTURE_COMPONENT = "component"
 CAPTURE_IMPORT = "import"
+CAPTURE_DEFAULT_EXPORT = "default_export"
 CAPTURE_CALL = "call"
 CAPTURE_CONSTRUCTION = "construction"
 CAPTURE_RENDER = "render"
@@ -69,6 +70,9 @@ class LanguageSpec(Protocol):
 
     def imports_from(self, node: Node, source: bytes) -> list[ImportRef]:
         """Imports declared by an `@import` node (one statement may declare several)."""
+
+    def default_export(self, node: Node, source: bytes) -> str | None:
+        """The name a `@default_export` node exports as the file's default, if it names one."""
 
     def call_target(self, callee: Node, source: bytes) -> tuple[str, str | None]:
         """(callee text, receiver) for a call; receiver is `db` in `db.query()`."""

@@ -110,6 +110,17 @@ def _viewable_pattern() -> str:
     return _type_pattern(VIEWABLE_EDGE_TYPES)
 
 
+def _followed(rows: list[dict], per_node: int, limit: int) -> list[dict]:
+    """The most used edges first, at most `per_node` from each origin and `limit` in all."""
+    taken: dict[str, int] = {}
+    kept = []
+    for row in sorted(rows, key=lambda row: (-(row["count"] or 1), row["origin"], row["id"])):
+        if taken.get(row["origin"], 0) < per_node and len(kept) < limit:
+            taken[row["origin"]] = taken.get(row["origin"], 0) + 1
+            kept.append(row)
+    return kept
+
+
 def _validated_edge_types(edge_types: Sequence[str] | None) -> list[str] | None:
     """Filter a caller's edge-type list down to types we actually define."""
     if not edge_types:
@@ -416,6 +427,63 @@ class Neo4jKnowledgeGraphStore:
             "nodes": sorted(nodes.values(), key=lambda n: n["id"]),
             "edges": sorted(edges.values(), key=lambda e: (e["source"], e["target"], e["type"])),
         }
+
+    async def follow(
+        self,
+        repo_full_name: str,
+        node_ids: Sequence[str],
+        *,
+        out_types: Sequence[str] = (),
+        in_types: Sequence[str] = (),
+        per_node: int = 6,
+        limit: int = 40,
+    ) -> list[dict]:
+        """Two bounded queries, one per direction; each node keeps its `per_node` most used edges."""
+        limit = min(limit, NEIGHBOUR_LIMIT)
+        rows: list[dict] = []
+        for arrow, types in (("-[r]->", out_types), ("<-[r]-", in_types)):
+            if not types or not node_ids:
+                continue
+            rows += await self._store.run(
+                f"""
+                MATCH (a:{BASE_LABEL} {{repo: $repo}}){arrow}(b:{BASE_LABEL} {{repo: $repo}})
+                WHERE a.id IN $ids AND type(r) IN $types
+                WITH a, r, b ORDER BY coalesce(r.count, 1) DESC, b.id
+                WITH a, collect({{r: r, b: b}})[..$per_node] AS hits
+                UNWIND hits AS hit
+                WITH a, hit.r AS r, hit.b AS b
+                RETURN a.id AS origin, startNode(r).id AS source, endNode(r).id AS target,
+                       type(r) AS type, r.count AS count,
+                       b.id AS id, b.name AS name, b.kind AS kind, b.path AS path,
+                       properties(b)['file_path'] AS file_path, properties(b)['start_line'] AS start_line,
+                       properties(b)['end_line'] AS end_line, properties(b)['signature'] AS signature,
+                       properties(b)['docstring'] AS docstring, labels(b) AS labels
+                ORDER BY coalesce(r.count, 1) DESC, id
+                LIMIT $limit
+                """,
+                repo=repo_full_name, ids=list(node_ids), types=_validated_edge_types(types),
+                per_node=per_node, limit=limit,
+            )
+        return _followed(
+            [{**row, "labels": [label for label in row["labels"] if label != BASE_LABEL]} for row in rows],
+            per_node, limit,
+        )
+
+    async def repo_map(
+        self, repo_full_name: str, *, near: Sequence[str] = (), limit: int = 40,
+    ) -> list[dict]:
+        rows = await self._store.run(
+            f"""
+            MATCH (f:{BASE_LABEL}:{NodeLabel.FILE} {{repo: $repo}})
+            WITH f, any(folder IN $near WHERE f.path STARTS WITH folder) AS nearby
+            RETURN f.id AS id, f.path AS path, coalesce(f.rank, 0) AS rank,
+                   coalesce(f.key_symbols, []) AS key_symbols
+            ORDER BY nearby DESC, rank DESC, path
+            LIMIT $limit
+            """,
+            repo=repo_full_name, near=[f"{folder}/" for folder in near], limit=min(limit, SUBTREE_LIMIT),
+        )
+        return [dict(row) for row in rows]
 
     async def search(self, repo_full_name: str, term: str, *, limit: int = 20) -> list[dict]:
         rows = await self._store.run(
@@ -814,6 +882,53 @@ class InMemoryKnowledgeGraphStore:
             if edge["source"] in kept and edge["target"] in kept
         ]
         return {"nodes": nodes, "edges": edges}
+
+    async def follow(
+        self,
+        repo_full_name: str,
+        node_ids: Sequence[str],
+        *,
+        out_types: Sequence[str] = (),
+        in_types: Sequence[str] = (),
+        per_node: int = 6,
+        limit: int = 40,
+    ) -> list[dict]:
+        outward = set(_validated_edge_types(out_types) or ())
+        inward = set(_validated_edge_types(in_types) or ())
+        origins = set(node_ids)
+        rows = []
+        for edge in self.edges.values():
+            if edge["repo"] != repo_full_name:
+                continue
+            for origin, other, wanted in (("source", "target", outward), ("target", "source", inward)):
+                node = self.nodes.get(edge[other])
+                if edge[origin] in origins and edge["type"] in wanted and node is not None:
+                    rows.append({
+                        "origin": edge[origin], "source": edge["source"], "target": edge["target"],
+                        "type": edge["type"], "count": edge.get("count"),
+                        "id": node["id"], "name": node.get("name"), "kind": node.get("kind"),
+                        "path": node.get("path"), "file_path": node.get("file_path"),
+                        "start_line": node.get("start_line"), "end_line": node.get("end_line"),
+                        "signature": node.get("signature"), "docstring": node.get("docstring"),
+                        "labels": [node["label"]],
+                    })
+        rows.sort(key=lambda row: (-(row["count"] or 1), row["id"]))
+        return _followed(rows, per_node, min(limit, NEIGHBOUR_LIMIT))
+
+    async def repo_map(
+        self, repo_full_name: str, *, near: Sequence[str] = (), limit: int = 40,
+    ) -> list[dict]:
+        folders = tuple(f"{folder}/" for folder in near)
+        files = [
+            {
+                "id": node["id"], "path": node.get("path"), "rank": node.get("rank") or 0,
+                "key_symbols": list(node.get("key_symbols") or []),
+            }
+            for node in self.nodes.values()
+            if node["repo"] == repo_full_name and node["label"] == str(NodeLabel.FILE)
+        ]
+        files.sort(key=lambda row: (not str(row["path"]).startswith(folders) if folders else True, -row["rank"], row["path"]))
+        return files[:min(limit, SUBTREE_LIMIT)]
 
     async def search(self, repo_full_name: str, term: str, *, limit: int = 20) -> list[dict]:
         needle = term.lower()

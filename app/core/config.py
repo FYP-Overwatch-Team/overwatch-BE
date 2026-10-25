@@ -35,11 +35,24 @@ class Settings(BaseSettings):
     jira_client_id: str = ""
     jira_client_secret: str = ""
 
-    gemini_api_key: str = ""
-    # AI chat limits; keep the global budget below the Gemini project's daily quota
+    # the AI chat's model: any OpenAI-compatible chat API (Groq, OpenRouter, DeepSeek...)
+    model_api_key: str = ""
+    model_base_url: str = "https://openrouter.ai/api/v1"
+    model_name: str = "deepseek/deepseek-v4.1-flash"
+    # sent as `reasoning_effort` when set; empty for providers that reject it
+    model_reasoning_effort: str = "low"
+    # AI chat limits; keep the global budget below the provider's daily quota
     chat_user_hourly_limit: int = 30
     chat_workspace_daily_limit: int = 200
     chat_daily_budget: int = 500
+    # lookups (graph search, reading code) one answer may make before it must answer; 0 turns them off
+    chat_max_lookups: int = 20
+    # OpenRouter provider routing, empty to send nothing: sort by "latency", "throughput" or "price",
+    # or a comma-separated order of provider slugs (an order turns off OpenRouter's cache-warm routing)
+    model_provider_sort: str = ""
+    model_provider_order: str = ""
+    # send each conversation's id as `session_id`, so its calls stay on one provider and its cache
+    model_session_routing: bool = False
 
     repos_dir: str = "./repos"
 

@@ -47,6 +47,8 @@ CREDENTIAL_MARKER = "x-access-token:"
 
 REDACTED = "[REDACTED]"
 
+GREP_EXCLUDES = ("*.lock", "*-lock.json", "*-lock.yaml", "*.min.js", "*.min.css", "*.map", "*.svg")
+
 
 class GitCommandError(RuntimeError):
     """A git invocation failed. The message is already scrubbed of secrets."""
@@ -190,6 +192,51 @@ async def fetch_and_reset(dest: Path, repo_full_name: str, token: str, *, branch
 async def current_commit(dest: Path) -> str:
     """The checked-out commit SHA, used to version the graph."""
     return (await run(["rev-parse", "HEAD"], cwd=dest)).strip()
+
+
+async def read_blob(dest: Path, commit: str, path: str, *, max_bytes: int) -> str | None:
+    """A file's text as of `commit`; None when it's missing, not a file or over `max_bytes`.
+
+    Read from git's objects, never the working tree, so a re-index moving the
+    checkout on can't change what a commit's lines say.
+    """
+    try:
+        # `<mode> <type> <oid> <size>\t<path>`; "--" stops a path being read as an option
+        entry = (await run(["ls-tree", "-l", commit, "--", path], cwd=dest)).split("\t", 1)[0].split()
+        if len(entry) != 4 or entry[1] != "blob" or int(entry[3]) > max_bytes:
+            return None
+        return await run(["cat-file", "blob", entry[2]], cwd=dest)
+    except (GitCommandError, ValueError):
+        return None
+
+
+async def grep(dest: Path, commit: str, terms: Sequence[str], *, per_file: int) -> list[tuple[str, int, str]]:
+    """`(path, line, term)` where one of `terms` appears in a text file at `commit`, case-insensitive.
+
+    At most `per_file` matching lines per file; `term` is the match, lowercased.
+    """
+    if not terms:
+        return []
+    args = ["grep", "-n", "-o", "-I", "-i", "-F", f"--max-count={per_file}"]
+    for term in terms:
+        args += ["-e", term]
+    # lockfiles, bundles and maps match everything and explain nothing
+    args += [commit, "--", ".", *(f":(exclude){pattern}" for pattern in GREP_EXCLUDES)]
+    try:
+        output = await run(args, cwd=dest)
+    except GitCommandError as exc:
+        if exc.returncode == 1:  # no match
+            return []
+        raise
+    hits = []
+    for line in output.splitlines():
+        # `<commit>:<path>:<line>:<match>`
+        _, _, rest = line.partition(":")
+        path, _, rest = rest.partition(":")
+        number, _, match = rest.partition(":")
+        if path and number.isdigit():
+            hits.append((path, int(number), match.lower()))
+    return hits
 
 
 def has_persisted_credentials(dest: Path) -> bool:

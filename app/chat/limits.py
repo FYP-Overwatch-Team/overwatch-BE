@@ -1,5 +1,9 @@
 """Request limits for the AI chat: per member per hour, per workspace and overall per day.
 
+A question counts once against every limit. Each further model call it makes while
+looking things up counts against the overall daily budget only, which is what the
+provider bills by.
+
 Fixed windows in `usage_counters`. A take is one atomic update that only matches while
 the window is under its limit; once full, the upsert collides with the existing counter.
 """
@@ -35,3 +39,12 @@ async def take(workspace_id: str, user_id: str) -> None:
             raise error
         taken.append(key)
 
+
+
+async def take_model_call() -> bool:
+    """Count one more model call for a question already counted, against the daily budget only.
+
+    False when the budget is spent; the answer is then written from what was found so far.
+    """
+    now = utcnow()
+    return await take_one(f"chat:global:{now.strftime('%Y%m%d')}", get_settings().chat_daily_budget, now + timedelta(days=2))

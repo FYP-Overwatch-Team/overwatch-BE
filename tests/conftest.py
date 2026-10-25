@@ -10,7 +10,7 @@ from mongomock_motor import AsyncMongoMockClient
 from app.core.config import get_settings
 from app.db import mongo
 from app.main import create_app
-from app.integrations import gemini_client, github_app
+from app.integrations import github_app, llm
 from app.workers import jobs
 from app.services.facts_repository import InMemoryFactsStore, use_facts_store
 from app.db.knowledge_graph_store import (
@@ -21,7 +21,7 @@ from app.mail.memory import Outbox
 from app.mail.sender import use_email_sender
 from app.storage.memory import InMemoryStore
 from app.storage.store import use_object_store
-from tests.fakes import FakeGeminiClient
+from tests.fakes import FakeLLMClient
 
 
 @pytest.fixture(scope="session")
@@ -149,11 +149,11 @@ def record_jobs(monkeypatch):
 
 
 @pytest.fixture
-def fake_gemini():
-    fake = FakeGeminiClient()
-    gemini_client.use_gemini_client(fake)
+def fake_llm():
+    fake = FakeLLMClient()
+    llm.use_llm_client(fake)
     yield fake
-    gemini_client.use_gemini_client(None)
+    llm.use_llm_client(None)
 
 
 @pytest.fixture

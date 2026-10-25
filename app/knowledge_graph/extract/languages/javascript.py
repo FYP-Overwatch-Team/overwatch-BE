@@ -103,10 +103,22 @@ class JavaScriptSpec:
             candidate = candidate.parent
         return False
 
+    def default_export(self, node: Node, source: bytes) -> str | None:
+        """`export default function login` -> `login`; `export default login` -> `login`."""
+        declaration = node.child_by_field_name("declaration")
+        if declaration is not None:
+            return node_text(declaration.child_by_field_name("name"), source) or None
+        value = node.child_by_field_name("value")
+        if value is not None and value.type == "identifier":
+            return node_text(value, source)
+        return None  # an anonymous function or an expression: nothing to point at
+
     def imports_from(self, node: Node, source: bytes) -> list[ImportRef]:
         source_node = node.child_by_field_name("source")
         if source_node is None:
             return []
+        if node.type == "export_statement":
+            return [_reexport(node, source_node, source)]
 
         names: list[str] = []
         alias: str | None = None
@@ -293,3 +305,31 @@ def _strip_jsdoc(text: str) -> str:
         if line:
             lines.append(line)
     return " ".join(lines)
+
+
+def _reexport(node: Node, source_node: Node, source: bytes) -> ImportRef:
+    """`export { a, b as c } from "./x"`, `export * from "./x"` or `export * as ns from "./x"`."""
+    names: list[str] = []
+    exported_as: list[str] = []
+    alias: str | None = None
+    wildcard = True
+    for child in node.named_children:
+        if child.type == "export_clause":
+            wildcard = False
+            for specifier in child.named_children:
+                if specifier.type == "export_specifier":
+                    name = node_text(specifier.child_by_field_name("name"), source)
+                    names.append(name)
+                    exported_as.append(node_text(specifier.child_by_field_name("alias"), source) or name)
+        elif child.type == "namespace_export":
+            alias = node_text(child.named_children[-1], source) if child.named_child_count else None
+    return ImportRef(
+        specifier=_string_value(node_text(source_node, source)),
+        names=tuple(names),
+        alias=alias,
+        line=node.start_point[0] + 1,
+        is_wildcard=wildcard,
+        is_reexport=True,
+        exported_as=tuple(exported_as),
+    )
+
