@@ -392,3 +392,77 @@ async def test_old_archives_are_purged_here_only(client, confluence, synced):
     assert await mongo.documents().count_documents({"source": "confluence"}) == 0
     assert await mongo.doc_attachments().count_documents({}) == 0
     assert [a["title"] for a in (await client.get("/documents/archived", headers=synced)).json()["data"]] == ["Notes"]
+
+
+async def test_push_due_at_respects_idle_window(client, confluence, synced):
+    page_id = (await node("3"))["_id"]
+    before = utcnow()
+    saved = await save(client, synced, page_id, "Checking debounce delay")
+    after = utcnow()
+    assert saved["push_state"] == "pending"
+
+    doc = await mongo.documents().find_one({"_id": page_id})
+    assert doc["push_due_at"] >= before + timedelta(seconds=19)
+    assert doc["push_due_at"] <= after + timedelta(seconds=21)
+
+
+async def test_push_after_create_increments_version_properly(client, confluence, synced):
+    parent = await node("2")
+    with respx.mock as router:
+        confluence.routes(router)
+        resp = await client.post("/documents", json={"kind": "page", "title": "ADR 8", "parent_id": parent["_id"]}, headers=synced)
+    assert resp.status_code == 201
+    created_id = resp.json()["data"]["id"]
+
+    new_doc = await mongo.documents().find_one({"_id": created_id})
+    assert new_doc["external_id"] == "50"
+    assert new_doc["external_version"] == 1
+    assert new_doc["push_state"] == "none"
+
+    confluence.puts.clear()
+    saved = await save(client, synced, created_id, "Subsequent content edit after creation")
+    assert saved["push_state"] == "pending"
+
+    await push(confluence)
+
+    assert len(confluence.puts) == 1
+    sent = confluence.puts[0]
+    assert sent["version"]["number"] == 2
+    assert sent["title"] == "ADR 8"
+    assert json.loads(sent["body"]["value"])["content"][0]["content"][0]["text"] == "Subsequent content edit after creation"
+
+    updated_doc = await mongo.documents().find_one({"_id": created_id})
+    assert updated_doc["push_state"] == "none"
+    assert updated_doc["external_version"] == 2
+
+
+async def test_resync_doc_targets_skips_tracker_and_syncs_docs(synced, monkeypatch):
+    workspace_id = synced["X-Workspace-Id"]
+    await mongo.sync_targets().insert_one({
+        "workspace_id": workspace_id, "provider": "jira", "key": "PROJ", "name": "Project", "status": "active",
+        "sync_status": "pending", "last_synced_at": None, "last_full_sync_at": None, "connected_at": utcnow(),
+    })
+
+    called_doc_sync = []
+    called_work_item_sync = []
+
+    async def fake_doc_sync(ws_id, prov, key):
+        called_doc_sync.append((ws_id, prov, key))
+
+    async def fake_work_item_sync(ws_id, prov, key):
+        called_work_item_sync.append((ws_id, prov, key))
+
+    monkeypatch.setattr(jobs.doc_sync, "run_document_sync", fake_doc_sync)
+    monkeypatch.setattr(jobs.sync, "run_work_item_sync", fake_work_item_sync)
+
+    await jobs.resync_doc_targets()
+
+    assert called_doc_sync == [(workspace_id, "confluence", "100")]
+    assert called_work_item_sync == []
+
+    called_doc_sync.clear()
+    called_work_item_sync.clear()
+    await jobs.resync_tracker_targets()
+    assert called_doc_sync == []
+    assert called_work_item_sync == [(workspace_id, "jira", "PROJ")]
+
