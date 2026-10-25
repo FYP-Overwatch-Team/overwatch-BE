@@ -100,20 +100,20 @@ git config core.hooksPath .githooks
 Every push runs the full backend test suite and is blocked if any test fails.
 Use `git push --no-verify` only for exceptional, intentional bypasses.
 
-## EC2 deployment
+## Deployment
 
-The production stack runs the API and Caddy on EC2. MongoDB Atlas and Neo4j
-Aura remain external. Pushes to `main` are tested, published to GHCR, deployed
-to EC2, health checked, and rolled back on failure by `.github/workflows/ci.yml`.
+The production API runs in Docker on an AWS Lightsail server behind the
+Cloudflare proxy. MongoDB Atlas and Neo4j Aura remain external. Pushes to `main`
+are tested, published to GHCR, deployed to the server, health checked, and
+rolled back on failure by `.github/workflows/ci.yml`.
 
 ### One-time server setup
 
 Install Docker, create `/opt/overwatch`, and save the production environment at
 `/opt/overwatch/.env` with mode `600`. In addition to the application settings
-shown in `.env.example`, it must contain Compose deployment values:
+shown in `.env.example`, it must contain the image to deploy:
 
 ```env
-API_DOMAIN=overwatch-api.duckdns.org
 BACKEND_IMAGE=ghcr.io/rizwan521/overwatch-be
 ```
 
@@ -121,28 +121,33 @@ Use the public API URL for `APP_BASE_URL`. Set `FRONTEND_ORIGIN` to the exact
 deployed frontend origin. Keep Atlas, Aura, GitHub App, Jira, Gemini, JWT, and
 Fernet credentials only in this server-side file.
 
-The EC2 security group must allow ports 80 and 443 publicly and port 22 only
-from trusted addresses. Port 8000 is internal to the Compose network.
+Cloudflare terminates HTTPS for visitors (SSL mode Full (strict)). The API serves
+HTTPS to Cloudflare with a Cloudflare Origin CA certificate saved as
+`/opt/overwatch/certs/origin.pem` and `origin.key` (mode `600`). The DNS record
+for the API must be proxied, and the server firewall must allow port 443 only
+from [Cloudflare's IP ranges](https://www.cloudflare.com/ips-v4) and port 22 for
+SSH. `compose.prod.yml` trusts `X-Forwarded-For` from the same ranges, so update
+both if Cloudflare changes them.
 
 ### GitHub production environment
 
 Create a GitHub environment named `production` with these secrets:
 
 - `EC2_SSH_PRIVATE_KEY` — a dedicated deployment private key
-- `EC2_SSH_KNOWN_HOSTS` — output from `ssh-keyscan -H <api-domain>`
+- `EC2_SSH_KNOWN_HOSTS` — output from `ssh-keyscan -H <server-ip>`
 
-Add these environment variables:
+Add these environment variables. `EC2_HOST` is the server's static IP, since the
+proxied API domain resolves to Cloudflare rather than the server:
 
 ```text
-EC2_HOST=overwatch-api.duckdns.org
-EC2_USER=ubuntu
+EC2_HOST=<server-static-ip>
+EC2_USER=admin
 EC2_APP_DIR=/opt/overwatch
-HEALTH_URL=https://overwatch-api.duckdns.org/health
+HEALTH_URL=https://api.usebearings.app/health
 ```
 
-The workflow copies `compose.prod.yml`, `Caddyfile`, and `scripts/deploy.sh` to
-the server. Caddy obtains and renews HTTPS certificates automatically. The
-application `.env` is never copied from GitHub.
+The workflow copies `compose.prod.yml` and `scripts/deploy.sh` to the server.
+The application `.env` and the origin certificate are never copied from GitHub.
 
 ### Rollout steps
 

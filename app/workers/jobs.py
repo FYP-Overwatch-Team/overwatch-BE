@@ -155,6 +155,30 @@ async def resync_all_targets() -> None:
     await asyncio.gather(*[one(target) async for target in connectors.all_targets()], return_exceptions=True)
 
 
+async def resync_tracker_targets() -> None:
+    """One polling pass over work-item targets only (Jira etc.); runs on the tracker interval."""
+    limit = asyncio.Semaphore(RESYNC_CONCURRENCY)
+
+    async def one(target: dict) -> None:
+        if registry.has_work_items(target["provider"]):
+            async with limit:
+                await sync.run_work_item_sync(target["workspace_id"], target["provider"], target["key"])
+
+    await asyncio.gather(*[one(target) async for target in connectors.all_targets()], return_exceptions=True)
+
+
+async def resync_doc_targets() -> None:
+    """One polling pass over document targets only (Confluence etc.); runs on the doc-sync interval."""
+    limit = asyncio.Semaphore(RESYNC_CONCURRENCY)
+
+    async def one(target: dict) -> None:
+        if registry.get(target["provider"]).category == ConnectorCategory.DOCUMENTS:
+            async with limit:
+                await doc_sync.run_document_sync(target["workspace_id"], target["provider"], target["key"])
+
+    await asyncio.gather(*[one(target) async for target in connectors.all_targets()], return_exceptions=True)
+
+
 async def push_documents() -> None:
     """Send settled edits of mirrored pages back to their source."""
     await doc_sync.push_due()
