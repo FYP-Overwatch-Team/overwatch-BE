@@ -1,6 +1,6 @@
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
-from app.integrations.llm import REQUEST_TIMEOUT_SECONDS, Delta, LLMClient, ToolCall, ToolRound, Turn
+from app.integrations.llm import REQUEST_TIMEOUT_SECONDS, CallUsage, Delta, LLMClient, ToolCall, ToolRound, Turn
 
 
 class FakeLLMClient(LLMClient):
@@ -22,6 +22,8 @@ class FakeLLMClient(LLMClient):
         #: raw replies for the stream calls after the lookups, in order; the last one repeats
         self.replies: list[str] = []
         self.calls: list[dict] = []
+        #: what each call reports it used, to anyone passing `on_usage`
+        self.usage = CallUsage("fake/model", None, prompt_tokens=100, completion_tokens=20, cached_tokens=0, cost_usd=0.001)
 
     async def stream_text(
         self,
@@ -35,7 +37,10 @@ class FakeLLMClient(LLMClient):
         tool_choice: str = "auto",
         closing: str = "",
         session: str = "",
+        on_usage: Callable[[CallUsage], Awaitable[None]] | None = None,
     ) -> AsyncIterator[Delta | ToolCall]:
+        if on_usage:
+            await on_usage(self.usage)
         self.calls.append({
             "mode": "stream", "system": system_instruction, "prompt": prompt, "history": list(history),
             "tools": list(tools), "rounds": list(rounds), "tool_choice": tool_choice, "closing": closing,

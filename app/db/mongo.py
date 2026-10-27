@@ -160,6 +160,11 @@ def chat_conversations():
     return get_db()["chat_conversations"]
 
 
+def llm_usage():
+    """One record per model call: who made it, for what, its tokens and cost. Kept for billing."""
+    return get_db()["llm_usage"]
+
+
 def usage_counters():
     """Fixed-window request counters for rate limits; expire with their window."""
     return get_db()["usage_counters"]
@@ -286,6 +291,8 @@ async def ensure_indexes() -> None:
     await chat_conversations().create_index([("workspace_id", 1), ("user_id", 1), ("repo_full_name", 1), ("updated_at", -1)])
     await chat_conversations().create_index("expires_at", expireAfterSeconds=0)
     await usage_counters().create_index("expires_at", expireAfterSeconds=0)
+    # a workspace's usage over a window, as Settings → Usage reads it
+    await llm_usage().create_index([("workspace_id", 1), ("created_at", -1)])
     await link_previews().create_index("expires_at", expireAfterSeconds=0)
     await webhook_deliveries().create_index("delivery_id", unique=True)
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)

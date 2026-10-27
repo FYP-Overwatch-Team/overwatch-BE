@@ -10,6 +10,7 @@ from structlog.testing import capture_logs
 from app.core.exceptions import ExternalServiceError
 from app.integrations import llm
 from app.integrations.llm import (
+    CallUsage,
     Delta,
     OpenAICompatibleClient,
     ToolCall,
@@ -206,3 +207,22 @@ async def test_cache_use_is_logged_with_the_cost(client):
 
     usage = next(log for log in logs if log["event"] == "llm_usage")
     assert (usage["cached_tokens"], usage["cache_write_tokens"], usage["provider"]) == (800, 0, "DeepInfra")
+
+
+@respx.mock
+async def test_what_a_call_used_is_handed_to_on_usage(client):
+    respx.post(f"{BASE}/chat/completions").respond(200, text=sse(
+        delta(content="ok"),
+        {"choices": [], "provider": "DeepInfra", "usage": {
+            "prompt_tokens": 1000, "completion_tokens": 10, "cost": 0.0001,
+            "prompt_tokens_details": {"cached_tokens": 800},
+        }},
+    ))
+    used: list[CallUsage] = []
+
+    async def record(usage: CallUsage) -> None:
+        used.append(usage)
+
+    [d async for d in client.stream_text("sys", "q", on_usage=record)]
+
+    assert used == [CallUsage("some/model", "DeepInfra", 1000, 10, 800, 0.0001)]

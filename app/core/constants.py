@@ -237,3 +237,9 @@ class HeardFrom(StrEnum):
     SEARCH = "search"
     UNIVERSITY = "university"
     OTHER = "other"
+
+
+class UsageFeature(StrEnum):
+    """What a model call was made for, as AI usage is split by."""
+
+    CHAT = "chat"

@@ -22,6 +22,7 @@ from app.graph.router import router as graph_router
 from app.jira.router import router as jira_router
 from app.link_previews.router import router as link_previews_router
 from app.onboarding.router import router as onboarding_router
+from app.usage.router import router as usage_router
 from app.waitlist.router import router as waitlist_router
 from app.work_item_types.router import router as work_item_types_router
 from app.work_items.router import router as work_items_router
@@ -165,6 +166,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(attachments_router)
     app.include_router(link_previews_router)
     app.include_router(chat_router)
+    app.include_router(usage_router)
     app.include_router(workspaces_router)
     app.include_router(waitlist_router)
 

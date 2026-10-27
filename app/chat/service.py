@@ -10,6 +10,7 @@ from dataclasses import asdict
 
 from app.chat import limits, repository
 from app.chat.schemas import AskRequest
+from app.core.constants import UsageFeature
 from app.core.exceptions import AppError, ConflictError, NotFoundError
 from app.core.time import utcnow
 from app.github.repository import get_readable
@@ -24,6 +25,7 @@ from app.query.grounding import (
     plain_text,
     steps_markdown,
 )
+from app.usage import service as usage
 
 #: Earlier messages sent with a question, oldest first.
 HISTORY_MESSAGES = 6
@@ -85,6 +87,7 @@ async def ask_stream(member: dict, body: AskRequest) -> AsyncIterator[tuple[str,
         before_extra_model_call=limits.take_model_call,
         # a conversation's calls share their opening, so they're routed to one provider's cache
         session=body.conversation_id or uuid.uuid4().hex,
+        on_usage=usage.recorder(workspace_id, user_id, UsageFeature.CHAT),
         # never two questions back in a row
         may_ask=not (last_answer or {}).get("ask"),
     )

@@ -9,7 +9,7 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -64,6 +64,18 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class CallUsage:
+    """What one model call used, as the provider reported it; cost only where it reports one."""
+
+    model: str
+    provider: str | None
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+    cost_usd: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class ToolRound:
     """One round of looking things up: the calls the model made and what each returned, in order."""
 
@@ -88,11 +100,13 @@ class LLMClient(Protocol):
         tool_choice: Literal["auto", "none"] = "auto",
         closing: str = "",
         session: str = "",
+        on_usage: Callable[[CallUsage], Awaitable[None]] | None = None,
     ) -> AsyncIterator[Delta | ToolCall]:
         """The reply as it's written; with `tools`, the calls the model makes come once it's done.
 
         `closing` is a last instruction after the rounds, such as "answer now"; `session`
         groups calls that share a prefix (a conversation), for providers that route by it.
+        `on_usage` gets what the call used once the provider reports it, to record it.
         """
         ...
 
@@ -131,6 +145,7 @@ class OpenAICompatibleClient:
         tool_choice: Literal["auto", "none"] = "auto",
         closing: str = "",
         session: str = "",
+        on_usage: Callable[[CallUsage], Awaitable[None]] | None = None,
     ) -> AsyncIterator[Delta | ToolCall]:
         body = self._body(system_instruction, prompt, history, rounds, closing) | {
             "stream": True, "stream_options": {"include_usage": True},
@@ -156,7 +171,9 @@ class OpenAICompatibleClient:
                         chunk = json.loads(data)
                     except ValueError:
                         continue
-                    self._log_usage(chunk)
+                    usage = self._usage(chunk)
+                    if usage and on_usage:
+                        await on_usage(usage)
                     for delta in _deltas(chunk):
                         yield delta
                     _collect_calls(chunk, calls)
@@ -173,17 +190,26 @@ class OpenAICompatibleClient:
             if name:
                 yield ToolCall(call_id or f"call_{index}", name, arguments)
 
-    def _log_usage(self, chunk: dict) -> None:
-        """Tokens and, where the provider reports it, cost of each call: what a question costs."""
+    def _usage(self, chunk: dict) -> CallUsage | None:
+        """Tokens and, where the provider reports it, cost of the call: logged, and returned to record."""
         usage = chunk.get("usage") if isinstance(chunk, dict) else None
-        if isinstance(usage, dict):
-            cache = usage.get("prompt_tokens_details") or {}
-            logger.info(
-                "llm_usage", model=self._model, prompt_tokens=usage.get("prompt_tokens"),
-                completion_tokens=usage.get("completion_tokens"), cost=usage.get("cost"),
-                cached_tokens=cache.get("cached_tokens"), cache_write_tokens=cache.get("cache_write_tokens"),
-                provider=chunk.get("provider") if isinstance(chunk.get("provider"), str) else None,
-            )
+        if not isinstance(usage, dict):
+            return None
+        cache = usage.get("prompt_tokens_details") or {}
+        provider = chunk.get("provider") if isinstance(chunk.get("provider"), str) else None
+        logger.info(
+            "llm_usage", model=self._model, prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"), cost=usage.get("cost"),
+            cached_tokens=cache.get("cached_tokens"), cache_write_tokens=cache.get("cache_write_tokens"),
+            provider=provider,
+        )
+        cost = usage.get("cost")
+        return CallUsage(
+            model=self._model, provider=provider,
+            prompt_tokens=usage.get("prompt_tokens") or 0, completion_tokens=usage.get("completion_tokens") or 0,
+            cached_tokens=cache.get("cached_tokens") or 0,
+            cost_usd=float(cost) if isinstance(cost, int | float) else None,
+        )
 
     def _body(
         self,
