@@ -5,6 +5,7 @@ settles it, and a suggestion whose quote isn't in the source word for word is th
 One model call per run, made only when someone asks, and never twice for the same text.
 """
 
+from datetime import timedelta
 from pathlib import Path
 
 import structlog
@@ -14,13 +15,15 @@ from app.core.constants import DecisionOrigin, DecisionStatus, EvidenceKind, Usa
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.time import utcnow
 from app.db import mongo
-from app.decisions import ai, limits, quotes, service
+from app.decisions import ai, leases, limits, quotes, service
 from app.decisions.schemas import QUOTE, STATEMENT, CreateDecision, NewEvidence
 
 logger = structlog.get_logger("app.decisions")
 
 SYSTEM_INSTRUCTION = (Path(__file__).parent / "prompts" / "suggest.md").read_text(encoding="utf-8")
 MAX_SUGGESTIONS = 8
+#: longer than one model call can take, retries included
+LEASE = timedelta(minutes=3)
 
 
 class Suggestion(BaseModel):
@@ -39,6 +42,14 @@ async def suggest(member: dict, kind: EvidenceKind, ref_id: str) -> list[dict]:
     source = (await service.sources(workspace_id, [(kind, ref_id)])).get((kind, ref_id))
     if source is None:
         raise NotFoundError("that item or page wasn't found", error_code="evidence_source_not_found")
+    key = {"workspace_id": workspace_id, "ref_id": ref_id}
+    busy = ConflictError("Suggestions for this are already being drafted", error_code="suggest_in_progress")
+    async with leases.lease(mongo.decision_scans(), key, LEASE, busy):
+        return await _suggest(member, kind, ref_id, source)
+
+
+async def _suggest(member: dict, kind: EvidenceKind, ref_id: str, source: dict) -> list[dict]:
+    workspace_id = member["workspace_id"]
     fingerprint = quotes.fingerprint(source["text"])
     scan = await mongo.decision_scans().find_one({"workspace_id": workspace_id, "ref_id": ref_id}) or {}
     if scan.get("fingerprint") == fingerprint:

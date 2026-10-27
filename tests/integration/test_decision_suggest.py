@@ -1,10 +1,12 @@
 """Suggesting decisions: the AI drafts proposals from one item or page, checked against it, never twice for the same text."""
 
 import json
+from datetime import timedelta
 
 import pytest
 
 from app.core.config import get_settings
+from app.core.time import utcnow
 from app.db import mongo
 from tests.integration.test_decisions_api import page
 from tests.integration.test_work_items_api import signed_in
@@ -113,3 +115,22 @@ async def test_an_unreadable_reply_is_an_error_and_the_source_can_be_tried_again
 
     assert (failed.status_code, failed.json()["meta"]["error_code"]) == (502, "llm_bad_reply")
     assert retried.status_code == 201
+
+
+async def test_a_source_being_read_isnt_read_again_at_the_same_time(client, fake_llm):
+    headers = await signed_in(client)
+    prd = await page(client, headers, PRD)
+    # someone else's run holds the source right now
+    await mongo.decision_scans().insert_one({
+        "workspace_id": headers["X-Workspace-Id"], "ref_id": prd["id"], "running_until": utcnow() + timedelta(minutes=1),
+    })
+
+    busy = await suggest(client, headers, prd)
+    await mongo.decision_scans().update_one({"ref_id": prd["id"]}, {"$set": {"running_until": utcnow() - timedelta(seconds=1)}})
+    fake_llm.stream_response = reply()
+    lapsed = await suggest(client, headers, prd)
+
+    assert busy.json()["meta"]["error_code"] == "suggest_in_progress"
+    assert lapsed.status_code == 201
+    assert len(fake_llm.calls) == 1
+    assert (await mongo.decision_scans().find_one({"ref_id": prd["id"]}))["running_until"] is None

@@ -147,3 +147,17 @@ async def test_the_background_pass_checks_workspaces_that_are_due_and_on(client,
     assert len(fake_llm.calls) == 1
     recorded = await mongo.llm_usage().find_one({})
     assert (recorded["workspace_id"], recorded["user_id"], recorded["feature"]) == (due["X-Workspace-Id"], "system", "decision_check")
+
+
+async def test_one_check_runs_per_workspace_at_a_time(client, fake_llm):
+    headers = await signed_in(client)
+    prd = await page(client, headers)
+    await accepted(client, headers, prd, "Guests can't export reports.")
+    await edit(prd["id"], CHANGED)
+    await mongo.decision_check_settings().insert_one({"_id": headers["X-Workspace-Id"], "running_until": utcnow() + timedelta(minutes=5)})
+
+    busy = await client.post("/decisions/checks/run", headers=headers)
+    await checks.run_due()
+
+    assert busy.json()["meta"]["error_code"] == "check_in_progress"
+    assert fake_llm.calls == []

@@ -17,10 +17,10 @@ import structlog
 from pydantic import BaseModel, Field
 
 from app.core.constants import DecisionCheckInterval, DecisionStatus, EvidenceKind, EvidenceStance, UsageFeature
-from app.core.exceptions import AppError, FieldValidationError
+from app.core.exceptions import AppError, ConflictError, FieldValidationError
 from app.core.time import utcnow
 from app.db import mongo
-from app.decisions import ai, limits, quotes, service
+from app.decisions import ai, leases, limits, quotes, service
 from app.decisions.schemas import NOTE, QUOTE, ChangeCheckSettings, NewEvidence
 
 logger = structlog.get_logger("app.decisions")
@@ -30,6 +30,8 @@ SYSTEM_INSTRUCTION = (Path(__file__).parent / "prompts" / "check.md").read_text(
 SYSTEM_USER = "system"
 #: decisions read with one source; the most recently changed when there are more
 MAX_DECISIONS_PER_SOURCE = 8
+#: longer than a whole check can take: a day's cap of model calls, each with its retries
+LEASE = timedelta(minutes=30)
 
 
 class Conflict(BaseModel):
@@ -90,7 +92,16 @@ async def _check_source(workspace_id: str, user_id: str, ref: Ref, text: str, de
 
 
 async def check_workspace(workspace_id: str, user_id: str = SYSTEM_USER) -> dict:
-    """Check what changed since the last check; `capped` when the day's checks ran out on the way."""
+    """Check what changed since the last check; `capped` when the day's checks ran out on the way.
+
+    One check runs per workspace at a time; another meanwhile raises `check_in_progress`.
+    """
+    busy = ConflictError("A check is already running for this workspace", error_code="check_in_progress")
+    async with leases.lease(mongo.decision_check_settings(), {"_id": workspace_id}, LEASE, busy):
+        return await _check(workspace_id, user_id)
+
+
+async def _check(workspace_id: str, user_id: str) -> dict:
     await service.refresh_attention(workspace_id)
     related = await _related(workspace_id)
     found = await service.sources(workspace_id, list(related)) if related else {}
@@ -153,6 +164,8 @@ async def run_due() -> None:
             continue
         try:
             await check_workspace(workspace_id)
+        except ConflictError:
+            continue  # someone pressed Check now; that run covers it
         except Exception:
             # one workspace's failure (the AI being down, say) doesn't stop the others
             logger.exception("decision_check_failed", workspace_id=workspace_id)
