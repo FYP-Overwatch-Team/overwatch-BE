@@ -5,28 +5,22 @@ settles it, and a suggestion whose quote isn't in the source word for word is th
 One model call per run, made only when someone asks, and never twice for the same text.
 """
 
-import json
 from pathlib import Path
 
 import structlog
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from app.core.constants import DecisionOrigin, DecisionStatus, EvidenceKind, UsageFeature
-from app.core.exceptions import ConflictError, ExternalServiceError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError
 from app.core.time import utcnow
 from app.db import mongo
-from app.decisions import limits, quotes, service
+from app.decisions import ai, limits, quotes, service
 from app.decisions.schemas import QUOTE, STATEMENT, CreateDecision, NewEvidence
-from app.integrations.llm import Delta, get_llm_client
-from app.usage import service as usage
 
 logger = structlog.get_logger("app.decisions")
 
 SYSTEM_INSTRUCTION = (Path(__file__).parent / "prompts" / "suggest.md").read_text(encoding="utf-8")
-#: how much of a source the model reads; longer pages are cut here
-MAX_SOURCE_CHARS = 12_000
 MAX_SUGGESTIONS = 8
-TIMEOUT_SECONDS = 60
 
 
 class Suggestion(BaseModel):
@@ -37,30 +31,6 @@ class Suggestion(BaseModel):
 
 class Reply(BaseModel):
     decisions: list[Suggestion]
-
-
-def _read_reply(text: str) -> list[Suggestion]:
-    """The suggestions in the model's JSON reply, which may come wrapped in a code fence."""
-    start, end = text.find("{"), text.rfind("}")
-    try:
-        return Reply.model_validate(json.loads(text[start:end + 1])).decisions[:MAX_SUGGESTIONS]
-    except (ValueError, ValidationError) as exc:
-        logger.warning("decision_suggest_unreadable", error=type(exc).__name__, reply=text[:200])
-        raise ExternalServiceError("The AI's reply couldn't be read; try again", error_code="llm_bad_reply") from exc
-
-
-async def _ask(member: dict, text: str) -> str:
-    # the source's text starts with its title
-    prompt = f"<source>\n{text[:MAX_SOURCE_CHARS]}\n</source>"
-    reply = []
-    stream = get_llm_client().stream_text(
-        SYSTEM_INSTRUCTION, prompt, timeout=TIMEOUT_SECONDS,
-        on_usage=usage.recorder(member["workspace_id"], member["user_id"], UsageFeature.DECISION_SUGGEST),
-    )
-    async for item in stream:
-        if isinstance(item, Delta) and item.kind == "text":
-            reply.append(item.text)
-    return "".join(reply)
 
 
 async def suggest(member: dict, kind: EvidenceKind, ref_id: str) -> list[dict]:
@@ -75,7 +45,11 @@ async def suggest(member: dict, kind: EvidenceKind, ref_id: str) -> list[dict]:
         raise ConflictError("Nothing has changed here since it was last checked", error_code="source_unchanged")
 
     await limits.take_suggestion(workspace_id)
-    suggestions = _read_reply(await _ask(member, source["text"]))
+    reply = await ai.ask_json(
+        Reply, SYSTEM_INSTRUCTION, ai.fenced(source["text"]),
+        workspace_id=workspace_id, user_id=member["user_id"], feature=UsageFeature.DECISION_SUGGEST,
+    )
+    suggestions = reply.decisions[:MAX_SUGGESTIONS]
 
     # nothing already quoted from here, and nothing someone said isn't a decision
     known = set(scan.get("dismissed_quotes", []))
