@@ -28,6 +28,7 @@ from app.waitlist.router import router as waitlist_router
 from app.work_item_types.router import router as work_item_types_router
 from app.work_items.router import router as work_items_router
 from app.workspaces.router import router as workspaces_router
+from app.decisions import checks as decision_checks
 from app.workers import jobs
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -56,6 +57,16 @@ async def _doc_sync_loop(interval_seconds: int) -> None:
         except Exception:
             structlog.get_logger("app.jobs").exception("doc_sync_loop_error")
         await asyncio.sleep(interval_seconds)
+
+
+async def _decision_check_loop(interval_seconds: int) -> None:
+    """Check accepted decisions against what changed, in every workspace that hasn't turned checks off."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await decision_checks.run_enabled()
+        except Exception:
+            structlog.get_logger("app.decisions").exception("decision_check_loop_error")
 
 
 async def _merge_loop() -> None:
@@ -124,7 +135,9 @@ async def lifespan(app: FastAPI):
     )
     docs_task = asyncio.create_task(_docs_loop(get_settings().doc_push_interval_seconds))
     merge_task = asyncio.create_task(_merge_loop())
+    decision_check_task = asyncio.create_task(_decision_check_loop(get_settings().decision_check_interval_seconds))
     yield
+    decision_check_task.cancel()
     sync_task.cancel()
     doc_sync_task.cancel()
     docs_task.cancel()

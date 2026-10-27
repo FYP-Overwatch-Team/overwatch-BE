@@ -170,6 +170,16 @@ def decision_scans():
     return get_db()["decision_scans"]
 
 
+def decision_checks():
+    """What each item or page said when decision checks last read it, so only changes are read again."""
+    return get_db()["decision_checks"]
+
+
+def decision_check_settings():
+    """Per workspace (`_id`): whether decision checks were turned off, and how the last one went."""
+    return get_db()["decision_check_settings"]
+
+
 def llm_usage():
     """One record per model call: who made it, for what, its tokens and cost. Kept for billing."""
     return get_db()["llm_usage"]
@@ -305,6 +315,7 @@ async def ensure_indexes() -> None:
     await decisions().create_index([("workspace_id", 1), ("status", 1), ("updated_at", -1)])
     await decisions().create_index([("workspace_id", 1), ("evidence.ref_id", 1)])
     await decision_scans().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
+    await decision_checks().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
     # a workspace's usage over a window, as Settings → Usage reads it
     await llm_usage().create_index([("workspace_id", 1), ("created_at", -1)])
     await link_previews().create_index("expires_at", expireAfterSeconds=0)

@@ -20,6 +20,8 @@ class NewEvidence(BaseModel):
     ref_id: str
     quote: str = Field(**QUOTE)
     stance: EvidenceStance = EvidenceStance.SUPPORTS
+    #: why it supports or contradicts the decision, e.g. what an automatic check found
+    note: str | None = Field(default=None, **NOTE)
 
 
 class Evidence(NewEvidence):
@@ -96,3 +98,23 @@ class ChangeStatus(BaseModel):
 class SuggestRequest(BaseModel):
     kind: EvidenceKind
     ref_id: str
+
+
+class CheckResult(BaseModel):
+    #: changed items and pages read
+    checked: int
+    #: contradicting passages added to decisions
+    conflicts: int
+    #: the day's checks ran out before everything changed was read
+    capped: bool
+
+
+class CheckSettings(BaseModel):
+    #: whether accepted decisions are checked against what changed every half hour; on by default
+    enabled: bool
+    last_run_at: datetime | None
+    last_result: CheckResult | None
+
+
+class ChangeCheckSettings(BaseModel):
+    enabled: bool

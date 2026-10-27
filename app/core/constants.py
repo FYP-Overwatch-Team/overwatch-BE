@@ -244,6 +244,7 @@ class UsageFeature(StrEnum):
 
     CHAT = "chat"
     DECISION_SUGGEST = "decision_suggest"
+    DECISION_CHECK = "decision_check"
 
 
 class DecisionStatus(StrEnum):

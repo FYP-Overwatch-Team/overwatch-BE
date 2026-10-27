@@ -3,8 +3,18 @@ from fastapi import Depends, Query
 from app.api.deps import workspace_member
 from app.core.constants import DecisionStatus
 from app.core.responses import WithMeta, api_router
-from app.decisions import service, suggest
-from app.decisions.schemas import ChangeStatus, CreateDecision, Decision, NewEvidence, SuggestRequest, UpdateDecision
+from app.decisions import checks, service, suggest
+from app.decisions.schemas import (
+    ChangeCheckSettings,
+    ChangeStatus,
+    CheckResult,
+    CheckSettings,
+    CreateDecision,
+    Decision,
+    NewEvidence,
+    SuggestRequest,
+    UpdateDecision,
+)
 
 # any member records and settles decisions; roles come later
 router = api_router(prefix="/decisions", tags=["decisions"])
@@ -35,6 +45,22 @@ async def create_decision(body: CreateDecision, member: dict = Depends(workspace
 async def suggest_decisions(body: SuggestRequest, member: dict = Depends(workspace_member())) -> list[Decision]:
     """Ask the AI to draft the decisions a board item or page states; they're saved as proposals to review."""
     return await suggest.suggest(member, body.kind, body.ref_id)
+
+
+@router.get("/checks")
+async def get_check_settings(member: dict = Depends(workspace_member())) -> CheckSettings:
+    return await checks.get_settings(member["workspace_id"])
+
+
+@router.put("/checks")
+async def change_check_settings(body: ChangeCheckSettings, member: dict = Depends(workspace_member())) -> CheckSettings:
+    return await checks.set_enabled(member["workspace_id"], body.enabled)
+
+
+@router.post("/checks/run")
+async def run_check(member: dict = Depends(workspace_member())) -> CheckResult:
+    """Check accepted decisions against what changed, now, instead of waiting for the next run."""
+    return await checks.check_workspace(member["workspace_id"], member["user_id"])
 
 
 @router.get("/{decision_id}")
