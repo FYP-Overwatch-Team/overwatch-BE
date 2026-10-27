@@ -91,3 +91,8 @@ class ChangeStatus(BaseModel):
     note: str | None = Field(default=None, **NOTE)
     #: required with `superseded`: the decision that replaces this one
     superseded_by: str | None = None
+
+
+class SuggestRequest(BaseModel):
+    kind: EvidenceKind
+    ref_id: str

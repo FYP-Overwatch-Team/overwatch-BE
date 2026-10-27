@@ -28,7 +28,7 @@ def _page_text(doc: dict) -> str:
     return f"{doc['title']}\n{doc.get('content_md') or ''}"
 
 
-async def _sources(workspace_id: str, refs: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+async def sources(workspace_id: str, refs: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
     """The board items and live docs pages behind `(kind, ref_id)` pairs, with their text, by pair."""
     item_ids = [ref_id for kind, ref_id in refs if kind == EvidenceKind.WORK_ITEM]
     page_ids = [ref_id for kind, ref_id in refs if kind == EvidenceKind.DOCUMENT]
@@ -61,11 +61,11 @@ def _state(evidence: dict, source: dict | None) -> EvidenceState:
 async def _to_decisions(workspace_id: str, docs: list[dict]) -> list[dict]:
     """Decisions as the API returns them, each piece of evidence with its state now."""
     refs = [(e["kind"], e["ref_id"]) for doc in docs for e in doc["evidence"]]
-    sources = await _sources(workspace_id, refs) if refs else {}
+    found = await sources(workspace_id, refs) if refs else {}
     return [
         {
             **doc, "id": doc["_id"],
-            "evidence": [{**e, "state": _state(e, sources.get((e["kind"], e["ref_id"])))} for e in doc["evidence"]],
+            "evidence": [{**e, "state": _state(e, found.get((e["kind"], e["ref_id"])))} for e in doc["evidence"]],
         }
         for doc in docs
     ]
@@ -80,11 +80,11 @@ async def _found(workspace_id: str, decision_id: str) -> dict:
 
 async def _evidence(workspace_id: str, user_id: str, new: list[NewEvidence]) -> list[dict]:
     """Stored evidence for `new`; each quote must be found in its source."""
-    sources = await _sources(workspace_id, [(e.kind, e.ref_id) for e in new])
+    found = await sources(workspace_id, [(e.kind, e.ref_id) for e in new])
     now = utcnow()
     stored = []
     for index, evidence in enumerate(new):
-        source = sources.get((evidence.kind, evidence.ref_id))
+        source = found.get((evidence.kind, evidence.ref_id))
         if source is None:
             raise NotFoundError("that item or page wasn't found", error_code="evidence_source_not_found")
         if not quotes.contains(source["text"], evidence.quote):

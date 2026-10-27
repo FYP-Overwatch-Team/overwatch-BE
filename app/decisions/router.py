@@ -3,8 +3,8 @@ from fastapi import Depends, Query
 from app.api.deps import workspace_member
 from app.core.constants import DecisionStatus
 from app.core.responses import WithMeta, api_router
-from app.decisions import service
-from app.decisions.schemas import ChangeStatus, CreateDecision, Decision, NewEvidence, UpdateDecision
+from app.decisions import service, suggest
+from app.decisions.schemas import ChangeStatus, CreateDecision, Decision, NewEvidence, SuggestRequest, UpdateDecision
 
 # any member records and settles decisions; roles come later
 router = api_router(prefix="/decisions", tags=["decisions"])
@@ -31,6 +31,12 @@ async def create_decision(body: CreateDecision, member: dict = Depends(workspace
     return await service.create(member, body)
 
 
+@router.post("/suggest", status_code=201)
+async def suggest_decisions(body: SuggestRequest, member: dict = Depends(workspace_member())) -> list[Decision]:
+    """Ask the AI to draft the decisions a board item or page states; they're saved as proposals to review."""
+    return await suggest.suggest(member, body.kind, body.ref_id)
+
+
 @router.get("/{decision_id}")
 async def get_decision(decision_id: str, member: dict = Depends(workspace_member())) -> Decision:
     return await service.get(member["workspace_id"], decision_id)
@@ -54,3 +60,9 @@ async def add_evidence(decision_id: str, body: NewEvidence, member: dict = Depen
 @router.delete("/{decision_id}/evidence/{evidence_id}")
 async def remove_evidence(decision_id: str, evidence_id: str, member: dict = Depends(workspace_member())) -> Decision:
     return await service.remove_evidence(member, decision_id, evidence_id)
+
+
+@router.post("/{decision_id}/dismiss")
+async def dismiss_suggestion(decision_id: str, member: dict = Depends(workspace_member())) -> None:
+    """"Not a decision": removes an AI suggestion still waiting for review, so it isn't suggested again."""
+    await suggest.dismiss(member, decision_id)

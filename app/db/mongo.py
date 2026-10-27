@@ -165,6 +165,11 @@ def decisions():
     return get_db()["decisions"]
 
 
+def decision_scans():
+    """The last "Suggest decisions" run on each item or page, and the suggestions dismissed from it."""
+    return get_db()["decision_scans"]
+
+
 def llm_usage():
     """One record per model call: who made it, for what, its tokens and cost. Kept for billing."""
     return get_db()["llm_usage"]
@@ -299,6 +304,7 @@ async def ensure_indexes() -> None:
     # the Decisions inbox, newest change first, and the decisions quoting one item or page
     await decisions().create_index([("workspace_id", 1), ("status", 1), ("updated_at", -1)])
     await decisions().create_index([("workspace_id", 1), ("evidence.ref_id", 1)])
+    await decision_scans().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
     # a workspace's usage over a window, as Settings → Usage reads it
     await llm_usage().create_index([("workspace_id", 1), ("created_at", -1)])
     await link_previews().create_index("expires_at", expireAfterSeconds=0)

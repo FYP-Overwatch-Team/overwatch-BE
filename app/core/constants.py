@@ -243,6 +243,7 @@ class UsageFeature(StrEnum):
     """What a model call was made for, as AI usage is split by."""
 
     CHAT = "chat"
+    DECISION_SUGGEST = "decision_suggest"
 
 
 class DecisionStatus(StrEnum):

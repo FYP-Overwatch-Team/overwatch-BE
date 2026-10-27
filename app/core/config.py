@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     chat_user_hourly_limit: int = 30
     chat_workspace_daily_limit: int = 200
     chat_daily_budget: int = 500
+    # "Suggest decisions" runs a workspace may make a day; they also count against chat_daily_budget
+    decision_suggest_workspace_daily_limit: int = 20
     # lookups (graph search, reading code) one answer may make before it must answer; 0 turns them off
     chat_max_lookups: int = 20
     # OpenRouter provider routing, empty to send nothing: sort by "latency", "throughput" or "price",
