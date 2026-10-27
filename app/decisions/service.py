@@ -9,6 +9,7 @@ be out of date.
 import re
 import uuid
 
+from app.boards import repository as boards
 from app.core.constants import DecisionOrigin, DecisionStatus, DocumentKind, EvidenceKind, EvidenceState
 from app.core.exceptions import FieldValidationError, NotFoundError
 from app.core.time import utcnow
@@ -36,6 +37,7 @@ async def _sources(workspace_id: str, refs: list[tuple[str, str]]) -> dict[tuple
         async for item in mongo.work_items().find({"workspace_id": workspace_id, "_id": {"$in": item_ids}}):
             found[(EvidenceKind.WORK_ITEM, item["_id"])] = {
                 "title": f"{item['key']} {item['title']}", "external_url": item.get("external_url"), "text": _item_text(item),
+                "key": item["key"], "source": item["source"], "target_key": item.get("target_key"),
             }
     if page_ids:
         query = {"workspace_id": workspace_id, "_id": {"$in": page_ids}, "kind": DocumentKind.PAGE, "archived_at": None}
@@ -87,9 +89,12 @@ async def _evidence(workspace_id: str, user_id: str, new: list[NewEvidence]) -> 
             raise NotFoundError("that item or page wasn't found", error_code="evidence_source_not_found")
         if not quotes.contains(source["text"], evidence.quote):
             raise FieldValidationError({f"evidence.{index}.quote": "This passage isn't in that item or page."})
+        # where a board item opens: its board and key; pages open by their id
+        board = await boards.find(workspace_id, source["source"], source["target_key"]) if "key" in source else None
         stored.append({
             **evidence.model_dump(), "id": uuid.uuid4().hex, "title": source["title"],
             "external_url": source["external_url"], "fingerprint": quotes.fingerprint(source["text"]),
+            "board_id": board["_id"] if board else None, "item_key": source.get("key"),
             "added_by": user_id, "added_at": now,
         })
     return stored

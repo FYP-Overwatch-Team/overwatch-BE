@@ -27,6 +27,9 @@ class Evidence(NewEvidence):
     #: the source's title and link when it was quoted, kept in case the source goes away
     title: str
     external_url: str | None
+    #: a board item's board and key, to open it there; null for pages
+    board_id: str | None = None
+    item_key: str | None = None
     added_by: str
     added_at: datetime
     state: EvidenceState

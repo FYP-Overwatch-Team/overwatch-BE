@@ -5,7 +5,7 @@ from app.decisions.schemas import MAX_EVIDENCE
 from tests.integration.test_documents_api import create as create_page
 from tests.integration.test_documents_api import text_doc
 from tests.integration.test_work_items_api import create as create_item
-from tests.integration.test_work_items_api import signed_in
+from tests.integration.test_work_items_api import board_id, signed_in
 from tests.integration.test_workspaces import user
 
 PRD = "Guests can't export reports.\n\nAdmins export as **CSV** or PDF."
@@ -55,6 +55,7 @@ async def test_evidence_shows_when_its_source_changes_drops_the_quote_or_goes_aw
     headers = await signed_in(client)
     edited, rewritten, archived = [await page(client, headers) for _ in range(3)]
     item = await create_item(client, headers, title="Export button", description="Hide export for guests")
+    item_board = await board_id(client, headers)
     made = await decide(client, headers, evidence=[
         quoting(edited, "Guests can't export reports."), quoting(rewritten, "Guests can't export reports."),
         quoting(archived, "Guests can't export reports."), quoting(item, "hide export for guests", kind="work_item"),
@@ -66,6 +67,8 @@ async def test_evidence_shows_when_its_source_changes_drops_the_quote_or_goes_aw
 
     got = (await client.get(f"/decisions/{made['id']}", headers=headers)).json()["data"]
     assert [e["state"] for e in got["evidence"]] == ["changed", "quote_missing", "source_gone", "current"]
+    assert (got["evidence"][3]["board_id"], got["evidence"][3]["item_key"]) == (item_board, item["key"])
+    assert got["evidence"][0]["board_id"] is None
     # the snapshot still reads after its source is gone
     assert got["evidence"][2]["quote"] == "Guests can't export reports."
 
