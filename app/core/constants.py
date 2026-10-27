@@ -243,3 +243,43 @@ class UsageFeature(StrEnum):
     """What a model call was made for, as AI usage is split by."""
 
     CHAT = "chat"
+
+
+class DecisionStatus(StrEnum):
+    """Where a decision stands. Only people move it; a suggestion from the AI starts as `proposed`."""
+
+    OPEN = "open"
+    PROPOSED = "proposed"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    SUPERSEDED = "superseded"
+
+
+class DecisionOrigin(StrEnum):
+    MANUAL = "manual"
+    SUGGESTED = "suggested"
+
+
+class EvidenceKind(StrEnum):
+    """What a piece of evidence quotes: a board item or a docs page."""
+
+    WORK_ITEM = "work_item"
+    DOCUMENT = "document"
+
+
+class EvidenceStance(StrEnum):
+    SUPPORTS = "supports"
+    CONTRADICTS = "contradicts"
+
+
+class EvidenceState(StrEnum):
+    """How a quote compares with its source now: worked out each time a decision is read."""
+
+    #: the source hasn't changed since it was quoted
+    CURRENT = "current"
+    #: the source changed, but still says what was quoted
+    CHANGED = "changed"
+    #: the source no longer says what was quoted
+    QUOTE_MISSING = "quote_missing"
+    #: the source was deleted or archived
+    SOURCE_GONE = "source_gone"

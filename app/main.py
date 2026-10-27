@@ -13,6 +13,7 @@ from app.comments.router import router as comments_router
 from app.sprints.router import router as sprints_router
 from app.chat.router import router as chat_router
 from app.documents.attachments import router as attachments_router
+from app.decisions.router import router as decisions_router
 from app.documents.router import router as documents_router
 from app.connectors.router import router as connections_router
 from app.github import checkout
@@ -163,6 +164,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(sprints_router)
     app.include_router(comments_router)
     app.include_router(documents_router)
+    app.include_router(decisions_router)
     app.include_router(attachments_router)
     app.include_router(link_previews_router)
     app.include_router(chat_router)
