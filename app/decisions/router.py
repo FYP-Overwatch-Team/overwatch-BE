@@ -3,7 +3,7 @@ from fastapi import Depends, Query
 from app.api.deps import workspace_member
 from app.core.constants import DecisionStatus
 from app.core.responses import WithMeta, api_router
-from app.decisions import checks, service, suggest
+from app.decisions import checks, overview, service, suggest
 from app.decisions.schemas import (
     ChangeCheckSettings,
     ChangeStatus,
@@ -12,6 +12,7 @@ from app.decisions.schemas import (
     CreateDecision,
     Decision,
     NewEvidence,
+    OverviewPage,
     SuggestRequest,
     UpdateDecision,
 )
@@ -61,6 +62,12 @@ async def change_check_settings(body: ChangeCheckSettings, member: dict = Depend
 async def run_check(member: dict = Depends(workspace_member())) -> CheckResult:
     """Check accepted decisions against what changed, now, instead of waiting for the next run."""
     return await checks.check_workspace(member["workspace_id"], member["user_id"])
+
+
+@router.post("/overview")
+async def update_overview(member: dict = Depends(workspace_member())) -> OverviewPage:
+    """Write the product overview page from the accepted decisions, creating it the first time."""
+    return OverviewPage(page_id=await overview.update(member))
 
 
 @router.get("/{decision_id}")

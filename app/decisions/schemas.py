@@ -130,3 +130,8 @@ class ChangeCheckSettings(BaseModel):
 
     enabled: bool | None = None
     interval_minutes: DecisionCheckInterval | None = None
+
+
+class OverviewPage(BaseModel):
+    #: the docs page the product overview was written to
+    page_id: str
