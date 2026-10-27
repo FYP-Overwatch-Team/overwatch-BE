@@ -25,6 +25,8 @@ AGILE_SCOPES = (
     "read:sprint:jira-software",
     "write:sprint:jira-software",
     "read:issue:jira-software",
+    # finding a project's board, and reading its columns, also need the project read
+    "read:project:jira",
 )
 AGILE_SCOPE = "read:board-scope.admin:jira-software"
 
