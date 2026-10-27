@@ -29,6 +29,7 @@ from app.work_item_types.router import router as work_item_types_router
 from app.work_items.router import router as work_items_router
 from app.workspaces.router import router as workspaces_router
 from app.decisions import checks as decision_checks
+from app.integrations import llm
 from app.workers import jobs
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -138,6 +139,11 @@ async def lifespan(app: FastAPI):
     decision_check_task = asyncio.create_task(_decision_check_loop(get_settings().decision_check_tick_seconds))
     yield
     decision_check_task.cancel()
+    # what calls stopped early were billed, while there's still time to record it
+    try:
+        await asyncio.wait_for(llm.settle_usage(), timeout=10)
+    except TimeoutError:
+        structlog.get_logger("app.llm").warning("llm_usage_lookups_unfinished")
     sync_task.cancel()
     doc_sync_task.cancel()
     docs_task.cancel()

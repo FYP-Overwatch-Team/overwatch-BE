@@ -226,3 +226,79 @@ async def test_what_a_call_used_is_handed_to_on_usage(client):
     [d async for d in client.stream_text("sys", "q", on_usage=record)]
 
     assert used == [CallUsage("some/model", "DeepInfra", 1000, 10, 800, 0.0001)]
+
+
+OPENROUTER = "https://openrouter.ai/api/v1"
+
+
+@pytest.fixture
+def openrouter(monkeypatch):
+    monkeypatch.setattr(llm, "USAGE_LOOKUP_DELAYS_SECONDS", (0.0, 0.0, 0.0))
+    return OpenAICompatibleClient(base_url=OPENROUTER, model="some/model", api_key="key-123")
+
+
+def generation(**fields) -> dict:
+    return {"id": "gen-abc123", "choices": [{"delta": fields}]}
+
+
+@respx.mock
+async def test_a_call_stopped_early_is_recorded_as_openrouter_billed_it(openrouter):
+    respx.post(f"{OPENROUTER}/chat/completions").respond(200, text=sse(
+        generation(content="The answer"), generation(content=" goes on"),
+        {"id": "gen-abc123", "choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ))
+    billed = respx.get(f"{OPENROUTER}/generation", params={"id": "gen-abc123"}).mock(side_effect=[
+        httpx.Response(404),
+        httpx.Response(200, json={"data": {
+            "native_tokens_prompt": 1200, "native_tokens_completion": 7, "native_tokens_cached": 1000,
+            "total_cost": 0.00042, "provider_name": "DeepInfra",
+        }}),
+    ])
+    used: list[CallUsage] = []
+
+    async def record(usage: CallUsage) -> None:
+        used.append(usage)
+
+    stream = openrouter.stream_text("sys", "q", on_usage=record)
+    await anext(stream)
+    await stream.aclose()  # refused or cancelled after the first piece, as the chat closes it
+    await llm.settle_usage()
+
+    assert billed.call_count == 2
+    assert used == [CallUsage("some/model", "DeepInfra", 1200, 7, 1000, 0.00042)]
+
+
+@respx.mock
+async def test_a_call_that_reports_its_usage_isnt_looked_up(openrouter):
+    respx.post(f"{OPENROUTER}/chat/completions").respond(200, text=sse(
+        generation(content="ok"), {"id": "gen-abc123", "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.001}},
+    ))
+    lookup = respx.get(f"{OPENROUTER}/generation")
+    used: list[CallUsage] = []
+
+    async def record(usage: CallUsage) -> None:
+        used.append(usage)
+
+    [d async for d in openrouter.stream_text("sys", "q", on_usage=record)]
+    await llm.settle_usage()
+
+    assert not lookup.called
+    assert [(u.prompt_tokens, u.cost_usd) for u in used] == [(10, 0.001)]
+
+
+@respx.mock
+async def test_a_stopped_call_that_cant_be_looked_up_is_logged_not_guessed(client):
+    respx.post(f"{BASE}/chat/completions").respond(200, text=sse(generation(content="a"), generation(content="b")))
+    used: list[CallUsage] = []
+
+    async def record(usage: CallUsage) -> None:
+        used.append(usage)
+
+    with capture_logs() as logs:
+        stream = client.stream_text("sys", "q", on_usage=record)
+        await anext(stream)
+        await stream.aclose()
+        await llm.settle_usage()
+
+    assert used == []
+    assert any(log["event"] == "llm_usage_unrecorded" and log["reason"] == "no_lookup" for log in logs)
