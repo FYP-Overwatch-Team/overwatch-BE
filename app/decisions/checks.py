@@ -1,6 +1,7 @@
 """Checking accepted decisions against what changed since.
 
-Every workspace is checked every half hour unless it turns checks off, and whenever someone asks. Each
+Every workspace is checked as often as it chose (every half hour unless it changes that, or turns
+checks off), and whenever someone asks. Each
 check looks at the board items and pages its accepted decisions quote, and the items linked
 to those quoted items, and reads only the ones whose text changed since they were last read.
 The AI reads each with the decisions it relates to; a passage contradicting one is added to
@@ -9,17 +10,18 @@ goes to Needs you, and a person settles it.
 """
 
 from collections import defaultdict
+from datetime import timedelta
 from pathlib import Path
 
 import structlog
 from pydantic import BaseModel, Field
 
-from app.core.constants import DecisionStatus, EvidenceKind, EvidenceStance, UsageFeature
+from app.core.constants import DecisionCheckInterval, DecisionStatus, EvidenceKind, EvidenceStance, UsageFeature
 from app.core.exceptions import AppError, FieldValidationError
 from app.core.time import utcnow
 from app.db import mongo
 from app.decisions import ai, limits, quotes, service
-from app.decisions.schemas import NOTE, QUOTE, NewEvidence
+from app.decisions.schemas import NOTE, QUOTE, ChangeCheckSettings, NewEvidence
 
 logger = structlog.get_logger("app.decisions")
 
@@ -123,20 +125,30 @@ async def check_workspace(workspace_id: str, user_id: str = SYSTEM_USER) -> dict
 
 async def get_settings(workspace_id: str) -> dict:
     doc = await mongo.decision_check_settings().find_one({"_id": workspace_id}) or {}
-    # on unless the workspace turned it off
-    return {"enabled": doc.get("enabled", True), "last_run_at": doc.get("last_run_at"), "last_result": doc.get("last_result")}
+    return {
+        # on, every half hour, unless the workspace changed that
+        "enabled": doc.get("enabled", True),
+        "interval_minutes": doc.get("interval_minutes", DecisionCheckInterval.HALF_HOUR),
+        "last_run_at": doc.get("last_run_at"), "last_result": doc.get("last_result"),
+    }
 
 
-async def set_enabled(workspace_id: str, enabled: bool) -> dict:
-    await mongo.decision_check_settings().update_one({"_id": workspace_id}, {"$set": {"enabled": enabled}}, upsert=True)
+async def change_settings(workspace_id: str, body: ChangeCheckSettings) -> dict:
+    fields = body.model_dump(exclude_none=True)
+    if fields:
+        await mongo.decision_check_settings().update_one({"_id": workspace_id}, {"$set": fields}, upsert=True)
     return await get_settings(workspace_id)
 
 
-async def run_enabled() -> None:
-    """One pass of the background check over every workspace with accepted decisions that hasn't turned checks off."""
-    off = {doc["_id"] async for doc in mongo.decision_check_settings().find({"enabled": False}, {"_id": 1})}
+async def run_due() -> None:
+    """Check every workspace with accepted decisions whose checks are on and due."""
+    now = utcnow()
+    settings = {doc["_id"]: doc async for doc in mongo.decision_check_settings().find()}
     for workspace_id in await mongo.decisions().distinct("workspace_id", {"status": DecisionStatus.ACCEPTED}):
-        if workspace_id in off:
+        doc = settings.get(workspace_id, {})
+        every = timedelta(minutes=doc.get("interval_minutes", DecisionCheckInterval.HALF_HOUR))
+        last = doc.get("last_run_at")
+        if not doc.get("enabled", True) or (last and now - last < every):
             continue
         try:
             await check_workspace(workspace_id)

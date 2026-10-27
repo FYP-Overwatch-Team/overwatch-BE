@@ -1,10 +1,12 @@
 """Decision checks: accepted decisions read against what changed since, on by default, within a daily cap."""
 
 import json
+from datetime import timedelta
 
 import pytest
 
 from app.core.config import get_settings
+from app.core.time import utcnow
 from app.db import mongo
 from app.decisions import checks
 from tests.integration.test_decisions_api import PRD, decide, page, quoting
@@ -43,14 +45,18 @@ def check_limit(monkeypatch):
     get_settings.cache_clear()
 
 
-async def test_checks_are_on_by_default_and_can_be_turned_off(client):
+async def test_checks_are_on_every_half_hour_by_default_and_can_be_changed(client):
     headers = await signed_in(client)
 
     before = (await client.get("/decisions/checks", headers=headers)).json()["data"]
-    after = (await client.put("/decisions/checks", json={"enabled": False}, headers=headers)).json()["data"]
+    daily = (await client.patch("/decisions/checks", json={"interval_minutes": 1440}, headers=headers)).json()["data"]
+    off = (await client.patch("/decisions/checks", json={"enabled": False}, headers=headers)).json()["data"]
+    odd = await client.patch("/decisions/checks", json={"interval_minutes": 45}, headers=headers)
 
-    assert (before["enabled"], before["last_run_at"]) == (True, None)
-    assert after["enabled"] is False
+    assert (before["enabled"], before["interval_minutes"], before["last_run_at"]) == (True, 30, None)
+    assert (daily["enabled"], daily["interval_minutes"]) == (True, 1440)
+    assert (off["enabled"], off["interval_minutes"]) == (False, 1440)
+    assert odd.status_code == 422
 
 
 async def test_a_source_unchanged_since_it_was_quoted_isnt_read(client, fake_llm):
@@ -120,17 +126,24 @@ async def test_checks_stop_at_the_daily_cap_and_pick_up_the_rest_later(client, f
     assert await run(client, headers) == {"checked": 1, "conflicts": 0, "capped": True}
 
 
-async def test_the_background_pass_skips_workspaces_that_turned_checks_off(client, fake_llm):
-    on, off = await signed_in(client), await user(client, "someone-else")
-    for headers in (on, off):
+async def test_the_background_pass_checks_workspaces_that_are_due_and_on(client, fake_llm):
+    due, off, daily = await signed_in(client), await user(client, "someone-else"), await user(client, "third")
+    for headers in (due, off, daily):
         prd = await page(client, headers)
         await accepted(client, headers, prd, "Guests can't export reports.")
         await edit(prd["id"], CHANGED)
-    await client.put("/decisions/checks", json={"enabled": False}, headers=off)
+    await client.patch("/decisions/checks", json={"enabled": False}, headers=off)
+    await client.patch("/decisions/checks", json={"interval_minutes": 1440}, headers=daily)
+    # checked an hour ago: due again on a half-hour interval, not on a daily one
+    hour_ago = utcnow() - timedelta(hours=1)
+    for headers in (due, daily):
+        await mongo.decision_check_settings().update_one(
+            {"_id": headers["X-Workspace-Id"]}, {"$set": {"last_run_at": hour_ago}}, upsert=True,
+        )
     fake_llm.stream_response = reply()
 
-    await checks.run_enabled()
+    await checks.run_due()
 
     assert len(fake_llm.calls) == 1
     recorded = await mongo.llm_usage().find_one({})
-    assert (recorded["workspace_id"], recorded["user_id"], recorded["feature"]) == (on["X-Workspace-Id"], "system", "decision_check")
+    assert (recorded["workspace_id"], recorded["user_id"], recorded["feature"]) == (due["X-Workspace-Id"], "system", "decision_check")

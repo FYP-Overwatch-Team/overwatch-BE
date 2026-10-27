@@ -2,7 +2,14 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
-from app.core.constants import DecisionOrigin, DecisionStatus, EvidenceKind, EvidenceStance, EvidenceState
+from app.core.constants import (
+    DecisionCheckInterval,
+    DecisionOrigin,
+    DecisionStatus,
+    EvidenceKind,
+    EvidenceStance,
+    EvidenceState,
+)
 
 TITLE = {"min_length": 1, "max_length": 200}
 STATEMENT = {"min_length": 1, "max_length": 2000}
@@ -110,11 +117,16 @@ class CheckResult(BaseModel):
 
 
 class CheckSettings(BaseModel):
-    #: whether accepted decisions are checked against what changed every half hour; on by default
+    #: whether accepted decisions are checked against what changed; on by default
     enabled: bool
+    #: how often, in minutes
+    interval_minutes: DecisionCheckInterval
     last_run_at: datetime | None
     last_result: CheckResult | None
 
 
 class ChangeCheckSettings(BaseModel):
-    enabled: bool
+    """Only the fields sent are changed."""
+
+    enabled: bool | None = None
+    interval_minutes: DecisionCheckInterval | None = None

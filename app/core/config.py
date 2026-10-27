@@ -47,9 +47,10 @@ class Settings(BaseSettings):
     chat_daily_budget: int = 500
     # "Suggest decisions" runs a workspace may make a day; they also count against chat_daily_budget
     decision_suggest_workspace_daily_limit: int = 20
-    # sources a workspace's decision checks may read a day (each one model call), and how often they run
+    # sources a workspace's decision checks may read a day (each one model call), and how often the
+    # loop looks for workspaces due a check (each workspace picks its own interval)
     decision_check_workspace_daily_limit: int = 20
-    decision_check_interval_seconds: int = 1800
+    decision_check_tick_seconds: int = 300
     # lookups (graph search, reading code) one answer may make before it must answer; 0 turns them off
     chat_max_lookups: int = 20
     # OpenRouter provider routing, empty to send nothing: sort by "latency", "throughput" or "price",

@@ -3,7 +3,7 @@
 StrEnum members are plain strings, so they compare equal to, and are stored as, their values.
 """
 
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 
 
 class Role(StrEnum):
@@ -285,3 +285,12 @@ class EvidenceState(StrEnum):
     QUOTE_MISSING = "quote_missing"
     #: the source was deleted or archived
     SOURCE_GONE = "source_gone"
+
+
+class DecisionCheckInterval(IntEnum):
+    """How often a workspace's accepted decisions are checked against what changed, in minutes."""
+
+    HALF_HOUR = 30
+    HOUR = 60
+    HALF_DAY = 720
+    DAY = 1440

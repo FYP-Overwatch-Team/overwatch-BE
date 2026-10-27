@@ -59,12 +59,12 @@ async def _doc_sync_loop(interval_seconds: int) -> None:
         await asyncio.sleep(interval_seconds)
 
 
-async def _decision_check_loop(interval_seconds: int) -> None:
-    """Check accepted decisions against what changed, in every workspace that hasn't turned checks off."""
+async def _decision_check_loop(tick_seconds: int) -> None:
+    """Check accepted decisions against what changed, in each workspace as often as it chose."""
     while True:
-        await asyncio.sleep(interval_seconds)
+        await asyncio.sleep(tick_seconds)
         try:
-            await decision_checks.run_enabled()
+            await decision_checks.run_due()
         except Exception:
             structlog.get_logger("app.decisions").exception("decision_check_loop_error")
 
@@ -135,7 +135,7 @@ async def lifespan(app: FastAPI):
     )
     docs_task = asyncio.create_task(_docs_loop(get_settings().doc_push_interval_seconds))
     merge_task = asyncio.create_task(_merge_loop())
-    decision_check_task = asyncio.create_task(_decision_check_loop(get_settings().decision_check_interval_seconds))
+    decision_check_task = asyncio.create_task(_decision_check_loop(get_settings().decision_check_tick_seconds))
     yield
     decision_check_task.cancel()
     sync_task.cancel()

@@ -52,9 +52,9 @@ async def get_check_settings(member: dict = Depends(workspace_member())) -> Chec
     return await checks.get_settings(member["workspace_id"])
 
 
-@router.put("/checks")
+@router.patch("/checks")
 async def change_check_settings(body: ChangeCheckSettings, member: dict = Depends(workspace_member())) -> CheckSettings:
-    return await checks.set_enabled(member["workspace_id"], body.enabled)
+    return await checks.change_settings(member["workspace_id"], body)
 
 
 @router.post("/checks/run")
