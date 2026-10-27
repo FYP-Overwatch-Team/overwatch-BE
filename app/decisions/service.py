@@ -8,7 +8,7 @@ be out of date.
 
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from app.boards import repository as boards
 from app.core.constants import (
@@ -17,7 +17,9 @@ from app.core.constants import (
     DecisionStatus,
     DocumentKind,
     EvidenceKind,
+    EvidenceStance,
     EvidenceState,
+    InboxTab,
 )
 from app.core.exceptions import FieldValidationError, NotFoundError
 from app.core.time import utcnow
@@ -26,6 +28,11 @@ from app.decisions import quotes
 from app.decisions.schemas import MAX_EVIDENCE, ChangeStatus, CreateDecision, NewEvidence, UpdateDecision
 from app.workspaces import repository as workspaces
 
+
+
+DECIDED_STATUSES = [DecisionStatus.ACCEPTED, DecisionStatus.REJECTED, DecisionStatus.SUPERSEDED]
+#: evidence whose source no longer says what was quoted
+BROKEN_STATES = {EvidenceState.QUOTE_MISSING, EvidenceState.SOURCE_GONE}
 
 
 def _item_text(item: dict) -> str:
@@ -92,7 +99,40 @@ async def _to_decisions(workspace_id: str, docs: list[dict]) -> list[dict]:
         synced_at = synced.get((source["source"], source["target_key"])) if source else None
         return {**evidence, "state": _state(evidence, source), "source_synced_at": synced_at}
 
-    return [{**doc, "id": doc["_id"], "evidence": [with_state(e) for e in doc["evidence"]]} for doc in docs]
+    decisions = [{**doc, "id": doc["_id"], "evidence": [with_state(e) for e in doc["evidence"]]} for doc in docs]
+    await _store_attention(decisions)
+    return decisions
+
+
+def _needs_attention(decision: dict) -> bool:
+    """An accepted decision whose evidence broke, or was contradicted since it was last settled."""
+    if decision["status"] != DecisionStatus.ACCEPTED:
+        return False
+    settled_at = decision["history"][-1]["at"]
+    return any(
+        e["state"] in BROKEN_STATES or (e["stance"] == EvidenceStance.CONTRADICTS and e["added_at"] > settled_at)
+        for e in decision["evidence"]
+    )
+
+
+async def _store_attention(decisions: list[dict]) -> None:
+    """Keep `needs_attention` as each read finds it, so the inbox can be filtered and paged by it."""
+    for value in (True, False):
+        changed = [d["_id"] for d in decisions if _needs_attention(d) is value and d.get("needs_attention", False) is not value]
+        if changed:
+            await mongo.decisions().update_many({"_id": {"$in": changed}}, {"$set": {"needs_attention": value}})
+    for decision in decisions:
+        decision["needs_attention"] = _needs_attention(decision)
+
+
+def _tab_query(tab: InboxTab, user_id: str, today: date) -> dict:
+    mine_or_due = [{"owner_id": user_id}, {"review_by": {"$ne": None, "$lte": today.isoformat()}}]
+    flagged = {"status": DecisionStatus.ACCEPTED, "needs_attention": True}
+    if tab == InboxTab.NEEDS_YOU:
+        return {"$or": [{"status": DecisionStatus.PROPOSED}, {"status": DecisionStatus.OPEN, "$or": mine_or_due}, flagged]}
+    if tab == InboxTab.OPEN:
+        return {"status": DecisionStatus.OPEN, "$nor": mine_or_due}
+    return {"status": {"$in": DECIDED_STATUSES}, "$nor": [flagged]}
 
 
 async def _found(workspace_id: str, decision_id: str) -> dict:
@@ -137,20 +177,34 @@ def _review_by(fields: dict) -> dict:
 
 
 async def list_decisions(
-    workspace_id: str, *, status: DecisionStatus | None, q: str | None, ref_id: str | None, offset: int, limit: int,
+    member: dict, *, tab: InboxTab | None, today: date, q: str | None, ref_id: str | None, offset: int, limit: int,
 ) -> tuple[list[dict], int]:
-    """Newest change first; `ref_id` is a board item or page the decision quotes."""
-    query: dict = {"workspace_id": workspace_id}
-    if status:
-        query["status"] = status
+    """Newest change first; `ref_id` is a board item or page the decision quotes, `today` the viewer's date."""
+    query: dict = {"workspace_id": member["workspace_id"]}
+    if tab:
+        query |= _tab_query(tab, member["user_id"], today)
     if ref_id:
         query["evidence.ref_id"] = ref_id
     if q:
         pattern = {"$regex": re.escape(q), "$options": "i"}
-        query["$or"] = [{"title": pattern}, {"statement": pattern}]
+        query = {"$and": [query, {"$or": [{"title": pattern}, {"statement": pattern}, {"area": pattern}]}]}
     total = await mongo.decisions().count_documents(query)
     cursor = mongo.decisions().find(query).sort([("updated_at", -1), ("_id", 1)]).skip(offset).limit(limit)
-    return await _to_decisions(workspace_id, [doc async for doc in cursor]), total
+    return await _to_decisions(member["workspace_id"], [doc async for doc in cursor]), total
+
+
+async def counts(member: dict, today: date) -> dict[InboxTab, int]:
+    """How many decisions each inbox tab holds for this member."""
+    return {
+        tab: await mongo.decisions().count_documents({"workspace_id": member["workspace_id"], **_tab_query(tab, member["user_id"], today)})
+        for tab in InboxTab
+    }
+
+
+async def refresh_attention(workspace_id: str) -> None:
+    """Re-read the accepted decisions, so those whose evidence broke since show in Needs you."""
+    accepted = await mongo.decisions().find({"workspace_id": workspace_id, "status": DecisionStatus.ACCEPTED}).to_list(None)
+    await _to_decisions(workspace_id, accepted)
 
 
 async def get(workspace_id: str, decision_id: str) -> dict:

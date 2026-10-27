@@ -91,6 +91,7 @@ async def _check_source(workspace_id: str, user_id: str, ref: Ref, text: str, de
 
 async def check_workspace(workspace_id: str, user_id: str = SYSTEM_USER) -> dict:
     """Check what changed since the last check; `capped` when the day's checks ran out on the way."""
+    await service.refresh_attention(workspace_id)
     related = await _related(workspace_id)
     found = await service.sources(workspace_id, list(related)) if related else {}
     last_read = {doc["ref_id"]: doc["fingerprint"] async for doc in mongo.decision_checks().find({"workspace_id": workspace_id})}

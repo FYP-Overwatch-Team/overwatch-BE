@@ -9,6 +9,7 @@ from app.core.constants import (
     EvidenceKind,
     EvidenceStance,
     EvidenceState,
+    InboxTab,
 )
 
 TITLE = {"min_length": 1, "max_length": 200}
@@ -70,6 +71,8 @@ class Decision(BaseModel):
     evidence: list[Evidence]
     #: every status it has had, oldest first
     history: list[HistoryEntry]
+    #: accepted, but its evidence broke or was contradicted since it was settled: it's in Needs you
+    needs_attention: bool = False
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -137,3 +140,9 @@ class ChangeCheckSettings(BaseModel):
 class OverviewPage(BaseModel):
     #: the docs page the product overview was written to
     page_id: str
+
+
+class InboxCounts(BaseModel):
+    needs_you: int
+    open: int
+    decided: int

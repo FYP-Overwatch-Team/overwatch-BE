@@ -100,7 +100,7 @@ async def test_the_list_filters_by_status_text_and_quoted_source(client):
         return [d["title"] for d in (await client.get("/decisions", params=params, headers=headers)).json()["data"]]
 
     assert await titles() == ["Dark mode", "Guest export"]
-    assert await titles(status="accepted") == ["Dark mode"]
+    assert await titles(tab="decided") == ["Dark mode"]
     assert await titles(q="THEME") == ["Dark mode"]
     assert await titles(ref_id=prd["id"]) == [quoted["title"]]
 
@@ -188,3 +188,56 @@ async def test_evidence_from_a_mirrored_source_says_when_that_source_was_last_sy
     ])
 
     assert [e["source_synced_at"] for e in made["evidence"]] == ["2026-10-27T10:42:00Z", None]
+
+
+
+async def test_inbox_tabs_put_what_waits_on_you_first_and_count_each_tab(client):
+    headers = await signed_in(client)
+    me = headers["X-Workspace-Id"]  # the personal workspace's id is its owner's user id
+    prd = await page(client, headers)
+    await decide(client, headers, title="Proposed", status="proposed")
+    await decide(client, headers, title="Mine", owner_id=me)
+    await decide(client, headers, title="Due", review_by="2026-10-01")
+    await decide(client, headers, title="Later", review_by="2026-12-01")
+    await decide(client, headers, title="Settled", status="accepted")
+    broken = await decide(client, headers, title="Broken", status="accepted", evidence=[quoting(prd, "Guests can't export reports.")])
+    await mongo.documents().update_one({"_id": prd["id"]}, {"$set": {"content_md": "Guests can export reports."}})
+
+    async def tab(name: str) -> list[str]:
+        resp = await client.get("/decisions", params={"tab": name, "today": "2026-10-27"}, headers=headers)
+        return sorted(d["title"] for d in resp.json()["data"])
+
+    # reading a decision notices its broken evidence
+    await client.get(f"/decisions/{broken['id']}", headers=headers)
+    counts = (await client.get("/decisions/counts", params={"today": "2026-10-27"}, headers=headers)).json()["data"]
+
+    assert await tab("needs_you") == ["Broken", "Due", "Mine", "Proposed"]
+    assert await tab("open") == ["Later"]
+    assert await tab("decided") == ["Settled"]
+    assert counts == {"needs_you": 4, "open": 1, "decided": 1}
+
+
+async def test_a_contradiction_needs_attention_until_the_decision_is_settled_again(client):
+    headers = await signed_in(client)
+    prd = await page(client, headers)
+    made = await decide(client, headers, status="accepted")
+
+    added = await client.post(
+        f"/decisions/{made['id']}/evidence", json=quoting(prd, "Guests can't export reports.", stance="contradicts"), headers=headers,
+    )
+    settled = await client.post(f"/decisions/{made['id']}/status", json={"status": "accepted", "note": "still stands"}, headers=headers)
+
+    assert added.json()["data"]["needs_attention"] is True
+    assert settled.json()["data"]["needs_attention"] is False
+    assert (await mongo.decisions().find_one({"_id": made["id"]}))["needs_attention"] is False
+
+
+async def test_the_inbox_pages_through_decisions(client):
+    headers = await signed_in(client)
+    for n in range(5):
+        await decide(client, headers, title=f"D{n}")
+
+    resp = await client.get("/decisions", params={"tab": "open", "offset": 2, "limit": 2}, headers=headers)
+
+    assert [d["title"] for d in resp.json()["data"]] == ["D2", "D1"]
+    assert resp.json()["meta"]["total"] == 5

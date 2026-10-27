@@ -257,6 +257,16 @@ class DecisionStatus(StrEnum):
     SUPERSEDED = "superseded"
 
 
+class InboxTab(StrEnum):
+    """Where a decision sits in the Decisions inbox, for the member looking at it."""
+
+    #: a proposal to settle, an open one they own or whose review date has come, or an accepted
+    #: one whose evidence broke or was contradicted since it was settled
+    NEEDS_YOU = "needs_you"
+    OPEN = "open"
+    DECIDED = "decided"
+
+
 class DecisionOrigin(StrEnum):
     MANUAL = "manual"
     SUGGESTED = "suggested"

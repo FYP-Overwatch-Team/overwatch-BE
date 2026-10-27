@@ -1,7 +1,10 @@
+from datetime import date
+
 from fastapi import Depends, Query
 
 from app.api.deps import workspace_member
-from app.core.constants import DecisionStatus
+from app.core.constants import InboxTab
+from app.core.time import utcnow
 from app.core.responses import WithMeta, api_router
 from app.decisions import checks, overview, service, suggest
 from app.decisions.schemas import (
@@ -11,6 +14,7 @@ from app.decisions.schemas import (
     CheckSettings,
     CreateDecision,
     Decision,
+    InboxCounts,
     NewEvidence,
     OverviewPage,
     SuggestRequest,
@@ -23,18 +27,26 @@ router = api_router(prefix="/decisions", tags=["decisions"])
 
 @router.get("")
 async def list_decisions(
-    status: DecisionStatus | None = None,
+    tab: InboxTab | None = None,
+    today: date | None = None,
     q: str | None = Query(default=None, max_length=200),
     ref_id: str | None = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     member: dict = Depends(workspace_member()),
 ) -> WithMeta[list[Decision]]:
-    """`ref_id` narrows to the decisions quoting that board item or page."""
+    """`tab` is an inbox tab for this member, `today` their date (UTC when not sent) for review dates;
+    `ref_id` narrows to the decisions quoting that board item or page."""
     decisions, total = await service.list_decisions(
-        member["workspace_id"], status=status, q=q, ref_id=ref_id, offset=offset, limit=limit,
+        member, tab=tab, today=today or utcnow().date(), q=q, ref_id=ref_id, offset=offset, limit=limit,
     )
     return WithMeta(decisions, {"total": total, "offset": offset, "limit": limit})
+
+
+@router.get("/counts")
+async def inbox_counts(today: date | None = None, member: dict = Depends(workspace_member())) -> InboxCounts:
+    """How many decisions each inbox tab holds for this member."""
+    return InboxCounts(**await service.counts(member, today or utcnow().date()))
 
 
 @router.post("", status_code=201)

@@ -313,6 +313,7 @@ async def ensure_indexes() -> None:
     await usage_counters().create_index("expires_at", expireAfterSeconds=0)
     # the Decisions inbox, newest change first, and the decisions quoting one item or page
     await decisions().create_index([("workspace_id", 1), ("status", 1), ("updated_at", -1)])
+    await decisions().create_index([("workspace_id", 1), ("updated_at", -1)])
     await decisions().create_index([("workspace_id", 1), ("evidence.ref_id", 1)])
     await decision_scans().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
     await decision_checks().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
