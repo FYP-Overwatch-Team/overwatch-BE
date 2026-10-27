@@ -8,9 +8,17 @@ be out of date.
 
 import re
 import uuid
+from datetime import datetime
 
 from app.boards import repository as boards
-from app.core.constants import DecisionOrigin, DecisionStatus, DocumentKind, EvidenceKind, EvidenceState
+from app.core.constants import (
+    NATIVE_SOURCE,
+    DecisionOrigin,
+    DecisionStatus,
+    DocumentKind,
+    EvidenceKind,
+    EvidenceState,
+)
 from app.core.exceptions import FieldValidationError, NotFoundError
 from app.core.time import utcnow
 from app.db import mongo
@@ -44,8 +52,22 @@ async def sources(workspace_id: str, refs: list[tuple[str, str]]) -> dict[tuple[
         async for doc in mongo.documents().find(query):
             found[(EvidenceKind.DOCUMENT, doc["_id"])] = {
                 "title": doc["title"], "external_url": doc.get("external_url"), "text": _page_text(doc),
+                "source": doc["source"], "target_key": doc.get("target_key"),
             }
     return found
+
+
+async def _synced_at(workspace_id: str, found: dict[tuple[str, str], dict]) -> dict[tuple[str, str], datetime]:
+    """When each tracker or docs source behind the found items and pages was last read, by `(provider, key)`."""
+    mirrored = {(source["source"], source["target_key"]) for source in found.values() if source["source"] != NATIVE_SOURCE}
+    if not mirrored:
+        return {}
+    query = {"workspace_id": workspace_id, "provider": {"$in": [provider for provider, _ in mirrored]}}
+    return {
+        (target["provider"], target["key"]): target["last_synced_at"]
+        async for target in mongo.sync_targets().find(query, {"provider": 1, "key": 1, "last_synced_at": 1})
+        if (target["provider"], target["key"]) in mirrored and target.get("last_synced_at")
+    }
 
 
 def _state(evidence: dict, source: dict | None) -> EvidenceState:
@@ -62,13 +84,15 @@ async def _to_decisions(workspace_id: str, docs: list[dict]) -> list[dict]:
     """Decisions as the API returns them, each piece of evidence with its state now."""
     refs = [(e["kind"], e["ref_id"]) for doc in docs for e in doc["evidence"]]
     found = await sources(workspace_id, refs) if refs else {}
-    return [
-        {
-            **doc, "id": doc["_id"],
-            "evidence": [{**e, "state": _state(e, found.get((e["kind"], e["ref_id"])))} for e in doc["evidence"]],
-        }
-        for doc in docs
-    ]
+    synced = await _synced_at(workspace_id, found)
+
+    def with_state(evidence: dict) -> dict:
+        source = found.get((evidence["kind"], evidence["ref_id"]))
+        # how current the comparison is: a mirrored source is only as fresh as its last sync
+        synced_at = synced.get((source["source"], source["target_key"])) if source else None
+        return {**evidence, "state": _state(evidence, source), "source_synced_at": synced_at}
+
+    return [{**doc, "id": doc["_id"], "evidence": [with_state(e) for e in doc["evidence"]]} for doc in docs]
 
 
 async def _found(workspace_id: str, decision_id: str) -> dict:

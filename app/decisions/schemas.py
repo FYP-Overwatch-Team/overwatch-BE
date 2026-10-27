@@ -42,6 +42,8 @@ class Evidence(NewEvidence):
     added_by: str
     added_at: datetime
     state: EvidenceState
+    #: when the tracker or docs source it's mirrored from was last read, so `state` is as of then; null when written here
+    source_synced_at: datetime | None = None
 
 
 class HistoryEntry(BaseModel):

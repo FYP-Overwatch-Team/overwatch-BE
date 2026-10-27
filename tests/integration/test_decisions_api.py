@@ -1,5 +1,7 @@
 """Decisions: recorded with quoted evidence, settled by people, and showing when their evidence moves on."""
 
+from datetime import UTC, datetime
+
 from app.db import mongo
 from app.decisions.schemas import MAX_EVIDENCE
 from tests.integration.test_documents_api import create as create_page
@@ -166,3 +168,23 @@ async def test_a_decision_holds_a_limited_number_of_passages(client):
 
     assert resp.status_code == 422
     assert len((await client.get(f"/decisions/{full['id']}", headers=headers)).json()["data"]["evidence"]) == MAX_EVIDENCE
+
+
+async def test_evidence_from_a_mirrored_source_says_when_that_source_was_last_synced(client):
+    headers = await signed_in(client)
+    workspace_id = headers["X-Workspace-Id"]
+    synced = datetime(2026, 10, 27, 10, 42, tzinfo=UTC)
+    await mongo.sync_targets().insert_one({
+        "workspace_id": workspace_id, "provider": "confluence", "key": "ENG", "last_synced_at": synced, "status": "active",
+    })
+    await mongo.documents().insert_one({
+        "_id": "mirrored", "workspace_id": workspace_id, "kind": "page", "archived_at": None, "title": "Spec",
+        "content_md": PRD, "source": "confluence", "target_key": "ENG", "parent_id": "space-root", "rank": 0,
+    })
+    native = await page(client, headers)
+
+    made = await decide(client, headers, evidence=[
+        quoting({"id": "mirrored"}, "Guests can't export reports."), quoting(native, "Guests can't export reports."),
+    ])
+
+    assert [e["source_synced_at"] for e in made["evidence"]] == ["2026-10-27T10:42:00Z", None]
