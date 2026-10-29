@@ -61,5 +61,5 @@ def test_a_tracker_column_is_reachable_through_a_status_it_holds():
     reachable = reachable_in_workflow(board, item)
 
     assert [(m["status_id"], m["transition_name"]) for m in reachable] == [("2", "Start")]
-    assert tracker_targets(board, item, reachable) == [{"column_id": "c-doing", "status_id": "2", "status": "In Progress", "transition_name": "Start"}]
+    assert tracker_targets(board, item, reachable) == [{"column_id": "c-doing", "status_id": "2", "status": "In Progress", "transition_name": "Start", "required_fields": []}]
     assert reachable_in_workflow(board, {**item, "issue_type_id": "other"}) is None

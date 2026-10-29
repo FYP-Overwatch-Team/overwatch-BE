@@ -67,14 +67,20 @@ async def test_a_jira_items_moves_come_from_jira_with_the_transition_names(clien
     headers, item_id = await setup(client)  # OVR-2, In Progress
     with respx.mock as router:
         router.get(TRANSITIONS).mock(return_value=Response(200, json={"transitions": [
-            {"id": "31", "name": "Finish", "to": {"id": "10003", "name": "Done", "statusCategory": {"key": "done"}}},
+            {"id": "31", "name": "Finish", "to": {"id": "10003", "name": "Done", "statusCategory": {"key": "done"}}, "fields": {
+                "resolution": {"key": "resolution", "name": "Resolution", "required": True, "hasDefaultValue": False},
+                "priority": {"key": "priority", "name": "Priority", "required": True, "hasDefaultValue": True},
+                "comment": {"key": "comment", "name": "Comment", "required": False, "hasDefaultValue": False},
+            }},
             {"id": "41", "name": "Reopen", "to": {"id": "1", "name": "To Do", "statusCategory": {"key": "new"}}},
         ]}))
         moves = (await client.get(f"/work-items/{item_id}/moves", headers=headers)).json()["data"]
+        assert router.calls[0].request.url.params["expand"] == "transitions.fields"
 
+    # only a required field with no default needs input
     assert moves == {"basis": "live", "targets": [
-        {"column_id": "done", "status_id": "10003", "status": "Done", "transition_name": "Finish"},
-        {"column_id": "todo", "status_id": "1", "status": "To Do", "transition_name": "Reopen"},
+        {"column_id": "done", "status_id": "10003", "status": "Done", "transition_name": "Finish", "required_fields": ["Resolution"]},
+        {"column_id": "todo", "status_id": "1", "status": "To Do", "transition_name": "Reopen", "required_fields": []},
     ]}
 
 
@@ -95,7 +101,7 @@ async def test_a_native_board_refuses_moves_its_workflow_doesnt_allow_and_says_w
     assert open_moves["basis"] == "open" and len(open_moves["targets"]) == 2
     assert refused.json()["meta"]["error_code"] == "transition_not_allowed"
     assert refused.json()["meta"]["message"].startswith("Move it to In progress first")
-    assert moves == {"basis": "board", "targets": [{"column_id": "in_progress", "status_id": None, "status": None, "transition_name": None}]}
+    assert moves == {"basis": "board", "targets": [{"column_id": "in_progress", "status_id": None, "status": None, "transition_name": None, "required_fields": []}]}
     assert allowed.status_code == 200
 
 
