@@ -299,6 +299,13 @@ class EvidenceState(StrEnum):
     SOURCE_GONE = "source_gone"
 
 
+class SearchResultKind(StrEnum):
+    """What a ⌘K search result opens: a board item, or a docs page."""
+
+    WORK_ITEM = "work_item"
+    DOCUMENT = "document"
+
+
 class CheckMatch(StrEnum):
     """Why a decision check read a source against a decision, strongest first."""
 

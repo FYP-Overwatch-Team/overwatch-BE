@@ -14,6 +14,7 @@ from app.sprints.router import router as sprints_router
 from app.chat.router import router as chat_router
 from app.documents.attachments import router as attachments_router
 from app.decisions.router import router as decisions_router
+from app.search.router import router as search_router
 from app.documents.router import router as documents_router
 from app.connectors.router import router as connections_router
 from app.github import checkout
@@ -188,6 +189,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(link_previews_router)
     app.include_router(chat_router)
     app.include_router(usage_router)
+    app.include_router(search_router)
     app.include_router(workspaces_router)
     app.include_router(waitlist_router)
 
