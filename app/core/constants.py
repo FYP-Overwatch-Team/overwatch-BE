@@ -245,6 +245,8 @@ class UsageFeature(StrEnum):
     CHAT = "chat"
     DECISION_SUGGEST = "decision_suggest"
     DECISION_CHECK = "decision_check"
+    #: turning items, pages and decisions into vectors, so related ones can be found by meaning
+    EMBEDDINGS = "embeddings"
 
 
 class DecisionStatus(StrEnum):
@@ -295,6 +297,41 @@ class EvidenceState(StrEnum):
     QUOTE_MISSING = "quote_missing"
     #: the source was deleted or archived
     SOURCE_GONE = "source_gone"
+
+
+class CheckMatch(StrEnum):
+    """Why a decision check read a source against a decision, strongest first."""
+
+    #: a decision quotes it
+    QUOTED = "quoted"
+    #: it's the parent, a subtask or an issue link of an item a decision quotes
+    LINKED = "linked"
+    #: it names a quoted item's key or links a quoted page, or a quoted source names it
+    MENTIONED = "mentioned"
+    #: it reads close in meaning to the decision
+    SIMILAR = "similar"
+
+
+class EmbeddingKind(StrEnum):
+    """What an embedding was made from."""
+
+    WORK_ITEM = "work_item"
+    DOCUMENT = "document"
+    DECISION = "decision"
+
+
+class EmbedPurpose(StrEnum):
+    """How a text is embedded: as something to find, or as what's searched with."""
+
+    DOCUMENT = "document"
+    QUERY = "query"
+
+
+class VectorSearch(StrEnum):
+    """Where nearest embeddings are found: Atlas Vector Search, or compared here (dev and tests)."""
+
+    ATLAS = "atlas"
+    LOCAL = "local"
 
 
 class DecisionCheckInterval(IntEnum):

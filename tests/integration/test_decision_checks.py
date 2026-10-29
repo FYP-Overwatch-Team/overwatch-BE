@@ -1,11 +1,13 @@
 """Decision checks: accepted decisions read against what changed since, on by default, within a daily cap."""
 
 import json
+import uuid
 from datetime import timedelta
 
 import pytest
 
 from app.core.config import get_settings
+from app.core.exceptions import ExternalServiceError
 from app.core.time import utcnow
 from app.db import mongo
 from app.decisions import checks
@@ -161,3 +163,174 @@ async def test_one_check_runs_per_workspace_at_a_time(client, fake_llm):
 
     assert busy.json()["meta"]["error_code"] == "check_in_progress"
     assert fake_llm.calls == []
+
+
+async def evidence_of(client, headers: dict, decision_id: str) -> list[dict]:
+    return (await client.get(f"/decisions/{decision_id}", headers=headers)).json()["data"]["evidence"]
+
+
+async def test_a_changed_page_naming_a_quoted_item_is_read_and_says_why(client, fake_llm):
+    headers = await signed_in(client)
+    quoted = await create_item(client, headers, title="Export", description="Guests can't export reports.")
+    made = await accepted(client, headers, quoted, "Guests can't export reports.", kind="work_item")
+    await page(client, headers, md=f"Per {quoted['key']}, guests may export a PDF of their own reports.")
+    await page(client, headers, md="Dark mode ships next sprint.")
+    fake_llm.stream_response = reply((1, "guests may export a PDF of their own reports."))
+
+    result = await run(client, headers)
+
+    assert result == {"checked": 1, "conflicts": 1, "capped": False}
+    added = (await evidence_of(client, headers, made["id"]))[-1]
+    assert added["match"] == {"reason": "mentioned", "detail": quoted["key"]}
+
+
+async def test_an_item_a_quoted_item_names_is_read_when_it_changes(client, fake_llm):
+    headers = await signed_in(client)
+    named = await create_item(client, headers, title="PDF export", description="Let guests download a PDF.")
+    quoted = await create_item(client, headers, title="Export", description=f"Guests can't export reports. See {named['key']}.")
+    await accepted(client, headers, quoted, "Guests can't export reports.", kind="work_item")
+    fake_llm.stream_response = reply()
+
+    assert (await run(client, headers))["checked"] == 1
+    assert "Let guests download a PDF." in fake_llm.calls[0]["prompt"]
+
+
+async def test_sources_close_in_meaning_are_read_and_unrelated_ones_arent(client, fake_llm, fake_embedder):
+    headers = await signed_in(client)
+    prd = await page(client, headers)
+    made = await accepted(client, headers, prd, "Guests can't export reports.")
+    # the decision reads "Guest export: Guests can't export."
+    await create_item(client, headers, title="Guest PDF export", description="Guests export a PDF report.")
+    await create_item(client, headers, title="Dark mode", description="Dark mode for billing.")
+    fake_llm.calls.clear()
+    fake_llm.stream_response = reply((1, "Guests export a PDF report."), (1, "Words the source never says."))
+
+    result = await run(client, headers)
+
+    assert result == {"checked": 1, "conflicts": 1, "capped": False}
+    assert "Guests export a PDF report." in fake_llm.calls[0]["prompt"]
+    added = (await evidence_of(client, headers, made["id"]))[-1]
+    assert added["match"]["reason"] == "similar"
+    assert 0.6 <= float(added["match"]["detail"]) <= 1
+
+
+async def test_embeddings_are_made_once_per_version_and_recorded_as_usage(client, fake_llm, fake_embedder):
+    headers = await signed_in(client)
+    prd = await page(client, headers)
+    await accepted(client, headers, prd, "Guests can't export reports.")
+    item = await create_item(client, headers, title="Dark mode", description="Dark mode.")
+    fake_llm.stream_response = reply()
+
+    await run(client, headers)
+    embedded = sum(len(call["texts"]) for call in fake_embedder.calls)
+    await run(client, headers)
+
+    assert sum(len(call["texts"]) for call in fake_embedder.calls) == embedded
+    stored = await mongo.embeddings().find_one({"ref_id": item["id"]})
+    assert (stored["kind"], stored["model"], len(stored["vector"])) == ("work_item", "fake/embedder", len(fake_embedder.vocabulary))
+    assert await mongo.llm_usage().count_documents({"feature": "embeddings"}) >= 1
+
+
+async def test_without_embeddings_nothing_is_embedded(client, fake_llm):
+    headers = await signed_in(client)
+    prd = await page(client, headers)
+    await accepted(client, headers, prd, "Guests can't export reports.")
+    await create_item(client, headers, title="Guest PDF export", description="Guests export a PDF report.")
+
+    assert (await run(client, headers))["checked"] == 0
+    assert await mongo.embeddings().count_documents({}) == 0
+
+
+async def test_a_capped_check_looks_at_the_same_changes_again_next_time(client, fake_llm, check_limit):
+    check_limit(0)
+    headers = await signed_in(client)
+    quoted = await create_item(client, headers, title="Export", description="Guests can't export reports.")
+    await accepted(client, headers, quoted, "Guests can't export reports.", kind="work_item")
+    await page(client, headers, md=f"Per {quoted['key']}, guests may export a PDF.")
+    fake_llm.stream_response = reply()
+
+    assert (await run(client, headers))["capped"] is True
+    check_limit(5)
+
+    assert (await run(client, headers))["checked"] == 1
+
+
+async def test_accepting_a_decision_reads_what_already_contradicts_it_in_the_background(client, fake_llm, fake_embedder):
+    headers = await signed_in(client)
+    old = await create_item(client, headers, title="Guest PDF export", description="Guests export a PDF report.")
+    await create_item(client, headers, title="Dark mode", description="Dark mode for billing.")
+    prd = await page(client, headers)
+    fake_llm.stream_response = reply((1, "Guests export a PDF report."))
+
+    made = await accepted(client, headers, prd, "Guests can't export reports.")
+
+    [call] = fake_llm.calls
+    assert "Guests export a PDF report." in call["prompt"]
+    added = (await evidence_of(client, headers, made["id"]))[-1]
+    assert (added["ref_id"], added["stance"], added["match"]["reason"]) == (old["id"], "contradicts", "similar")
+    assert any(c["purpose"] == "query" for c in fake_embedder.calls)
+
+
+async def test_a_decision_still_open_isnt_scanned(client, fake_llm, fake_embedder):
+    headers = await signed_in(client)
+    await create_item(client, headers, title="Guest PDF export", description="Guests export a PDF report.")
+    prd = await page(client, headers)
+
+    await decide(client, headers, evidence=[quoting(prd, "Guests can't export reports.")])
+
+    assert fake_llm.calls == []
+
+
+async def test_the_product_overview_isnt_read_against_the_decisions_its_written_from(client, fake_llm, fake_embedder):
+    headers = await signed_in(client)
+    prd = await page(client, headers)
+    await accepted(client, headers, prd, "Guests can't export reports.")
+    assert (await client.post("/decisions/overview", headers=headers)).status_code == 200
+    fake_llm.calls.clear()
+    fake_llm.stream_response = reply()
+
+    await accepted(client, headers, prd, "Admins export as **CSV** or PDF.")
+    await run(client, headers)
+
+    assert not any("Product overview" in call["prompt"] or "Guest export" in call["prompt"].split("<source>")[-1] for call in fake_llm.calls)
+
+
+async def test_every_source_written_since_the_last_check_is_looked_at_however_many(client, fake_llm):
+    headers = await signed_in(client)
+    quoted = await create_item(client, headers, title="Export", description="Guests can't export reports.")
+    await accepted(client, headers, quoted, "Guests can't export reports.", kind="work_item")
+    edited = await page(client, headers, md=f"Per {quoted['key']}, guests may export a PDF.")
+    await mongo.documents().update_one({"_id": edited["id"]}, {"$set": {"updated_at": utcnow() - timedelta(minutes=1)}})
+    # a full sync rewrites hundreds of others after the real edit
+    now = utcnow()
+    await mongo.documents().insert_many([
+        {
+            "_id": uuid.uuid4().hex, "workspace_id": headers["X-Workspace-Id"], "kind": "page", "source": "native",
+            "title": f"Other {n}", "content_md": "Dark mode.", "archived_at": None, "updated_at": now, "created_at": now - timedelta(days=9),
+        }
+        for n in range(600)
+    ])
+    fake_llm.stream_response = reply()
+
+    await run(client, headers)
+
+    assert any(f"Per {quoted['key']}" in call["prompt"] for call in fake_llm.calls)
+
+
+async def test_an_embedding_outage_leaves_the_linked_and_quoted_reads_running(client, fake_llm, fake_embedder):
+    headers = await signed_in(client)
+    quoted = await create_item(client, headers, title="Export", description="Guests can't export reports.")
+    linked = await create_item(client, headers, title="PDF export", description="Let guests download a PDF.")
+    await mongo.work_items().update_one({"_id": quoted["id"]}, {"$set": {"links": [{"key": linked["key"]}]}})
+    await accepted(client, headers, quoted, "Guests can't export reports.", kind="work_item")
+    await mongo.work_items().update_one({"_id": linked["id"]}, {"$set": {"description_md": "Guests download a PDF."}})
+    fake_llm.calls.clear()
+    fake_llm.stream_response = reply()
+
+    async def down(*args, **kwargs):
+        raise ExternalServiceError("down", error_code="embedding_unavailable", status_code=503)
+
+    fake_embedder.embed = down
+
+    assert (await run(client, headers))["checked"] == 1
+    assert "Guests download a PDF." in fake_llm.calls[0]["prompt"]

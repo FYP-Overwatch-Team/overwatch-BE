@@ -1,5 +1,7 @@
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
+from app.core.constants import EmbedPurpose
+
 from app.integrations.llm import REQUEST_TIMEOUT_SECONDS, CallUsage, Delta, LLMClient, ToolCall, ToolRound, Turn
 
 
@@ -68,3 +70,26 @@ def written(reply: dict) -> str:
     )
     answerable = "yes" if reply.get("answerable", True) else "no"
     return f"ANSWERABLE: {answerable}\nRELATIONS: {relations or 'none'}\n---\n{reply.get('answer', '')}"
+
+
+class FakeEmbedder:
+    """Deterministic stand-in for an embedding model: one dimension per word in `vocabulary`.
+
+    A text's vector counts the vocabulary words in it, so texts sharing those words read as close
+    in meaning and texts sharing none as unrelated. Words outside the vocabulary are ignored.
+    """
+
+    model = "fake/embedder"
+
+    def __init__(self):
+        self.vocabulary = ["export", "guest", "pdf", "report", "dark", "mode", "billing", "invoice"]
+        self.calls: list[dict] = []
+        self.usage = CallUsage(self.model, None, prompt_tokens=10, completion_tokens=0, cached_tokens=0, cost_usd=0.00001)
+
+    async def embed(
+        self, texts: Sequence[str], purpose: EmbedPurpose, *, on_usage: Callable[[CallUsage], Awaitable[None]] | None = None,
+    ) -> list[list[float]]:
+        self.calls.append({"texts": list(texts), "purpose": purpose})
+        if on_usage:
+            await on_usage(self.usage)
+        return [[float(text.lower().count(word)) + 0.001 for word in self.vocabulary] for text in texts]

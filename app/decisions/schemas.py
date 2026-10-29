@@ -3,6 +3,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, Field
 
 from app.core.constants import (
+    CheckMatch,
     DecisionCheckInterval,
     DecisionOrigin,
     DecisionStatus,
@@ -32,6 +33,14 @@ class NewEvidence(BaseModel):
     note: str | None = Field(default=None, **NOTE)
 
 
+class EvidenceMatch(BaseModel):
+    """Why an automatic check read the source it added this evidence from."""
+
+    reason: CheckMatch
+    #: what it matched on: the key or page it names, or how close in meaning it read (0..1)
+    detail: str | None = None
+
+
 class Evidence(NewEvidence):
     id: str
     #: the source's title and link when it was quoted, kept in case the source goes away
@@ -43,6 +52,8 @@ class Evidence(NewEvidence):
     added_by: str
     added_at: datetime
     state: EvidenceState
+    #: set on evidence an automatic check added: why it read the source
+    match: EvidenceMatch | None = None
     #: when the tracker or docs source it's mirrored from was last read, so `state` is as of then; null when written here
     source_synced_at: datetime | None = None
 

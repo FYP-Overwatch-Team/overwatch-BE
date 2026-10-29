@@ -1,9 +1,9 @@
 from datetime import date
 
-from fastapi import Depends, Query
+from fastapi import BackgroundTasks, Depends, Query
 
 from app.api.deps import workspace_member
-from app.core.constants import InboxTab
+from app.core.constants import DecisionStatus, InboxTab
 from app.core.time import utcnow
 from app.core.responses import WithMeta, api_router
 from app.decisions import checks, overview, service, suggest
@@ -49,9 +49,19 @@ async def inbox_counts(today: date | None = None, member: dict = Depends(workspa
     return InboxCounts(**await service.counts(member, today or utcnow().date()))
 
 
+def _scan_if_accepted(background: BackgroundTasks, member: dict, decision: dict) -> None:
+    """A newly accepted decision is read against what's already there, after the response is sent."""
+    if decision["status"] == DecisionStatus.ACCEPTED:
+        background.add_task(checks.scan_accepted_in_background, member["workspace_id"], decision["id"], member["user_id"])
+
+
 @router.post("", status_code=201)
-async def create_decision(body: CreateDecision, member: dict = Depends(workspace_member())) -> Decision:
-    return await service.create(member, body)
+async def create_decision(
+    body: CreateDecision, background: BackgroundTasks, member: dict = Depends(workspace_member()),
+) -> Decision:
+    decision = await service.create(member, body)
+    _scan_if_accepted(background, member, decision)
+    return decision
 
 
 @router.post("/suggest", status_code=201)
@@ -93,8 +103,12 @@ async def update_decision(decision_id: str, body: UpdateDecision, member: dict =
 
 
 @router.post("/{decision_id}/status")
-async def change_status(decision_id: str, body: ChangeStatus, member: dict = Depends(workspace_member())) -> Decision:
-    return await service.change_status(member, decision_id, body)
+async def change_status(
+    decision_id: str, body: ChangeStatus, background: BackgroundTasks, member: dict = Depends(workspace_member()),
+) -> Decision:
+    decision = await service.change_status(member, decision_id, body)
+    _scan_if_accepted(background, member, decision)
+    return decision
 
 
 @router.post("/{decision_id}/evidence", status_code=201)

@@ -64,6 +64,13 @@ async def sources(workspace_id: str, refs: list[tuple[str, str]]) -> dict[tuple[
     return found
 
 
+async def linked_items(workspace_id: str, item: dict) -> list[dict]:
+    """An item's parent, subtasks and issue links (named by key, in its tracker), each as `_id` and `key`."""
+    keys = [linked.get("key") for linked in [item.get("parent") or {}, *item.get("subtasks", []), *item.get("links", [])]]
+    query = {"workspace_id": workspace_id, "source": item["source"], "key": {"$in": [key for key in keys if key]}}
+    return await mongo.work_items().find(query, {"key": 1}).to_list(None)
+
+
 async def _synced_at(workspace_id: str, found: dict[tuple[str, str], dict]) -> dict[tuple[str, str], datetime]:
     """When each tracker or docs source behind the found items and pages was last read, by `(provider, key)`."""
     mirrored = {(source["source"], source["target_key"]) for source in found.values() if source["source"] != NATIVE_SOURCE}
@@ -142,8 +149,8 @@ async def _found(workspace_id: str, decision_id: str) -> dict:
     return doc
 
 
-async def _evidence(workspace_id: str, user_id: str, new: list[NewEvidence]) -> list[dict]:
-    """Stored evidence for `new`; each quote must be found in its source."""
+async def _evidence(workspace_id: str, user_id: str, new: list[NewEvidence], match: dict | None = None) -> list[dict]:
+    """Stored evidence for `new`; each quote must be found in its source. `match` is why a check read it."""
     found = await sources(workspace_id, [(e.kind, e.ref_id) for e in new])
     now = utcnow()
     stored = []
@@ -159,7 +166,7 @@ async def _evidence(workspace_id: str, user_id: str, new: list[NewEvidence]) -> 
             **evidence.model_dump(), "id": uuid.uuid4().hex, "title": source["title"],
             "external_url": source["external_url"], "fingerprint": quotes.fingerprint(source["text"]),
             "board_id": board["_id"] if board else None, "item_key": source.get("key"),
-            "added_by": user_id, "added_at": now,
+            "added_by": user_id, "added_at": now, "match": match,
         })
     return stored
 
@@ -261,10 +268,11 @@ async def change_status(member: dict, decision_id: str, body: ChangeStatus) -> d
     return await get(workspace_id, decision_id)
 
 
-async def add_evidence(member: dict, decision_id: str, body: NewEvidence) -> dict:
+async def add_evidence(member: dict, decision_id: str, body: NewEvidence, match: dict | None = None) -> dict:
+    """`match` is set by an automatic check: why it read the source."""
     workspace_id = member["workspace_id"]
     await _found(workspace_id, decision_id)
-    [evidence] = await _evidence(workspace_id, member["user_id"], [body])
+    [evidence] = await _evidence(workspace_id, member["user_id"], [body], match)
     # only while there's room, checked in the same update so two adds can't pass the limit together
     added = await mongo.decisions().update_one(
         {"_id": decision_id, f"evidence.{MAX_EVIDENCE - 1}": {"$exists": False}},

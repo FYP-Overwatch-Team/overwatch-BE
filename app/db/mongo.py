@@ -1,7 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 from app.core.config import get_settings
-from app.core.constants import NATIVE_SOURCE, SprintState
+from app.core.constants import NATIVE_SOURCE, SprintState, VectorSearch
 
 _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
@@ -195,6 +195,11 @@ def link_previews():
     return get_db()["link_previews"]
 
 
+def embeddings():
+    """One vector per work item, page or decision, from the configured embedding model."""
+    return get_db()["embeddings"]
+
+
 def file_facts():
     """Knowledge-graph extraction facts, one document per file."""
     return get_db()["file_facts"]
@@ -303,6 +308,12 @@ async def ensure_indexes() -> None:
     # one type per name in a workspace, whatever its case
     await work_item_types().create_index([("workspace_id", 1), ("name_key", 1)], unique=True)
 
+    # what changed since a decision check last ran, and items named by key in a source's text
+    await work_items().create_index([("workspace_id", 1), ("updated_at", -1)])
+    await work_items().create_index([("workspace_id", 1), ("key", 1)])
+    await documents().create_index([("workspace_id", 1), ("updated_at", -1)])
+    await embeddings().create_index([("workspace_id", 1), ("kind", 1), ("ref_id", 1)], unique=True)
+
     # Extraction cache: read on every sync to decide what changed, and always
     # scoped to one repository.
     await file_facts().create_index([("repo_full_name", 1), ("path", 1)], unique=True)
@@ -322,3 +333,24 @@ async def ensure_indexes() -> None:
     await link_previews().create_index("expires_at", expireAfterSeconds=0)
     await webhook_deliveries().create_index("delivery_id", unique=True)
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)
+    # last: an Atlas search index can fail where plain indexes don't (an M0 limit, say), and mustn't stop those
+    if get_settings().vector_search == VectorSearch.ATLAS:
+        await _ensure_vector_index()
+
+
+VECTOR_INDEX = "embeddings_vector"
+
+
+async def _ensure_vector_index() -> None:
+    """Atlas Vector Search over embeddings, filtered by workspace, kind and model; updated when the size changes."""
+    definition = {"fields": [
+        {"type": "vector", "path": "vector", "numDimensions": get_settings().embedding_dimensions, "similarity": "cosine"},
+        {"type": "filter", "path": "workspace_id"},
+        {"type": "filter", "path": "kind"},
+        {"type": "filter", "path": "model"},
+    ]}
+    existing = [index async for index in embeddings().list_search_indexes(VECTOR_INDEX)]
+    if not existing:
+        await embeddings().create_search_index({"name": VECTOR_INDEX, "type": "vectorSearch", "definition": definition})
+    elif existing[0].get("latestDefinition") != definition:
+        await embeddings().update_search_index(VECTOR_INDEX, definition)
