@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     jira_client_id: str = ""
     jira_client_secret: str = ""
 
+    # Slack app (bot installs); empty hides Slack from the integrations list
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+
     # the AI chat's model: any OpenAI-compatible chat API (Groq, OpenRouter, DeepSeek...)
     model_api_key: str = ""
     model_base_url: str = "https://openrouter.ai/api/v1"

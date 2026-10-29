@@ -20,6 +20,7 @@ from app.github.router import router as github_router
 from app.github.webhooks import router as webhooks_router
 from app.graph.router import router as graph_router
 from app.jira.router import router as jira_router
+from app.slack.router import router as slack_router
 from app.link_previews.router import router as link_previews_router
 from app.onboarding.router import router as onboarding_router
 from app.waitlist.router import router as waitlist_router
@@ -152,6 +153,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(accounts_router)
     app.include_router(github_router)
     app.include_router(jira_router)
+    app.include_router(slack_router)
     app.include_router(onboarding_router)
     app.include_router(graph_router)
     app.include_router(webhooks_router)

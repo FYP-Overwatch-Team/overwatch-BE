@@ -56,6 +56,15 @@ scopes): `read:board-scope:jira-software`, `write:board-scope:jira-software`, `r
 `read:sprint:jira-software`, `write:sprint:jira-software`, `read:issue:jira-software`.
 Then set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`.
 
+### Slack
+
+Create an app at [api.slack.com/apps](https://api.slack.com/apps) (From scratch). Under **OAuth & Permissions**
+add the redirect URL `<APP_BASE_URL>/slack/callback` and the bot token scopes `channels:read` and `groups:read`.
+Slack only redirects to HTTPS, so locally `APP_BASE_URL` must be an `https://` address the browser also calls the API
+on (the OAuth state cookie is set on that host). Under **Manage Distribution**, allow public distribution so other
+workspaces can install it. Then set `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET`; while they're empty, Slack isn't
+offered under Integrations.
+
 ### Email
 
 Sign-up codes, password resets and workspace invites are emailed. Locally `EMAIL_BACKEND=console` logs them

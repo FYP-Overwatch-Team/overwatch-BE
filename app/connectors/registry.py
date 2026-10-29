@@ -2,10 +2,10 @@
 
 from dataclasses import dataclass, field
 
-from app.connectors import atlassian, confluence, jira
+from app.connectors import atlassian, confluence, jira, slack
 from app.connectors.auth_backends import NativeOAuth
 from app.connectors.oauth import OAuth2Flow, OAuthConfig
-from app.connectors.ports import AuthBackend, DocSource, WorkItemSource
+from app.connectors.ports import AuthBackend, ChatSource, DocSource, WorkItemSource
 from app.core.constants import AuthBackendName, ConnectorCategory, Provider
 from app.core.exceptions import NotFoundError
 
@@ -19,7 +19,7 @@ class Connector:
     name: str
     category: ConnectorCategory
     oauth: OAuthConfig
-    adapter: WorkItemSource | DocSource
+    adapter: WorkItemSource | DocSource | ChatSource
     # what this product needs on top of the app's own scopes
     scopes: tuple[str, ...]
     # the scope that lets changes be written back; older grants may lack it
@@ -39,6 +39,11 @@ class Connector:
         """The `oauth_tokens` provider key: the app's, shared by every product on it."""
         return self.oauth.provider
 
+    @property
+    def configured(self) -> bool:
+        """This server has the provider's OAuth app; one without it isn't offered."""
+        return self.flow.configured
+
 
 CONNECTORS = {
     Provider.JIRA: Connector(
@@ -48,6 +53,10 @@ CONNECTORS = {
     Provider.CONFLUENCE: Connector(
         provider=Provider.CONFLUENCE, name="Confluence", category=ConnectorCategory.DOCUMENTS, oauth=atlassian.OAUTH,
         adapter=confluence.ConfluenceAdapter(), scopes=confluence.SCOPES, write_scope=confluence.WRITE_SCOPE,
+    ),
+    Provider.SLACK: Connector(
+        provider=Provider.SLACK, name="Slack", category=ConnectorCategory.CHAT, oauth=slack.OAUTH,
+        adapter=slack.SlackAdapter(), scopes=slack.SCOPES, write_scope=None,
     ),
 }
 

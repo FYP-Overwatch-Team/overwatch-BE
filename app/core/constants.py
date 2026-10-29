@@ -18,6 +18,7 @@ class Provider(StrEnum):
     GITHUB = "github"
     JIRA = "jira"
     CONFLUENCE = "confluence"
+    SLACK = "slack"
 
 
 class CredentialGroup(StrEnum):
@@ -27,10 +28,14 @@ class CredentialGroup(StrEnum):
 
 
 class ConnectorCategory(StrEnum):
-    """What a connector mirrors: tracker tickets into `work_items`, or pages into `documents`."""
+    """What a connector brings in: tracker tickets into `work_items`, pages into `documents`, or chat it listens to.
+
+    Chat isn't mirrored or polled: the provider pushes messages as they're posted.
+    """
 
     WORK_ITEMS = "work_items"
     DOCUMENTS = "documents"
+    CHAT = "chat"
 
 
 # `work_items.source` for items created in Overwatch; tracker items carry their provider

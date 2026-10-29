@@ -26,6 +26,12 @@ class OAuthConfig:
     # must match the redirect URI registered with the provider
     redirect_path: str
     extra_authorize_params: dict[str, str] = field(default_factory=dict)
+    # how the provider joins scopes, both when asked for and in the token response: Slack uses commas
+    scope_separator: str = " "
+
+    def parse_scopes(self, raw: str) -> list[str]:
+        """A token response's granted scopes, as a list."""
+        return [scope for scope in raw.split(self.scope_separator) if scope.strip()]
 
 
 class OAuth2Flow:
@@ -36,6 +42,11 @@ class OAuth2Flow:
     def redirect_uri(self) -> str:
         return f"{get_settings().app_base_url}{self.config.redirect_path}"
 
+    @property
+    def configured(self) -> bool:
+        """This server has the OAuth app's credentials; without them the provider can't be connected."""
+        return all(self._client())
+
     def _client(self) -> tuple[str, str]:
         settings = get_settings()
         return getattr(settings, self.config.client_id_setting), getattr(settings, self.config.client_secret_setting)
@@ -43,7 +54,7 @@ class OAuth2Flow:
     def authorize_url(self, state: str, scopes: tuple[str, ...] = ()) -> str:
         params = httpx.QueryParams(
             client_id=self._client()[0],
-            scope=" ".join(dict.fromkeys((*scopes, *self.config.scopes))),
+            scope=self.config.scope_separator.join(dict.fromkeys((*scopes, *self.config.scopes))),
             redirect_uri=self.redirect_uri,
             state=state,
             response_type="code",

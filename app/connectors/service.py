@@ -1,7 +1,7 @@
 import secrets
 
 from app.connectors import registry, repository
-from app.core.constants import AuthBackendName, ConnectionStatus, Role
+from app.core.constants import AuthBackendName, ConnectionStatus, ConnectorCategory, Role
 from app.core.exceptions import ConflictError, NotFoundError
 from app.db import oauth_tokens
 from app.workspaces.service import require_member
@@ -26,11 +26,13 @@ def can_manage_sprints(conn: dict | None) -> bool:
 
 
 async def catalog(workspace_id: str) -> list[dict]:
-    """Every supported connector with this workspace's state for it."""
+    """Every connector this server offers, with this workspace's state for it."""
     connections = {c["provider"]: c for c in await repository.list_connections(workspace_id)}
     targets = await repository.list_targets(workspace_id)
     result = []
     for provider, connector in registry.CONNECTORS.items():
+        if not connector.configured:
+            continue
         conn = connections.get(provider)
         status = await auth_status(conn)
         result.append({
@@ -54,6 +56,8 @@ async def start_authorization(member: dict, provider: str, return_to: str) -> tu
     Confluence must not take Jira's scopes away.
     """
     connector = registry.get(provider)
+    if not connector.configured:
+        raise ConflictError(f"{provider} isn't set up on this server", error_code="connector_not_configured")
     scopes = list(connector.scopes)
     for sibling in registry.siblings(provider):
         if await repository.active_connection(member["workspace_id"], sibling):
@@ -71,7 +75,7 @@ async def complete_authorization(provider: str, workspace_id: str, user_id: str,
     known_site = next((conn["external_account"]["id"] for conn in siblings if conn.get("external_account")), None)
     account = await connector.adapter.resolve_account(tokens["access_token"], known_site)
     await oauth_tokens.save(workspace_id, connector.credential, tokens)
-    granted = tokens.get("scope", "").split() or [*connector.scopes, *(s for conn in siblings for s in registry.get(conn["provider"]).scopes)]
+    granted = connector.oauth.parse_scopes(tokens.get("scope", "")) or [*connector.scopes, *(s for conn in siblings for s in registry.get(conn["provider"]).scopes)]
     await repository.save_connection(
         workspace_id, provider,
         auth_backend=AuthBackendName.NATIVE_OAUTH,
@@ -124,6 +128,8 @@ async def remove_target(workspace_id: str, provider: str, key: str) -> None:
 
 async def request_full_sync(workspace_id: str, provider: str) -> list[str]:
     """Targets to resync now, each made to run in full (so deletions show up too)."""
+    if registry.get(provider).category == ConnectorCategory.CHAT:
+        raise ConflictError(f"{provider} sends messages as they're posted; there's nothing to sync", error_code="nothing_to_sync")
     await require_connection(workspace_id, provider)
     targets = await repository.list_targets(workspace_id, provider)
     for target in targets:

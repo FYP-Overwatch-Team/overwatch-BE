@@ -1,6 +1,6 @@
 """Ports: what the connector framework needs from each provider.
 
-A connector is an adapter for one provider (Jira and Confluence today; ClickUp, Slack and Google later).
+A connector is an adapter for one provider (Jira, Confluence and Slack today; ClickUp and Google later).
 It never holds a token: every call goes through an `AuthBackend`, so the same adapter
 works whether we sign requests ourselves or a platform like Composio proxies them.
 
@@ -158,3 +158,13 @@ class DocSource(Protocol):
 
     async def delete_page(self, auth: AuthBackend, conn: dict, external_id: str) -> None:
         """Delete the page for good; one already gone counts as deleted."""
+
+
+class ChatSource(Protocol):
+    """A chat provider whose channels Overwatch listens to; messages arrive as pushed events, never polled."""
+
+    async def resolve_account(self, access_token: str, known_site_id: str | None = None) -> dict:
+        """The workspace the app was just installed in: {id, name, url}."""
+
+    async def list_targets(self, auth: AuthBackend, conn: dict) -> list[dict]:
+        """Channels the app can see, to pick which to listen to: [{key, name, id}]."""
