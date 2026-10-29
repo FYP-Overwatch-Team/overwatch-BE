@@ -17,18 +17,20 @@ TIMEOUT_SECONDS = 60
 MAX_SOURCE_CHARS = 12_000
 
 
-def fenced(text: str) -> str:
-    """A source's text marked off as data for the model to read, never instructions."""
-    return f"<source>\n{text[:MAX_SOURCE_CHARS]}\n</source>"
+def fenced(text: str, *, source_id: str = "", limit: int = MAX_SOURCE_CHARS) -> str:
+    """A source's text marked off as data for the model to read, never instructions; `source_id` names it."""
+    opening = f'<source id="{source_id}">' if source_id else "<source>"
+    return f"{opening}\n{text[:limit]}\n</source>"
 
 
 async def ask_json[T: BaseModel](
     reply_model: type[T], system: str, prompt: str, *, workspace_id: str, user_id: str, feature: UsageFeature,
+    timeout: float = TIMEOUT_SECONDS,
 ) -> T:
     """The model's reply read as `reply_model`; it may come wrapped in a code fence."""
     parts = []
     stream = get_llm_client().stream_text(
-        system, prompt, timeout=TIMEOUT_SECONDS, on_usage=usage.recorder(workspace_id, user_id, feature),
+        system, prompt, timeout=timeout, on_usage=usage.recorder(workspace_id, user_id, feature),
     )
     async for item in stream:
         if isinstance(item, Delta) and item.kind == "text":
