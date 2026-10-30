@@ -293,10 +293,11 @@ class DecisionOrigin(StrEnum):
 
 
 class EvidenceKind(StrEnum):
-    """What a piece of evidence quotes: a board item or a docs page."""
+    """What a piece of evidence quotes: a board item, a docs page, or a chat conversation (a Slack thread)."""
 
     WORK_ITEM = "work_item"
     DOCUMENT = "document"
+    CHAT_THREAD = "chat_thread"
 
 
 class EvidenceStance(StrEnum):

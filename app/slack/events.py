@@ -22,7 +22,7 @@ from app.core.constants import ConnectionStatus, Provider
 from app.core.exceptions import AppError, UnauthorizedError
 from app.core.responses import api_router
 from app.db import mongo, oauth_tokens
-from app.slack import messages
+from app.slack import decisions, messages
 
 router = api_router(prefix="/webhooks/slack", tags=["webhooks"])
 logger = structlog.get_logger("app.slack")
@@ -33,6 +33,7 @@ MAX_REQUEST_AGE_SECONDS = 300
 LISTENERS_TTL_SECONDS = 60
 # the app is gone from the Slack workspace, so its token is too
 UNINSTALL_EVENTS = {"app_uninstalled", "tokens_revoked"}
+EDIT_SUBTYPES = {"message_changed", "message_deleted"}
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,9 @@ async def _handle(team_id: str, event: dict) -> None:
     for listener in await _listeners_of(team_id):
         if channel in listener.channels:
             messages.buffer.apply(listener.workspace_id, team_id, channel, change)
+            # an edit or delete also reaches a conversation kept as a decision's source (rare, so done now)
+            if event.get("subtype") in EDIT_SUBTYPES:
+                await decisions.follow_edit(listener.workspace_id, channel, change.ts, change.fields and change.fields["text"])
 
 
 async def _listeners_of(team_id: str) -> list[Listener]:
@@ -128,5 +132,7 @@ async def _uninstalled(team_id: str) -> None:
     for listener in await _read_listeners(team_id):
         await oauth_tokens.set_status(listener.workspace_id, Provider.SLACK, ConnectionStatus.NEEDS_REAUTH)
         await messages.delete_workspace(listener.workspace_id)
+        # including the conversations kept for decisions: their evidence then shows the source is gone
+        await mongo.chat_threads().delete_many({"workspace_id": listener.workspace_id, "provider": Provider.SLACK})
     _listeners.pop(team_id, None)
     logger.info("slack_app_uninstalled", team_id=team_id)

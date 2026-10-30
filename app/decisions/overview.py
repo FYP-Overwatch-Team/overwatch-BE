@@ -27,6 +27,8 @@ def _source_href(evidence: dict) -> str:
     # where the app opens a page, and a board item on its board
     if evidence["kind"] == EvidenceKind.DOCUMENT:
         return f"/documents/{evidence['ref_id']}"
+    if evidence["kind"] == EvidenceKind.CHAT_THREAD:
+        return evidence.get("external_url") or ""
     params = {"board": evidence.get("board_id"), "item": evidence.get("item_key")}
     return f"/board?{urlencode({key: value for key, value in params.items() if value})}"
 

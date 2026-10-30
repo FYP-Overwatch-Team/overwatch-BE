@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     slack_client_secret: str = ""
     # verifies that events really come from Slack; empty rejects every event
     slack_signing_secret: str = ""
+    # Slack conversations a workspace's decision finder may read a day (each one model call, also counted
+    # against chat_daily_budget), and how often it looks for conversations that went quiet
+    slack_decision_scans_per_day: int = 20
+    slack_decision_tick_seconds: int = 300
 
     # the AI chat's model: any OpenAI-compatible chat API (Groq, OpenRouter, DeepSeek...)
     model_api_key: str = ""

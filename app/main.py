@@ -25,6 +25,7 @@ from app.github.router import router as github_router
 from app.github.webhooks import router as webhooks_router
 from app.graph.router import router as graph_router
 from app.jira.router import router as jira_router
+from app.slack import decisions as slack_decisions
 from app.slack import messages as slack_messages
 from app.slack.events import router as slack_events_router
 from app.slack.router import router as slack_router
@@ -112,6 +113,16 @@ async def _slack_messages_loop() -> None:
             structlog.get_logger("app.slack").exception("slack_messages_flush_error")
 
 
+async def _slack_decisions_loop(tick_seconds: int) -> None:
+    """Read Slack conversations that went quiet for decisions, every few minutes."""
+    while True:
+        await asyncio.sleep(tick_seconds)
+        try:
+            await slack_decisions.run_due()
+        except Exception:
+            structlog.get_logger("app.slack").exception("slack_decisions_loop_error")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     mongo.connect()
@@ -155,10 +166,12 @@ async def lifespan(app: FastAPI):
     docs_task = asyncio.create_task(_docs_loop(get_settings().doc_push_interval_seconds))
     merge_task = asyncio.create_task(_merge_loop())
     slack_messages_task = asyncio.create_task(_slack_messages_loop())
+    slack_decisions_task = asyncio.create_task(_slack_decisions_loop(get_settings().slack_decision_tick_seconds))
     decision_check_task = asyncio.create_task(_decision_check_loop(get_settings().decision_check_tick_seconds))
     yield
     decision_check_task.cancel()
     slack_messages_task.cancel()
+    slack_decisions_task.cancel()
     try:
         # what's still in memory would be lost with the process: Slack doesn't resend acknowledged events
         await slack_messages.buffer.flush()

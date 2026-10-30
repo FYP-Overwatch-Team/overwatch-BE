@@ -47,6 +47,7 @@ async def sources(workspace_id: str, refs: list[tuple[str, str]]) -> dict[tuple[
     """The board items and live docs pages behind `(kind, ref_id)` pairs, with their text, by pair."""
     item_ids = [ref_id for kind, ref_id in refs if kind == EvidenceKind.WORK_ITEM]
     page_ids = [ref_id for kind, ref_id in refs if kind == EvidenceKind.DOCUMENT]
+    thread_ids = [ref_id for kind, ref_id in refs if kind == EvidenceKind.CHAT_THREAD]
     found = {}
     if item_ids:
         async for item in mongo.work_items().find({"workspace_id": workspace_id, "_id": {"$in": item_ids}}):
@@ -60,6 +61,12 @@ async def sources(workspace_id: str, refs: list[tuple[str, str]]) -> dict[tuple[
             found[(EvidenceKind.DOCUMENT, doc["_id"])] = {
                 "title": doc["title"], "external_url": doc.get("external_url"), "text": _page_text(doc),
                 "source": doc["source"], "target_key": doc.get("target_key"),
+            }
+    if thread_ids:
+        async for thread in mongo.chat_threads().find({"workspace_id": workspace_id, "_id": {"$in": thread_ids}}):
+            found[(EvidenceKind.CHAT_THREAD, thread["_id"])] = {
+                "title": thread["title"], "external_url": thread.get("external_url"), "text": thread["text"],
+                "source": thread["provider"], "target_key": thread["channel"],
             }
     return found
 
