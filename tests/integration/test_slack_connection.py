@@ -1,5 +1,7 @@
 """Connecting Slack and choosing the channels it listens to."""
 
+import base64
+import json
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -52,7 +54,11 @@ async def slack(client, headers: dict) -> dict | None:
     return next((c for c in catalog if c["provider"] == "slack"), None)
 
 
-async def test_slack_is_not_offered_until_the_server_has_its_app(client):
+async def test_slack_is_not_offered_until_the_server_has_its_app(client, monkeypatch):
+    # blank, not unset: a developer's .env may hold real Slack credentials
+    monkeypatch.setenv("SLACK_CLIENT_ID", "")
+    monkeypatch.setenv("SLACK_CLIENT_SECRET", "")
+    get_settings.cache_clear()
     headers = auth_headers(await login(client))
 
     started = await client.post("/connections/slack/authorize", json={"return_to": "settings"}, headers=headers)
@@ -81,6 +87,23 @@ async def test_connecting_stores_the_slack_workspace_and_its_scopes(client, slac
     assert conn["scopes"] == ["channels:read", "groups:read"]
     token = await oauth_tokens.get(workspace_id, "slack")
     assert (token["status"], token["expires_at"]) == ("active", None)
+
+
+async def test_the_token_request_uses_basic_auth_and_a_form_body(client, slack_app):
+    headers = auth_headers(await login(client))
+    state = parse_qs(urlparse(await authorize(client, headers)).query)["state"][0]
+
+    with respx.mock as router:
+        mock_slack_install(router)
+        await client.get(f"/slack/callback?code=fake&state={state}")
+        exchange = router.routes[0].calls[0].request
+
+    credentials = base64.b64encode(b"test-slack-client-id:test-slack-client-secret").decode()
+    form = parse_qs(exchange.content.decode())
+    assert exchange.headers["Authorization"] == f"Basic {credentials}"
+    assert exchange.headers["Content-Type"] == "application/x-www-form-urlencoded"
+    assert (form["code"], form["redirect_uri"][0].endswith("/slack/callback")) == (["fake"], True)
+    assert "client_secret" not in form
 
 
 async def test_channels_are_listed_across_pages(client, slack_app):
@@ -142,3 +165,28 @@ async def test_channels_are_listened_to_not_synced(client, slack_app, monkeypatc
     assert [(t["key"], t["name"]) for t in (await slack(client, headers))["targets"]] == [("C0GENERAL", "#general")]
     assert sync_now.json()["meta"]["error_code"] == "nothing_to_sync"
     assert synced == []
+
+
+def logged(capsys, event: str) -> list[dict]:
+    """Log lines with this event; the app logs JSON to stdout, and its loggers are cached, so capture_logs can miss them."""
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    return [line for line in lines if line.get("event") == event]
+
+
+async def test_a_failed_install_logs_why(client, slack_app, capsys):
+    headers = auth_headers(await login(client))
+    state = parse_qs(urlparse(await authorize(client, headers)).query)["state"][0]
+
+    with respx.mock as router:
+        router.post(TOKEN_URL).mock(return_value=Response(200, json={"ok": False, "error": "invalid_code"}))
+        failed = await client.get(f"/slack/callback?code=stale&state={state}")
+    [failure] = logged(capsys, "oauth_callback_failed")
+    client.cookies.clear()
+    mismatched = await client.get(f"/slack/callback?code=fake&state={state}")
+    [mismatch] = logged(capsys, "oauth_callback_state_mismatch")
+
+    assert failed.headers["location"].endswith("/settings/integrations?slack=error")
+    assert (failure["provider"], failure["error_code"]) == ("slack", "external_service_error")
+    assert failure["reason"] == "slack token exchange failed: invalid_code"
+    assert mismatched.headers["location"].endswith("/settings/integrations?slack=error")
+    assert (mismatch["provider"], mismatch["has_cookie"]) == ("slack", False)

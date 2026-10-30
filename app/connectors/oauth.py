@@ -1,6 +1,7 @@
 """One OAuth2 authorization-code flow for every provider; each supplies an `OAuthConfig`."""
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import httpx
 import structlog
@@ -28,6 +29,9 @@ class OAuthConfig:
     extra_authorize_params: dict[str, str] = field(default_factory=dict)
     # how the provider joins scopes, both when asked for and in the token response: Slack uses commas
     scope_separator: str = " "
+    # how the token request carries the app's credentials: in a JSON body (Atlassian), or as HTTP Basic auth
+    # with a form body, which Slack recommends and only reliably reads
+    client_auth: Literal["json_body", "basic_form"] = "json_body"
 
     def parse_scopes(self, raw: str) -> list[str]:
         """A token response's granted scopes, as a list."""
@@ -72,7 +76,10 @@ class OAuth2Flow:
 
     async def _token_request(self, payload: dict) -> dict:
         client_id, client_secret = self._client()
-        resp = await http.post(self.config.token_url, json={**payload, "client_id": client_id, "client_secret": client_secret})
+        if self.config.client_auth == "basic_form":
+            resp = await http.post(self.config.token_url, data=payload, auth=(client_id, client_secret))
+        else:
+            resp = await http.post(self.config.token_url, json={**payload, "client_id": client_id, "client_secret": client_secret})
         log_call(logger, f"{self.config.provider}_api_call", "POST", "/oauth/token", resp)
         if resp.status_code != 200:
             if payload["grant_type"] == "refresh_token":
@@ -83,5 +90,7 @@ class OAuth2Flow:
             raise ExternalServiceError(f"{self.config.provider} token exchange failed")
         body = resp.json()
         if "access_token" not in body:
-            raise ExternalServiceError(f"{self.config.provider} token response missing access_token")
+            # Slack refuses with HTTP 200 and {"ok": false, "error": ...}; the error name is safe to surface
+            reason = body.get("error") if isinstance(body.get("error"), str) else "no access_token in the response"
+            raise ExternalServiceError(f"{self.config.provider} token exchange failed: {reason[:100]}")
         return body

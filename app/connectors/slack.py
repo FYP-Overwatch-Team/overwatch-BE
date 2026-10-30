@@ -29,6 +29,7 @@ OAUTH = OAuthConfig(
     # Slack only accepts an HTTPS redirect, so local runs need APP_BASE_URL on https
     redirect_path="/slack/callback",
     scope_separator=",",
+    client_auth="basic_form",
 )
 
 # bot scopes: seeing the public channels, and the private ones the bot was invited to

@@ -1,5 +1,6 @@
 import secrets
 
+import structlog
 from fastapi import BackgroundTasks, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 
@@ -22,6 +23,7 @@ from app.core.responses import api_router
 from app.workers import jobs
 
 router = api_router(prefix="/connections", tags=["connections"])
+logger = structlog.get_logger("app.connectors")
 
 LANDING = {"onboarding": "/onboarding/{provider}", "settings": "/settings/integrations"}
 
@@ -51,14 +53,18 @@ async def oauth_callback(credential: str, request: Request, state: str, code: st
     if provider not in products:
         provider, expected_state = products[0], None
     if not expected_state or not secrets.compare_digest(state, expected_state):
+        # the state cookie didn't come back (cookie policy, another browser, or a stale tab) or doesn't match
+        logger.warning("oauth_callback_state_mismatch", provider=provider, has_cookie=bool(expected_state))
         outcome = "error"
     elif error or not code:
+        logger.info("oauth_callback_denied", provider=provider, provider_error=error)
         outcome = "denied"
     else:
         try:
             await service.complete_authorization(provider, workspace_id, user_id, code)
             outcome = "connected"
-        except AppError:
+        except AppError as exc:
+            logger.warning("oauth_callback_failed", provider=provider, workspace_id=workspace_id, error_code=exc.error_code, reason=str(exc))
             outcome = "error"
 
     landing = LANDING.get(return_to, LANDING["onboarding"]).format(provider=provider)
