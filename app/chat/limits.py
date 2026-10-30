@@ -16,6 +16,14 @@ from app.core.rate_limit import Window, take_all, take_one
 from app.core.time import utcnow
 
 
+def member_hourly_key(workspace_id: str, user_id: str, now: datetime) -> str:
+    return f"chat:user:{workspace_id}:{user_id}:{now.strftime('%Y%m%d%H')}"
+
+
+def workspace_daily_key(workspace_id: str, now: datetime) -> str:
+    return f"chat:workspace:{workspace_id}:{now.strftime('%Y%m%d')}"
+
+
 def daily_budget(now: datetime) -> Window:
     """Every model call in a day, whatever it's for: what the provider bills by."""
     return Window(
@@ -28,11 +36,10 @@ async def take(workspace_id: str, user_id: str) -> None:
     """Count one question against every limit, or raise without counting any."""
     settings = get_settings()
     now = utcnow()
-    hour, day = now.strftime("%Y%m%d%H"), now.strftime("%Y%m%d")
     await take_all([
-        Window(f"chat:user:{workspace_id}:{user_id}:{hour}", settings.chat_user_hourly_limit, now + timedelta(hours=2),
+        Window(member_hourly_key(workspace_id, user_id, now), settings.chat_user_hourly_limit, now + timedelta(hours=2),
                AppError("You've asked a lot of questions this hour; try again later", error_code="rate_limited", status_code=429)),
-        Window(f"chat:workspace:{workspace_id}:{day}", settings.chat_workspace_daily_limit, now + timedelta(days=2),
+        Window(workspace_daily_key(workspace_id, now), settings.chat_workspace_daily_limit, now + timedelta(days=2),
                AppError("This workspace has reached today's question limit", error_code="rate_limited", status_code=429)),
         daily_budget(now),
     ])

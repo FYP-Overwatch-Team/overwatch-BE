@@ -249,6 +249,19 @@ class UsageFeature(StrEnum):
     EMBEDDINGS = "embeddings"
 
 
+class UsageLimitKind(StrEnum):
+    """A limit on how much the AI may be used, as the usage page shows it."""
+
+    #: questions to the AI chat, per workspace per day
+    CHAT_QUESTIONS = "chat_questions"
+    #: questions to the AI chat, per member per hour
+    MEMBER_CHAT_QUESTIONS = "member_chat_questions"
+    #: "Suggest decisions" runs, per workspace per day
+    DECISION_SUGGESTIONS = "decision_suggestions"
+    #: sources read by decision checks, automatic or asked for, per workspace per day
+    DECISION_CHECKS = "decision_checks"
+
+
 class DecisionStatus(StrEnum):
     """Where a decision stands. Only people move it; a suggestion from the AI starts as `proposed`."""
 

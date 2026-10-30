@@ -45,6 +45,12 @@ async def take_all(windows: list[Window]) -> None:
         taken.append(window.key)
 
 
+async def count(key: str) -> int:
+    """How much has been taken from a window so far; 0 before its first take."""
+    doc = await mongo.usage_counters().find_one({"_id": key}, {"count": 1})
+    return doc["count"] if doc else 0
+
+
 async def take_one(key: str, limit: int, expires_at: datetime) -> bool:
     if limit <= 0:
         return False
