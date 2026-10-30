@@ -67,6 +67,22 @@ async def test_moving_a_card_applies_a_matching_jira_transition(client):
     assert (resp.json()["data"]["status"], resp.json()["data"]["status_category"]) == ("Shipped", "done")
 
 
+async def test_a_move_whose_jira_screen_needs_input_is_left_to_jira(client):
+    headers, item_id = await setup(client)
+    with respx.mock as router:  # strict: no transition is posted
+        router.get(TRANSITIONS).mock(return_value=Response(200, json={"transitions": [
+            {"id": "31", "to": {"id": "10003", "name": "Done", "statusCategory": {"key": "done"}}, "fields": {
+                "resolution": {"name": "Resolution", "required": True, "hasDefaultValue": False},
+            }},
+        ]}))
+        resp = await client.post(f"/work-items/{item_id}/move", json={"column_id": "done"}, headers=headers)
+
+    assert resp.json()["meta"] == {
+        "error_code": "transition_needs_input", "message": "Jira needs Resolution to move it to Done: make this move in Jira.",
+    }
+    assert (await stored())["status_category"] == "in_progress"
+
+
 async def test_reordering_within_a_column_stays_in_overwatch(client):
     headers, item_id = await setup(client)
     with respx.mock:  # strict: no Jira call

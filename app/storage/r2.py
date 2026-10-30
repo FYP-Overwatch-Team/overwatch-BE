@@ -15,7 +15,9 @@ class R2Store(S3Store):
     def __init__(self, bucket: str, region: str, endpoint_url: str) -> None:
         super().__init__(bucket, region or "auto", endpoint_url)
 
-    def upload_target(self, attachment_id: str, key: str, content_type: str, size: int) -> UploadTarget:
+    def upload_target(
+        self, attachment_id: str, key: str, content_type: str, size: int, *, api_path: str = "/attachments",
+    ) -> UploadTarget:
         url = self.client.generate_presigned_url(
             "put_object",
             Params={"Bucket": self.bucket, "Key": key, "ContentType": content_type, "ContentLength": size},

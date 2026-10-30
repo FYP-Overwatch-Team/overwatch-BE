@@ -9,7 +9,7 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -27,6 +27,11 @@ TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 RETRY_BACKOFF_SECONDS = (1.0, 2.0)
 #: Below this much time left, a retry isn't started.
 MIN_ATTEMPT_SECONDS = 3.0
+#: Pauses between asks for a stopped call's billed usage, which OpenRouter has a few seconds after the call.
+USAGE_LOOKUP_DELAYS_SECONDS = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
+_GENERATION_ID_RE = re.compile(r"^gen-[0-9A-Za-z-]+$")
+# usage lookups still running after their call ended, kept so they aren't garbage-collected
+_pending_lookups: set[asyncio.Task] = set()
 
 # Some models (DeepSeek's DSML, others' `<tool_call>`) sometimes write tool calls into the
 # reply as markup instead of sending them as calls; this is how that markup is recognised.
@@ -64,6 +69,18 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class CallUsage:
+    """What one model call used, as the provider reported it; cost only where it reports one."""
+
+    model: str
+    provider: str | None
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+    cost_usd: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class ToolRound:
     """One round of looking things up: the calls the model made and what each returned, in order."""
 
@@ -88,11 +105,13 @@ class LLMClient(Protocol):
         tool_choice: Literal["auto", "none"] = "auto",
         closing: str = "",
         session: str = "",
+        on_usage: Callable[[CallUsage], Awaitable[None]] | None = None,
     ) -> AsyncIterator[Delta | ToolCall]:
         """The reply as it's written; with `tools`, the calls the model makes come once it's done.
 
         `closing` is a last instruction after the rounds, such as "answer now"; `session`
         groups calls that share a prefix (a conversation), for providers that route by it.
+        `on_usage` gets what the call used once the provider reports it, to record it.
         """
         ...
 
@@ -118,6 +137,8 @@ class OpenAICompatibleClient:
         self._http = httpx.AsyncClient(
             base_url=base_url.rstrip("/"), headers={"Authorization": f"Bearer {api_key}"},
         )
+        #: OpenRouter can say what a call stopped early was billed; other providers can't
+        self._bills_by_generation = httpx.URL(base_url).host.endswith("openrouter.ai")
 
     async def stream_text(
         self,
@@ -131,6 +152,7 @@ class OpenAICompatibleClient:
         tool_choice: Literal["auto", "none"] = "auto",
         closing: str = "",
         session: str = "",
+        on_usage: Callable[[CallUsage], Awaitable[None]] | None = None,
     ) -> AsyncIterator[Delta | ToolCall]:
         body = self._body(system_instruction, prompt, history, rounds, closing) | {
             "stream": True, "stream_options": {"include_usage": True},
@@ -144,6 +166,8 @@ class OpenAICompatibleClient:
         response = await self._post(body, deadline)
         # a call's id and name come first and its arguments in pieces after, keyed by position
         calls: dict[int, list[str]] = {}
+        generation_id: str | None = None
+        reported = False
         try:
             async with asyncio.timeout_at(_loop_time(deadline)):
                 async for line in response.aiter_lines():
@@ -156,7 +180,13 @@ class OpenAICompatibleClient:
                         chunk = json.loads(data)
                     except ValueError:
                         continue
-                    self._log_usage(chunk)
+                    if generation_id is None and isinstance(chunk, dict) and isinstance(chunk.get("id"), str):
+                        generation_id = chunk["id"]
+                    usage = self._usage(chunk)
+                    if usage:
+                        reported = True
+                        if on_usage:
+                            await on_usage(usage)
                     for delta in _deltas(chunk):
                         yield delta
                     _collect_calls(chunk, calls)
@@ -168,22 +198,70 @@ class OpenAICompatibleClient:
             raise _unavailable() from exc
         finally:
             await response.aclose()
+            if on_usage and not reported:
+                # stopped before the provider said what it used (refused, cancelled, cut off): it's
+                # still billed, so ask what for rather than guess
+                self._record_billed_later(generation_id, on_usage)
         for index in sorted(calls):
             call_id, name, arguments = calls[index]
             if name:
                 yield ToolCall(call_id or f"call_{index}", name, arguments)
 
-    def _log_usage(self, chunk: dict) -> None:
-        """Tokens and, where the provider reports it, cost of each call: what a question costs."""
-        usage = chunk.get("usage") if isinstance(chunk, dict) else None
-        if isinstance(usage, dict):
-            cache = usage.get("prompt_tokens_details") or {}
-            logger.info(
-                "llm_usage", model=self._model, prompt_tokens=usage.get("prompt_tokens"),
-                completion_tokens=usage.get("completion_tokens"), cost=usage.get("cost"),
-                cached_tokens=cache.get("cached_tokens"), cache_write_tokens=cache.get("cache_write_tokens"),
-                provider=chunk.get("provider") if isinstance(chunk.get("provider"), str) else None,
+    def _record_billed_later(self, generation_id: str | None, on_usage: Callable[[CallUsage], Awaitable[None]]) -> None:
+        if not (self._bills_by_generation and generation_id and _GENERATION_ID_RE.match(generation_id)):
+            logger.error("llm_usage_unrecorded", model=self._model, generation_id=generation_id, reason="no_lookup")
+            return
+        task = asyncio.create_task(self._record_billed(generation_id, on_usage))
+        _pending_lookups.add(task)
+        task.add_done_callback(_pending_lookups.discard)
+
+    async def _record_billed(self, generation_id: str, on_usage: Callable[[CallUsage], Awaitable[None]]) -> None:
+        """What OpenRouter billed for a call stopped early, recorded once its stats are ready."""
+        for delay in USAGE_LOOKUP_DELAYS_SECONDS:
+            await asyncio.sleep(delay)
+            try:
+                response = await self._http.get("/generation", params={"id": generation_id})
+            except httpx.HTTPError:
+                continue
+            if response.status_code != 200:
+                continue  # 404 until its stats are ready
+            data = response.json().get("data") or {}
+            cost = data.get("total_cost")
+            usage = CallUsage(
+                model=self._model, provider=data.get("provider_name") if isinstance(data.get("provider_name"), str) else None,
+                prompt_tokens=data.get("native_tokens_prompt") or 0, completion_tokens=data.get("native_tokens_completion") or 0,
+                cached_tokens=data.get("native_tokens_cached") or 0,
+                cost_usd=float(cost) if isinstance(cost, int | float) else None,
             )
+            try:
+                await on_usage(usage)
+            except Exception:
+                logger.exception("llm_usage_unrecorded", model=self._model, generation_id=generation_id, reason="record_failed")
+                return
+            logger.info("llm_usage_billed", model=self._model, generation_id=generation_id, cost=cost)
+            return
+        logger.error("llm_usage_unrecorded", model=self._model, generation_id=generation_id, reason="lookup_failed")
+
+    def _usage(self, chunk: dict) -> CallUsage | None:
+        """Tokens and, where the provider reports it, cost of the call: logged, and returned to record."""
+        usage = chunk.get("usage") if isinstance(chunk, dict) else None
+        if not isinstance(usage, dict):
+            return None
+        cache = usage.get("prompt_tokens_details") or {}
+        provider = chunk.get("provider") if isinstance(chunk.get("provider"), str) else None
+        logger.info(
+            "llm_usage", model=self._model, prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"), cost=usage.get("cost"),
+            cached_tokens=cache.get("cached_tokens"), cache_write_tokens=cache.get("cache_write_tokens"),
+            provider=provider,
+        )
+        cost = usage.get("cost")
+        return CallUsage(
+            model=self._model, provider=provider,
+            prompt_tokens=usage.get("prompt_tokens") or 0, completion_tokens=usage.get("completion_tokens") or 0,
+            cached_tokens=cache.get("cached_tokens") or 0,
+            cost_usd=float(cost) if isinstance(cost, int | float) else None,
+        )
 
     def _body(
         self,
@@ -363,6 +441,12 @@ def provider_routing(sort: str, order: str) -> dict | None:
     if slugs := [slug.strip() for slug in order.split(",") if slug.strip()]:
         routing["order"] = slugs
     return routing | {"allow_fallbacks": True} if routing else None
+
+
+async def settle_usage() -> None:
+    """Wait for usage lookups still running, so what stopped calls cost is recorded (shutdown, tests)."""
+    if _pending_lookups:
+        await asyncio.gather(*_pending_lookups, return_exceptions=True)
 
 
 def use_llm_client(client: LLMClient | None) -> None:

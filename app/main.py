@@ -13,6 +13,11 @@ from app.comments.router import router as comments_router
 from app.sprints.router import router as sprints_router
 from app.chat.router import router as chat_router
 from app.documents.attachments import router as attachments_router
+from app.decisions.router import router as decisions_router
+from app.search.router import router as search_router
+from app.decision_comments import attachments as decision_attachments
+from app.decision_comments.router import router as decision_comments_router
+from app.realtime.router import router as realtime_router
 from app.documents.router import router as documents_router
 from app.connectors.router import router as connections_router
 from app.github import checkout
@@ -22,10 +27,13 @@ from app.graph.router import router as graph_router
 from app.jira.router import router as jira_router
 from app.link_previews.router import router as link_previews_router
 from app.onboarding.router import router as onboarding_router
+from app.usage.router import router as usage_router
 from app.waitlist.router import router as waitlist_router
 from app.work_item_types.router import router as work_item_types_router
 from app.work_items.router import router as work_items_router
 from app.workspaces.router import router as workspaces_router
+from app.decisions import checks as decision_checks
+from app.integrations import llm
 from app.workers import jobs
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -56,6 +64,16 @@ async def _doc_sync_loop(interval_seconds: int) -> None:
         await asyncio.sleep(interval_seconds)
 
 
+async def _decision_check_loop(tick_seconds: int) -> None:
+    """Check accepted decisions against what changed, in each workspace as often as it chose."""
+    while True:
+        await asyncio.sleep(tick_seconds)
+        try:
+            await decision_checks.run_due()
+        except Exception:
+            structlog.get_logger("app.decisions").exception("decision_check_loop_error")
+
+
 async def _merge_loop() -> None:
     """Finish account merges a crash or restart interrupted: at once, then every few minutes."""
     while True:
@@ -67,7 +85,7 @@ async def _merge_loop() -> None:
 
 
 async def _docs_loop(push_seconds: int) -> None:
-    """Push settled docs edits every few seconds; purge expired archives about hourly."""
+    """Push settled docs edits every few seconds; about hourly, purge expired archives and unsent discussion uploads."""
     purged_at = 0.0
     while True:
         await asyncio.sleep(push_seconds)
@@ -75,6 +93,7 @@ async def _docs_loop(push_seconds: int) -> None:
             await jobs.push_documents()
             if asyncio.get_running_loop().time() - purged_at >= 3600:
                 await jobs.purge_archived_documents()
+                await decision_attachments.sweep()
                 purged_at = asyncio.get_running_loop().time()
         except Exception:
             structlog.get_logger("app.jobs").exception("docs_loop_error")
@@ -122,7 +141,14 @@ async def lifespan(app: FastAPI):
     )
     docs_task = asyncio.create_task(_docs_loop(get_settings().doc_push_interval_seconds))
     merge_task = asyncio.create_task(_merge_loop())
+    decision_check_task = asyncio.create_task(_decision_check_loop(get_settings().decision_check_tick_seconds))
     yield
+    decision_check_task.cancel()
+    # what calls stopped early were billed, while there's still time to record it
+    try:
+        await asyncio.wait_for(llm.settle_usage(), timeout=10)
+    except TimeoutError:
+        structlog.get_logger("app.llm").warning("llm_usage_lookups_unfinished")
     sync_task.cancel()
     doc_sync_task.cancel()
     docs_task.cancel()
@@ -162,9 +188,15 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(sprints_router)
     app.include_router(comments_router)
     app.include_router(documents_router)
+    app.include_router(decisions_router)
     app.include_router(attachments_router)
     app.include_router(link_previews_router)
     app.include_router(chat_router)
+    app.include_router(usage_router)
+    app.include_router(search_router)
+    app.include_router(decision_comments_router)
+    app.include_router(decision_attachments.router)
+    app.include_router(realtime_router)
     app.include_router(workspaces_router)
     app.include_router(waitlist_router)
 

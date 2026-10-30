@@ -58,7 +58,7 @@ async def _writable_sources(workspace_id: str) -> set[str]:
     return {c["provider"] for c in await connectors.list_connections(workspace_id) if can_write(c)}
 
 
-async def _visibility(workspace_id: str) -> dict:
+async def visibility(workspace_id: str) -> dict:
     """Native items, plus tracker items whose target is still connected."""
     by_provider: dict[str, list[str]] = {}
     for target in await connectors.list_targets(workspace_id):
@@ -79,13 +79,14 @@ async def _query(
     priority: str | None = None, q: str | None = None, key: str | None = None,
 ) -> dict | None:
     """The Mongo filter for a board's items; None when nothing can match (no active sprint for "current")."""
-    query: dict = {"workspace_id": workspace_id, **await _visibility(workspace_id)}
+    query: dict = {"workspace_id": workspace_id, **await visibility(workspace_id)}
     conditions: list[dict] = []
     if board_id:
         board = await board_service.get_visible(workspace_id, board_id)
         query.update(_scope(board))
-        # what the tracker's own board doesn't show isn't on ours either
-        query["tracker_hidden"] = {"$ne": True}
+        # what the tracker's own board doesn't show isn't on ours either, but one asked for by key still opens
+        if key is None:
+            query["tracker_hidden"] = {"$ne": True}
         if sprint:
             sprint_id = await _sprint_filter(board, sprint)
             if sprint_id is _NO_SPRINT:

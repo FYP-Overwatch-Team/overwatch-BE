@@ -9,8 +9,9 @@ from mongomock_motor import AsyncMongoMockClient
 
 from app.core.config import get_settings
 from app.db import mongo
+from app.realtime.hub import get_hub, use_hub
 from app.main import create_app
-from app.integrations import github_app, llm
+from app.integrations import embeddings, github_app, llm
 from app.workers import jobs
 from app.services.facts_repository import InMemoryFactsStore, use_facts_store
 from app.db.knowledge_graph_store import (
@@ -21,7 +22,7 @@ from app.mail.memory import Outbox
 from app.mail.sender import use_email_sender
 from app.storage.memory import InMemoryStore
 from app.storage.store import use_object_store
-from tests.fakes import FakeLLMClient
+from tests.fakes import FakeEmbedder, FakeLLMClient
 
 
 @pytest.fixture(scope="session")
@@ -48,6 +49,8 @@ def test_env(monkeypatch, github_app_key):
     monkeypatch.setenv("JIRA_CLIENT_ID", "test-jira-client-id")
     monkeypatch.setenv("JIRA_CLIENT_SECRET", "test-jira-client-secret")
     monkeypatch.setenv("HIBP_ENABLED", "false")
+    # no real embedding model in tests; `fake_embedder` stands in
+    monkeypatch.setenv("EMBEDDING_MODEL", "")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -109,6 +112,14 @@ def graph_store():
 
 
 @pytest.fixture(autouse=True)
+def realtime_hub():
+    """Every test starts with nobody connected."""
+    use_hub(None)
+    yield get_hub()
+    use_hub(None)
+
+
+@pytest.fixture(autouse=True)
 def object_store():
     """Every test uploads into an empty in-memory store."""
     store = InMemoryStore()
@@ -146,6 +157,14 @@ def record_jobs(monkeypatch):
     monkeypatch.setattr(jobs, "run_index", run_index)
     monkeypatch.setattr(jobs, "run_connector_sync", run_connector_sync)
     return calls
+
+
+@pytest.fixture
+def fake_embedder():
+    fake = FakeEmbedder()
+    embeddings.use_embedder(fake)
+    yield fake
+    embeddings.use_embedder(None)
 
 
 @pytest.fixture

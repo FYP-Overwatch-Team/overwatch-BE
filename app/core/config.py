@@ -3,7 +3,7 @@ from functools import lru_cache
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.core.constants import PRODUCT_NAMES, Product
+from app.core.constants import PRODUCT_NAMES, Product, VectorSearch
 
 
 class Settings(BaseSettings):
@@ -45,6 +45,33 @@ class Settings(BaseSettings):
     chat_user_hourly_limit: int = 30
     chat_workspace_daily_limit: int = 200
     chat_daily_budget: int = 500
+    # "Suggest decisions" runs a workspace may make a day; they also count against chat_daily_budget
+    decision_suggest_workspace_daily_limit: int = 20
+    # sources a workspace's decision checks may read a day (each one model call), and how often the
+    # loop looks for workspaces due a check (each workspace picks its own interval)
+    decision_check_workspace_daily_limit: int = 20
+    decision_check_tick_seconds: int = 300
+    # embeddings, for finding related items, pages and decisions by meaning; an empty model turns them off.
+    # The adapter is the API shape ("openai_compatible": OpenRouter, OpenAI...); key and base URL are the model's.
+    embedding_adapter: str = "openai_compatible"
+    embedding_model: str = "qwen/qwen3-embedding-8b"
+    embedding_dimensions: int = 1024
+    # put before a text embedded to search with; models that take no instruction leave it empty
+    embedding_query_instruction: str = (
+        "Instruct: Given a decision or a passage, retrieve the work items, documents and decisions about the same subject\n"
+        "Query: "
+    )
+    # OpenRouter provider slugs to prefer, comma-separated, so stored vectors come from one provider
+    embedding_provider_order: str = ""
+    # "atlas" uses Atlas Vector Search (prod); "local" compares vectors here (dev, tests)
+    vector_search: VectorSearch = VectorSearch.LOCAL
+    # items and pages embedded per decision check; the first runs fill the backlog this many at a time
+    embedding_batch_limit: int = 500
+    # how close in meaning (cosine) a source must be to a decision to be read against it, and how many per source
+    decision_similarity_threshold: float = 0.6
+    decision_similar_per_source: int = 3
+    # sources read against a decision when it's accepted: its closest matches among everything already there
+    decision_accept_scan_limit: int = 5
     # lookups (graph search, reading code) one answer may make before it must answer; 0 turns them off
     chat_max_lookups: int = 20
     # OpenRouter provider routing, empty to send nothing: sort by "latency", "throughput" or "price",

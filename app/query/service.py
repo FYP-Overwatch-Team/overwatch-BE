@@ -19,7 +19,7 @@ import structlog
 from app.core.config import get_settings
 from app.core.exceptions import AppError, NotFoundError
 from app.db.knowledge_graph_store import get_knowledge_graph_store
-from app.integrations.llm import ToolCall, ToolRound, Turn, calls_written_as_text, get_llm_client
+from app.integrations.llm import CallUsage, ToolCall, ToolRound, Turn, calls_written_as_text, get_llm_client
 from app.query.context import GroundingContext, open_ask_context
 from app.query.grounding import (
     ASK_MARKER,
@@ -138,6 +138,7 @@ async def answer_stream(
     before_model_call: Callable[[], Awaitable[None]] | None = None,
     before_extra_model_call: Callable[[], Awaitable[bool]] | None = None,
     session: str = "",
+    on_usage: Callable[[CallUsage], Awaitable[None]] | None = None,
     may_ask: bool = True,
 ) -> AsyncIterator[AnswerEvent]:
     """Answer a question about the repository as it's written, ending with the checked answer.
@@ -150,7 +151,7 @@ async def answer_stream(
     graph is known to be there, right before the model is asked; the chat
     charges its rate limits there. The model may look things up (`tools.TOOLS`)
     before answering, each round a further model call: `before_extra_model_call`
-    runs before each and returning False makes the next call the answer. Everything that can refuse the question
+    runs before each and returning False makes the next call the answer; `on_usage` records what each call used. Everything that can refuse the question
     happens before `Started`, so a caller can still answer with an error then.
 
     The relationships the answer relies on come first and are checked before
@@ -195,7 +196,7 @@ async def answer_stream(
         stream = get_llm_client().stream_text(
             ASK_SYSTEM_INSTRUCTION, prompt, history=history, timeout=ANSWER_TIMEOUT_SECONDS,
             tools=TOOLS if max_lookups else (), rounds=rounds, tool_choice="auto" if looking else "none",
-            closing="" if looking or not rounds else ANSWER_NOW, session=session,
+            closing="" if looking or not rounds else ANSWER_NOW, session=session, on_usage=on_usage,
         )
         try:
             async for item in stream:

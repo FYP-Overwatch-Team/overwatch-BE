@@ -22,6 +22,7 @@ from app.core.rate_limit import Limit, cooldown_error, retry_after, take
 from app.core.time import utcnow
 from app.mail import templates
 from app.mail.sender import deliver
+from app.realtime.hub import get_hub
 from app.workspaces import repository
 
 INVITE_TTL = timedelta(days=7)
@@ -70,6 +71,7 @@ async def delete(member: dict) -> None:
     if member["workspace"]["personal"]:
         raise ConflictError("a personal workspace can't be deleted", error_code="personal_workspace")
     await repository.soft_delete(member["workspace_id"])
+    get_hub().revoke(member["workspace_id"])
 
 
 async def list_members(workspace_id: str) -> list[dict]:
@@ -118,6 +120,8 @@ async def remove_member(actor: dict, user_id: str) -> None:
         raise ConflictError("you can't leave your personal workspace", error_code="personal_workspace")
     await _keep_an_owner(workspace_id, target)
     await repository.remove_member(workspace_id, user_id)
+    # their open sockets stop hearing about this workspace now, not at their next re-auth
+    get_hub().revoke(workspace_id, user_id)
 
 
 def _kind(doc: dict) -> str:

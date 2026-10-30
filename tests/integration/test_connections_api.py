@@ -34,7 +34,7 @@ async def test_the_catalog_shows_each_connector_and_its_state(client):
     headers = auth_headers(await login(client))
     assert await jira(client, headers) == {
         "provider": "jira", "name": "Jira", "category": "work_items", "status": "disconnected", "can_write": False,
-        "external_account": None, "connected_by": None, "connected_at": None, "targets": [],
+        "outdated": False, "external_account": None, "connected_by": None, "connected_at": None, "targets": [],
     }
 
     await authorize(client, headers)
@@ -43,6 +43,7 @@ async def test_the_catalog_shows_each_connector_and_its_state(client):
     state = await jira(client, headers)
     assert added.status_code == 201
     assert (state["status"], state["can_write"], state["connected_by"]) == ("active", True, headers["X-Workspace-Id"])
+    assert state["outdated"] is False
     assert state["external_account"]["url"] == "https://acme.atlassian.net"
     assert [(t["key"], t["name"], t["sync_status"]) for t in state["targets"]] == [("OVR", "Overwatch", "pending")]
 
@@ -119,7 +120,21 @@ async def test_a_token_response_with_scopes_records_what_was_granted(client):
         }))
         await client.get(f"/jira/callback?code=fake&state={state}")
 
-    assert (await jira(client, headers))["can_write"] is False
+    state = await jira(client, headers)
+    assert state["can_write"] is False
+    # it lacks what the board needs too, so settings and the board ask for a reconnect
+    assert state["outdated"] is True
+
+
+async def test_reconnecting_makes_the_next_sync_read_everything(client):
+    headers = auth_headers(await login(client))
+    await authorize(client, headers)
+    await client.post("/connections/jira/targets", json={"key": "OVR", "name": "Overwatch"}, headers=headers)
+    await mongo.sync_targets().update_one({"key": "OVR"}, {"$set": {"last_full_sync_at": "2026-10-25"}})
+
+    await authorize(client, headers)
+
+    assert (await mongo.sync_targets().find_one({"key": "OVR"}))["last_full_sync_at"] is None
 
 
 async def connect(client, headers: dict, provider: str, scope: str | None = None) -> Response:

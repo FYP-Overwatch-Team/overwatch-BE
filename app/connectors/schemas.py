@@ -49,6 +49,8 @@ class Connection(BaseModel):
     status: ConnectionStatus
     # false for grants made before write-back existed: reconnect to edit from the board
     can_write: bool
+    # true when the grant lacks a scope the connector now asks for (a board's columns): reconnect
+    outdated: bool = False
     external_account: ExternalAccount | None = None
     connected_by: str | None = None
     connected_at: datetime | None = None

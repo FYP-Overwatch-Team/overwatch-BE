@@ -1,7 +1,7 @@
 import base64
 import hashlib
 import secrets
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import jwt
 from cryptography.fernet import Fernet, InvalidToken
@@ -23,15 +23,20 @@ def issue_access_token(user_id: str, *, ttl: timedelta = ACCESS_TOKEN_TTL) -> st
     return jwt.encode(payload, get_settings().jwt_secret_key, algorithm=JWT_ALGORITHM)
 
 
-def verify_access_token(token: str) -> str:
-    """Return the user id from a valid access JWT, raise TokenError otherwise."""
+def read_access_token(token: str) -> tuple[str, datetime]:
+    """The user id and expiry of a valid access JWT; TokenError otherwise."""
     try:
         payload = jwt.decode(token, get_settings().jwt_secret_key, algorithms=[JWT_ALGORITHM])
     except jwt.PyJWTError as exc:
         raise TokenError(str(exc)) from exc
     if payload.get("type") != "access" or "sub" not in payload:
         raise TokenError("wrong token type")
-    return payload["sub"]
+    return payload["sub"], datetime.fromtimestamp(payload["exp"], UTC)
+
+
+def verify_access_token(token: str) -> str:
+    """Return the user id from a valid access JWT, raise TokenError otherwise."""
+    return read_access_token(token)[0]
 
 
 def generate_refresh_token() -> str:

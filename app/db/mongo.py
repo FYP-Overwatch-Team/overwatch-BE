@@ -1,7 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 from app.core.config import get_settings
-from app.core.constants import NATIVE_SOURCE, SprintState
+from app.core.constants import NATIVE_SOURCE, SprintState, VectorSearch
 
 _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
@@ -114,6 +114,16 @@ def sprints():
     return get_db()["sprints"]
 
 
+def decision_comments():
+    """Messages in decisions' discussions, one document per message."""
+    return get_db()["decision_comments"]
+
+
+def decision_attachments():
+    """Files shared in decisions' discussions: where each is stored, and the message it was sent with."""
+    return get_db()["decision_attachments"]
+
+
 def work_item_comments():
     """Comments on native items, and who in Overwatch wrote the tracker comments posted from here."""
     return get_db()["work_item_comments"]
@@ -160,6 +170,31 @@ def chat_conversations():
     return get_db()["chat_conversations"]
 
 
+def decisions():
+    """What a workspace decided, with the quoted passages it rests on and its status history."""
+    return get_db()["decisions"]
+
+
+def decision_scans():
+    """The last "Suggest decisions" run on each item or page, and the suggestions dismissed from it."""
+    return get_db()["decision_scans"]
+
+
+def decision_checks():
+    """What each item or page said when decision checks last read it, so only changes are read again."""
+    return get_db()["decision_checks"]
+
+
+def decision_check_settings():
+    """Per workspace (`_id`): whether decision checks were turned off, and how the last one went."""
+    return get_db()["decision_check_settings"]
+
+
+def llm_usage():
+    """One record per model call: who made it, for what, its tokens and cost. Kept for billing."""
+    return get_db()["llm_usage"]
+
+
 def usage_counters():
     """Fixed-window request counters for rate limits; expire with their window."""
     return get_db()["usage_counters"]
@@ -168,6 +203,11 @@ def usage_counters():
 def link_previews():
     """What a link shows as a card, by its address; dropped once `expires_at` passes."""
     return get_db()["link_previews"]
+
+
+def embeddings():
+    """One vector per work item, page or decision, from the configured embedding model."""
+    return get_db()["embeddings"]
 
 
 def file_facts():
@@ -244,6 +284,16 @@ async def ensure_indexes() -> None:
         partialFilterExpression={"source": NATIVE_SOURCE, "state": SprintState.ACTIVE.value},
     )
     await work_item_comments().create_index([("workspace_id", 1), ("item_id", 1), ("created_at", 1)])
+    # a discussion pages backwards by id; a send retried with its client id isn't stored twice
+    await decision_comments().create_index([("workspace_id", 1), ("decision_id", 1), ("_id", -1)])
+    await decision_comments().create_index(
+        [("decision_id", 1), ("author.id", 1), ("client_id", 1)], unique=True,
+        partialFilterExpression={"client_id": {"$type": "string"}},
+    )
+    # a message's files; the hourly sweep finds unsent uploads by when they expire
+    await decision_attachments().create_index([("comment_id", 1)])
+    await decision_attachments().create_index([("workspace_id", 1), ("decision_id", 1)])
+    await decision_attachments().create_index([("expires_at", 1)], partialFilterExpression={"expires_at": {"$type": "date"}})
     # a folder's children in order: the docs tree loads one level at a time
     await documents().create_index([("workspace_id", 1), ("parent_id", 1), ("archived_at", 1), ("rank", 1)])
     # a node's whole subtree, through the ancestors each node keeps (archive, move)
@@ -278,6 +328,12 @@ async def ensure_indexes() -> None:
     # one type per name in a workspace, whatever its case
     await work_item_types().create_index([("workspace_id", 1), ("name_key", 1)], unique=True)
 
+    # what changed since a decision check last ran, and items named by key in a source's text
+    await work_items().create_index([("workspace_id", 1), ("updated_at", -1)])
+    await work_items().create_index([("workspace_id", 1), ("key", 1)])
+    await documents().create_index([("workspace_id", 1), ("updated_at", -1)])
+    await embeddings().create_index([("workspace_id", 1), ("kind", 1), ("ref_id", 1)], unique=True)
+
     # Extraction cache: read on every sync to decide what changed, and always
     # scoped to one repository.
     await file_facts().create_index([("repo_full_name", 1), ("path", 1)], unique=True)
@@ -286,6 +342,35 @@ async def ensure_indexes() -> None:
     await chat_conversations().create_index([("workspace_id", 1), ("user_id", 1), ("repo_full_name", 1), ("updated_at", -1)])
     await chat_conversations().create_index("expires_at", expireAfterSeconds=0)
     await usage_counters().create_index("expires_at", expireAfterSeconds=0)
+    # the Decisions inbox, newest change first, and the decisions quoting one item or page
+    await decisions().create_index([("workspace_id", 1), ("status", 1), ("updated_at", -1)])
+    await decisions().create_index([("workspace_id", 1), ("updated_at", -1)])
+    await decisions().create_index([("workspace_id", 1), ("evidence.ref_id", 1)])
+    await decision_scans().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
+    await decision_checks().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
+    # a workspace's usage over a window, as Settings → Usage reads it
+    await llm_usage().create_index([("workspace_id", 1), ("created_at", -1)])
     await link_previews().create_index("expires_at", expireAfterSeconds=0)
     await webhook_deliveries().create_index("delivery_id", unique=True)
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)
+    # last: an Atlas search index can fail where plain indexes don't (an M0 limit, say), and mustn't stop those
+    if get_settings().vector_search == VectorSearch.ATLAS:
+        await _ensure_vector_index()
+
+
+VECTOR_INDEX = "embeddings_vector"
+
+
+async def _ensure_vector_index() -> None:
+    """Atlas Vector Search over embeddings, filtered by workspace, kind and model; updated when the size changes."""
+    definition = {"fields": [
+        {"type": "vector", "path": "vector", "numDimensions": get_settings().embedding_dimensions, "similarity": "cosine"},
+        {"type": "filter", "path": "workspace_id"},
+        {"type": "filter", "path": "kind"},
+        {"type": "filter", "path": "model"},
+    ]}
+    existing = [index async for index in embeddings().list_search_indexes(VECTOR_INDEX)]
+    if not existing:
+        await embeddings().create_search_index({"name": VECTOR_INDEX, "type": "vectorSearch", "definition": definition})
+    elif existing[0].get("latestDefinition") != definition:
+        await embeddings().update_search_index(VECTOR_INDEX, definition)
