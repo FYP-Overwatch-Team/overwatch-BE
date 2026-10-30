@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     # Slack app (bot installs); empty hides Slack from the integrations list
     slack_client_id: str = ""
     slack_client_secret: str = ""
+    # verifies that events really come from Slack; empty rejects every event
+    slack_signing_secret: str = ""
 
     # the AI chat's model: any OpenAI-compatible chat API (Groq, OpenRouter, DeepSeek...)
     model_api_key: str = ""

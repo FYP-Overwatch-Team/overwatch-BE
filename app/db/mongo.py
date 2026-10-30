@@ -3,6 +3,9 @@ from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from app.core.config import get_settings
 from app.core.constants import NATIVE_SOURCE, SprintState
 
+# how long chat text stays before Mongo deletes it: read for decisions within minutes, never archived
+CHANNEL_MESSAGE_TTL_SECONDS = 3 * 3600
+
 _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
 
@@ -170,6 +173,11 @@ def link_previews():
     return get_db()["link_previews"]
 
 
+def channel_messages():
+    """Chat messages from watched channels (Slack today), kept only until they've been read for decisions."""
+    return get_db()["channel_messages"]
+
+
 def file_facts():
     """Knowledge-graph extraction facts, one document per file."""
     return get_db()["file_facts"]
@@ -288,4 +296,9 @@ async def ensure_indexes() -> None:
     await usage_counters().create_index("expires_at", expireAfterSeconds=0)
     await link_previews().create_index("expires_at", expireAfterSeconds=0)
     await webhook_deliveries().create_index("delivery_id", unique=True)
+    # a chat event names its Slack workspace (team), and is routed to every Bearings workspace connected to it
+    await connections().create_index([("provider", 1), ("external_account.id", 1)])
+    # a message is stored once however often Slack redelivers it; chat text is kept only briefly
+    await channel_messages().create_index([("workspace_id", 1), ("channel", 1), ("ts", 1)], unique=True)
+    await channel_messages().create_index("received_at", expireAfterSeconds=CHANNEL_MESSAGE_TTL_SECONDS)
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)

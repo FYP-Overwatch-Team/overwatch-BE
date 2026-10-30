@@ -32,8 +32,9 @@ OAUTH = OAuthConfig(
     client_auth="basic_form",
 )
 
-# bot scopes: seeing the public channels, and the private ones the bot was invited to
-SCOPES = ("channels:read", "groups:read")
+# bot scopes: listing the public channels and the private ones the bot was invited to, and reading
+# their messages (delivered as events; the bot only hears channels it's a member of)
+SCOPES = ("channels:read", "groups:read", "channels:history", "groups:history")
 
 # the install or its token is gone: only reconnecting helps
 REVOKED_ERRORS = {"invalid_auth", "not_authed", "token_revoked", "token_expired", "account_inactive"}

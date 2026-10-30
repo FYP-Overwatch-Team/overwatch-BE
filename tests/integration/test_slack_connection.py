@@ -77,7 +77,7 @@ async def test_connecting_stores_the_slack_workspace_and_its_scopes(client, slac
     callback = await connect(client, headers)
 
     assert (url.netloc, url.path) == ("slack.com", "/oauth/v2/authorize")
-    assert params["scope"] == ["channels:read,groups:read"]
+    assert params["scope"] == ["channels:read,groups:read,channels:history,groups:history"]
     assert params["redirect_uri"][0].endswith("/slack/callback")
     assert callback.headers["location"].endswith(f"/settings/integrations?slack=connected&w={workspace_id}")
     state = await slack(client, headers)

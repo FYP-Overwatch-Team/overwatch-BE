@@ -59,11 +59,22 @@ Then set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`.
 ### Slack
 
 Create an app at [api.slack.com/apps](https://api.slack.com/apps) (From scratch). Under **OAuth & Permissions**
-add the redirect URL `<APP_BASE_URL>/slack/callback` and the bot token scopes `channels:read` and `groups:read`.
-Slack only redirects to HTTPS, so locally `APP_BASE_URL` must be an `https://` address the browser also calls the API
-on (the OAuth state cookie is set on that host). Under **Manage Distribution**, allow public distribution so other
-workspaces can install it. Then set `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET`; while they're empty, Slack isn't
-offered under Integrations.
+add the redirect URL `<APP_BASE_URL>/slack/callback` and the bot token scopes `channels:read`, `groups:read`,
+`channels:history` and `groups:history`. Under **Event Subscriptions**, set the request URL to
+`<public API URL>/webhooks/slack/events` and subscribe to the bot events `message.channels`, `message.groups`,
+`app_uninstalled` and `tokens_revoked`. Under **Manage Distribution**, allow public distribution so other workspaces
+can install it. Then set `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` and `SLACK_SIGNING_SECRET` (all under
+**Basic Information**); while the first two are empty, Slack isn't offered under Integrations, and without the signing
+secret every event is rejected.
+
+Slack only redirects to HTTPS, and the browser must call the API on the same host the OAuth state cookie was set on, so
+locally both run on HTTPS: `APP_BASE_URL=https://localhost:8000` and `FRONTEND_ORIGIN=https://localhost:3000` with a
+[mkcert](https://github.com/FiloSottile/mkcert) certificate (`mkcert localhost`; `*.pem` is gitignored). Start the API with
+`--ssl-certfile localhost.pem --ssl-keyfile localhost-key.pem`, and the frontend with `next dev --experimental-https`
+using the same files. Slack can't reach `localhost` for events, so expose it with a tunnel
+(`cloudflared tunnel --url https://localhost:8000 --no-tls-verify`) and use the tunnel's address as the request URL.
+A watched channel's messages are only delivered once the bot is in it (`/invite @<app>`); the text is kept in
+`channel_messages` for three hours.
 
 ### Email
 
