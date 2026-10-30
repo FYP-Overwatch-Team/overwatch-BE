@@ -25,6 +25,32 @@ class Limit(NamedTuple):
     window: timedelta
 
 
+class Window(NamedTuple):
+    """One fixed-window counter to take from, and the error raised when it's full."""
+
+    key: str
+    limit: int
+    expires_at: datetime
+    error: AppError
+
+
+async def take_all(windows: list[Window]) -> None:
+    """Count one against every window, or raise the first full one's error without counting any."""
+    taken: list[str] = []
+    for window in windows:
+        if not await take_one(window.key, window.limit, window.expires_at):
+            if taken:
+                await mongo.usage_counters().update_many({"_id": {"$in": taken}}, {"$inc": {"count": -1}})
+            raise window.error
+        taken.append(window.key)
+
+
+async def count(key: str) -> int:
+    """How much has been taken from a window so far; 0 before its first take."""
+    doc = await mongo.usage_counters().find_one({"_id": key}, {"count": 1})
+    return doc["count"] if doc else 0
+
+
 async def take_one(key: str, limit: int, expires_at: datetime) -> bool:
     if limit <= 0:
         return False

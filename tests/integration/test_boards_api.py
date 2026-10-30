@@ -293,3 +293,6 @@ async def test_items_in_statuses_the_jira_board_leaves_out_are_hidden_as_in_jira
     assert sorted(i["key"] for i in listed) == ["OVR-2", "OVR-3"]
     # kept, just off the board
     assert (await mongo.work_items().find_one({"key": "OVR-1"}))["tracker_hidden"] is True
+    # a link to it by key (search, evidence) still opens it on the board
+    by_key = (await client.get(f"/work-items?board_id={board['id']}&key=OVR-1", headers=headers)).json()["data"]
+    assert [i["key"] for i in by_key] == ["OVR-1"]

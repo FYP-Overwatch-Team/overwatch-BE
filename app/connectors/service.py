@@ -25,6 +25,13 @@ def can_manage_sprints(conn: dict | None) -> bool:
     return bool(sprint_scope and can_write(conn) and sprint_scope in conn.get("scopes", []))
 
 
+def outdated(conn: dict | None) -> bool:
+    """Connected with a grant made before the connector asked for all it does now: reconnecting fixes it."""
+    if conn is None or conn["status"] == ConnectionStatus.DISCONNECTED:
+        return False
+    return not set(registry.get(conn["provider"]).scopes) <= set(conn.get("scopes", []))
+
+
 async def catalog(workspace_id: str) -> list[dict]:
     """Every supported connector with this workspace's state for it."""
     connections = {c["provider"]: c for c in await repository.list_connections(workspace_id)}
@@ -39,6 +46,7 @@ async def catalog(workspace_id: str) -> list[dict]:
             "category": connector.category,
             "status": status,
             "can_write": can_write(conn),
+            "outdated": outdated(conn),
             "external_account": conn and conn.get("external_account") if status != ConnectionStatus.DISCONNECTED else None,
             "connected_by": conn and conn.get("connected_by"),
             "connected_at": conn and conn.get("connected_at"),
@@ -82,6 +90,8 @@ async def complete_authorization(provider: str, workspace_id: str, user_id: str,
     # the new grant replaced the one they used
     for conn in siblings:
         await repository.set_scopes(workspace_id, conn["provider"], granted)
+    # a reconnect may grant what earlier syncs couldn't read (a board's columns), so the next one reads everything
+    await request_full_sync(workspace_id, provider)
 
 
 async def disconnect(workspace_id: str, provider: str) -> None:

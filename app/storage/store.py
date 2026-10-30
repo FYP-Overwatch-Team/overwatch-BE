@@ -7,6 +7,7 @@ the objects and flipping the setting.
 
 from collections.abc import Callable
 from typing import Protocol, TypedDict, runtime_checkable
+from urllib.parse import quote
 
 from app.core.config import Settings, get_settings
 
@@ -21,20 +22,36 @@ class UploadTarget(TypedDict):
     via_api: bool  # true when the URL is our API, which needs the user's login
 
 
+def disposition(download_name: str | None) -> str:
+    """`inline` to show a file, or `attachment` with its name to save it (any characters, RFC 6266)."""
+    if download_name is None:
+        return "inline"
+    return f"attachment; filename*=UTF-8''{quote(download_name, safe='')}"
+
+
 class StoredFile(TypedDict):
     size: int
     content_type: str
 
 
 class ObjectStore(Protocol):
-    def upload_target(self, attachment_id: str, key: str, content_type: str, size: int) -> UploadTarget:
-        """A one-time way to upload `key`, bound to its type and exact size where the provider allows."""
+    def upload_target(
+        self, attachment_id: str, key: str, content_type: str, size: int, *, api_path: str = "/attachments",
+    ) -> UploadTarget:
+        """A one-time way to upload `key`, bound to its type and exact size where the provider allows.
+        `api_path` is where our API takes the file, for stores that keep files behind it."""
 
-    def download_url(self, attachment_id: str, key: str, ttl: int) -> str:
-        """A link that reads `key` for `ttl` seconds, without the user's login (images can't send it)."""
+    def download_url(
+        self, attachment_id: str, key: str, ttl: int, *, download_name: str | None = None, api_path: str = "/attachments",
+    ) -> str:
+        """A link that reads `key` for `ttl` seconds, without the user's login (images can't send it).
+        With `download_name`, the browser saves the file under that name instead of opening it."""
 
     async def head(self, key: str) -> StoredFile | None:
         """What was actually stored at `key`; None when nothing is there."""
+
+    async def read_start(self, key: str, size: int) -> bytes | None:
+        """The first `size` bytes stored at `key`, to tell what the file really is; None when nothing is there."""
 
     async def write(self, key: str, data: bytes, content_type: str) -> None:
         """Store a file the server has itself (an image copied from a docs source, or a proxied upload)."""

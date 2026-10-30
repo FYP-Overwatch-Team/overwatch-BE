@@ -139,6 +139,8 @@ class MoveTarget(BaseModel):
     status: str | None = None
     #: the tracker's name for the move, when it has one
     transition_name: str | None = None
+    #: fields the tracker's screen for the move requires; such a move is made in the tracker
+    required_fields: list[str] = []
 
 
 class AllowedMoves(BaseModel):
