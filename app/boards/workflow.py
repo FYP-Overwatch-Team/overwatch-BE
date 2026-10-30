@@ -42,7 +42,7 @@ def column_holding(board: dict, status_id: str | None, category: str | None) -> 
 
 
 def tracker_targets(board: dict, item: dict, reachable: list[dict]) -> list[dict]:
-    """Columns reachable through these moves: [{column_id, status_id, status, transition_name}], one per status."""
+    """Columns reachable through these moves: [{column_id, status_id, status, transition_name, required_fields}], one per status."""
     targets, seen = [], set()
     for move in reachable:
         column = column_holding(board, move["status_id"], move["status_category"])
@@ -50,7 +50,10 @@ def tracker_targets(board: dict, item: dict, reachable: list[dict]) -> list[dict
         if column is None or column["id"] == item.get("column_id") and move["status_id"] == item.get("status_id") or key in seen:
             continue
         seen.add(key)
-        targets.append({"column_id": column["id"], "status_id": move["status_id"], "status": move["status"], "transition_name": move["transition_name"]})
+        targets.append({
+            "column_id": column["id"], "status_id": move["status_id"], "status": move["status"],
+            "transition_name": move["transition_name"], "required_fields": move.get("required_fields", []),
+        })
     return targets
 
 
