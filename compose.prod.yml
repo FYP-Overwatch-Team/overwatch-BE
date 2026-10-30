@@ -21,6 +21,11 @@ services:
       - /certs/origin.pem
       - --ssl-keyfile
       - /certs/origin.key
+      # realtime socket: frames are small control messages; open sockets get 10 s to close on deploy
+      - --ws-max-size
+      - "65536"
+      - --timeout-graceful-shutdown
+      - "10"
     restart: unless-stopped
     # journald keeps logs across deploys (a container's own log goes with it); size is capped on the host
     logging:

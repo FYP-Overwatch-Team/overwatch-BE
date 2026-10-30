@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from app.db import mongo
 from app.decisions.schemas import MAX_EVIDENCE
+from app.decisions.service import with_sources
 from tests.integration.test_documents_api import create as create_page
 from tests.integration.test_documents_api import text_doc
 from tests.integration.test_work_items_api import create as create_item
@@ -38,6 +39,39 @@ async def test_a_decision_keeps_its_quoted_evidence_and_starts_its_history(clien
     assert (made["status"], made["origin"], made["area"]) == ("open", "manual", "Billing")
     assert (evidence["title"], evidence["stance"], evidence["state"]) == ("Export PRD", "supports", "current")
     assert [h["status"] for h in made["history"]] == ["open"]
+
+
+async def test_each_source_is_numbered_once_and_keeps_its_number(client):
+    headers = await signed_in(client)
+    prd, other = await page(client, headers), await page(client, headers, "Admins export as CSV.")
+    made = await decide(client, headers, evidence=[quoting(prd, "Guests can't export reports."), quoting(prd, "Admins export as CSV")])
+
+    again = await client.post(f"/decisions/{made['id']}/evidence", json=quoting(prd, "or PDF"), headers=headers)
+    added = await client.post(f"/decisions/{made['id']}/evidence", json=quoting(other, "Admins export as CSV."), headers=headers)
+
+    assert [(s["id"], s["ref_id"]) for s in made["sources"]] == [("S1", prd["id"])]
+    assert [(s["id"], s["ref_id"]) for s in again.json()["data"]["sources"]] == [("S1", prd["id"])]
+    assert [(s["id"], s["ref_id"]) for s in added.json()["data"]["sources"]] == [("S1", prd["id"]), ("S2", other["id"])]
+
+
+def test_a_new_source_is_numbered_after_the_last_cited_one():
+    cited = [{"id": "S1", "kind": "document", "ref_id": "a", "title": "A"}, {"id": "S3", "kind": "document", "ref_id": "c", "title": "C"}]
+    evidence = [{"kind": "document", "ref_id": "c", "title": "C"}, {"kind": "work_item", "ref_id": "d", "title": "D"}]
+
+    assert [s["id"] for s in with_sources(cited, evidence)] == ["S1", "S3", "S4"]
+
+
+async def test_a_decision_from_before_sources_numbers_its_evidence_first(client):
+    headers = await signed_in(client)
+    prd, other = await page(client, headers), await page(client, headers, "Admins export as CSV.")
+    made = await decide(client, headers, evidence=[quoting(prd, "Guests can't export reports.")])
+    await mongo.decisions().update_one({"_id": made["id"]}, {"$unset": {"sources": ""}})
+
+    legacy = (await client.get(f"/decisions/{made['id']}", headers=headers)).json()["data"]
+    added = await client.post(f"/decisions/{made['id']}/evidence", json=quoting(other, "Admins export as CSV."), headers=headers)
+
+    assert legacy["sources"] == []
+    assert [s["ref_id"] for s in added.json()["data"]["sources"]] == [prd["id"], other["id"]]
 
 
 async def test_a_quote_that_isnt_in_its_source_is_refused(client):

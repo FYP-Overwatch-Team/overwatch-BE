@@ -21,6 +21,10 @@ from app.core.constants import DecisionOrigin, DecisionStatus, EmbeddingKind, Ev
 from app.core.exceptions import ConflictError, ExternalServiceError, NotFoundError
 from app.core.time import utcnow
 from app.db import mongo
+from app.decision_comments import service as decision_comments
+from app.realtime import topics
+from app.realtime.events import EventName, UnsubscribeReason
+from app.realtime.hub import get_hub
 from app.decisions import ai, leases, limits, mentions, overview, quotes, service
 from app.decisions.schemas import CONTEXT, QUOTE, STATEMENT, CreateDecision, NewEvidence
 from app.embeddings import service as embeddings
@@ -39,7 +43,6 @@ TIMEOUT_SECONDS = 120
 #: longer than one model call can take, retries included
 LEASE = timedelta(minutes=4)
 _CITATION = re.compile(r"\s*\[(S\d+)\]")
-AI_NOTE = "*Pros, cons and the example are the AI's reading of the sources: check them before accepting.*"
 
 Ref = tuple[str, str]
 
@@ -98,8 +101,9 @@ async def _related(workspace_id: str, user_id: str, ref: Ref, text: str) -> list
     return [r for r in dict.fromkeys(found) if r not in skip][:MAX_RELATED]
 
 
-def _write_up(suggestion: Suggestion, titles: dict[str, str], quoted: set[str]) -> str:
-    """The suggestion's details as Markdown, keeping only citations of sources the AI was given."""
+def _write_up(suggestion: Suggestion, titles: dict[str, str], quoted: set[str]) -> tuple[str, list[str]]:
+    """The suggestion's details as Markdown, keeping only citations of sources the AI was given, and the
+    sources it quotes or cites (`S1`, `S2`...) in order."""
 
     def cited(text: str) -> str:
         return _CITATION.sub(lambda m: m.group(0) if m.group(1) in titles else "", text).strip()
@@ -113,20 +117,11 @@ def _write_up(suggestion: Suggestion, titles: dict[str, str], quoted: set[str]) 
         kept = [cited(point) for point in points[:MAX_POINTS] if point.strip()]
         if kept:
             parts.append(f"### {heading}\n" + "\n".join(f"- {point}" for point in kept))
-    footer = []
     used = quoted | {sid for part in parts for sid in _CITATION.findall(part)}
-    if used:
-        listed = sorted(used, key=lambda sid: int(sid[1:]))
-        footer.append("### Sources\n" + "\n".join(f"- [{sid}] {titles[sid]}" for sid in listed))
-    if suggestion.example.strip() or suggestion.pros or suggestion.cons:
-        footer.append(AI_NOTE)
-    # a long write-up is cut, never the sources and the note after it
-    tail = "".join(f"\n\n{part}" for part in footer)
     body = "\n\n".join(parts)
-    room = CONTEXT["max_length"] - len(tail)
-    if len(body) > room:
-        body = body[: room - 1].rstrip() + "…"
-    return (body + tail).strip()
+    if len(body) > CONTEXT["max_length"]:
+        body = body[: CONTEXT["max_length"] - 1].rstrip() + "…"
+    return body, sorted(used, key=lambda sid: int(sid[1:]))
 
 
 async def _known(workspace_id: str, ref_ids: list[str]) -> set[tuple[str, str]]:
@@ -187,13 +182,17 @@ async def _suggest(member: dict, kind: EvidenceKind, ref_id: str, source: dict) 
             continue  # what S1 records is the point; a decision only the related sources state isn't one
         # only a kept suggestion's quotes are used up, so a dropped one leaves them for the next
         known |= marks
+        context_md, used = _write_up(suggestion, titles, quoted)
         body = CreateDecision(
             # the title and statement are what's shown and checked against: citations belong in the details
             title=_CITATION.sub("", suggestion.title).strip(), statement=_CITATION.sub("", suggestion.statement).strip(),
-            status=DecisionStatus.PROPOSED,
-            context_md=_write_up(suggestion, titles, quoted), evidence=evidence,
+            status=DecisionStatus.PROPOSED, context_md=context_md, evidence=evidence,
         )
-        created.append(await service.create(member, body, DecisionOrigin.SUGGESTED))
+        # numbered as the write-up cites them, so [S2] in it still means the same source
+        cited = [
+            {"id": sid, "kind": sources[sid][0][0], "ref_id": sources[sid][0][1], "title": titles[sid]} for sid in used
+        ]
+        created.append(await service.create(member, body, DecisionOrigin.SUGGESTED, cited=cited))
     logger.info("decision_suggest", ref_id=ref_id, related=len(sources) - 1, suggested=len(suggestions), kept=len(created))
 
     await mongo.decision_scans().update_one(
@@ -212,6 +211,11 @@ async def dismiss(member: dict, decision_id: str) -> None:
     })
     if decision is None:
         raise NotFoundError("no suggestion waiting to be reviewed", error_code="suggestion_not_found")
+    await decision_comments.delete_for_decision(workspace_id, decision_id)
+    # anyone viewing it learns it's gone, and stops listening for it
+    topic = topics.name("decision", decision_id)
+    get_hub().publish(topic, EventName.DECISION_DELETED, {"id": decision_id})
+    get_hub().close_topic(topic, UnsubscribeReason.GONE)
     for evidence in decision["evidence"]:
         await mongo.decision_scans().update_one(
             {"workspace_id": workspace_id, "ref_id": evidence["ref_id"]},

@@ -15,6 +15,9 @@ from app.chat.router import router as chat_router
 from app.documents.attachments import router as attachments_router
 from app.decisions.router import router as decisions_router
 from app.search.router import router as search_router
+from app.decision_comments import attachments as decision_attachments
+from app.decision_comments.router import router as decision_comments_router
+from app.realtime.router import router as realtime_router
 from app.documents.router import router as documents_router
 from app.connectors.router import router as connections_router
 from app.github import checkout
@@ -82,7 +85,7 @@ async def _merge_loop() -> None:
 
 
 async def _docs_loop(push_seconds: int) -> None:
-    """Push settled docs edits every few seconds; purge expired archives about hourly."""
+    """Push settled docs edits every few seconds; about hourly, purge expired archives and unsent discussion uploads."""
     purged_at = 0.0
     while True:
         await asyncio.sleep(push_seconds)
@@ -90,6 +93,7 @@ async def _docs_loop(push_seconds: int) -> None:
             await jobs.push_documents()
             if asyncio.get_running_loop().time() - purged_at >= 3600:
                 await jobs.purge_archived_documents()
+                await decision_attachments.sweep()
                 purged_at = asyncio.get_running_loop().time()
         except Exception:
             structlog.get_logger("app.jobs").exception("docs_loop_error")
@@ -190,6 +194,9 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(chat_router)
     app.include_router(usage_router)
     app.include_router(search_router)
+    app.include_router(decision_comments_router)
+    app.include_router(decision_attachments.router)
+    app.include_router(realtime_router)
     app.include_router(workspaces_router)
     app.include_router(waitlist_router)
 

@@ -114,6 +114,16 @@ def sprints():
     return get_db()["sprints"]
 
 
+def decision_comments():
+    """Messages in decisions' discussions, one document per message."""
+    return get_db()["decision_comments"]
+
+
+def decision_attachments():
+    """Files shared in decisions' discussions: where each is stored, and the message it was sent with."""
+    return get_db()["decision_attachments"]
+
+
 def work_item_comments():
     """Comments on native items, and who in Overwatch wrote the tracker comments posted from here."""
     return get_db()["work_item_comments"]
@@ -274,6 +284,16 @@ async def ensure_indexes() -> None:
         partialFilterExpression={"source": NATIVE_SOURCE, "state": SprintState.ACTIVE.value},
     )
     await work_item_comments().create_index([("workspace_id", 1), ("item_id", 1), ("created_at", 1)])
+    # a discussion pages backwards by id; a send retried with its client id isn't stored twice
+    await decision_comments().create_index([("workspace_id", 1), ("decision_id", 1), ("_id", -1)])
+    await decision_comments().create_index(
+        [("decision_id", 1), ("author.id", 1), ("client_id", 1)], unique=True,
+        partialFilterExpression={"client_id": {"$type": "string"}},
+    )
+    # a message's files; the hourly sweep finds unsent uploads by when they expire
+    await decision_attachments().create_index([("comment_id", 1)])
+    await decision_attachments().create_index([("workspace_id", 1), ("decision_id", 1)])
+    await decision_attachments().create_index([("expires_at", 1)], partialFilterExpression={"expires_at": {"$type": "date"}})
     # a folder's children in order: the docs tree loads one level at a time
     await documents().create_index([("workspace_id", 1), ("parent_id", 1), ("archived_at", 1), ("rank", 1)])
     # a node's whole subtree, through the ancestors each node keeps (archive, move)

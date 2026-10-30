@@ -21,7 +21,7 @@ from app.core.constants import (
     EvidenceState,
     InboxTab,
 )
-from app.core.exceptions import FieldValidationError, NotFoundError
+from app.core.exceptions import ConflictError, FieldValidationError, NotFoundError
 from app.core.time import utcnow
 from app.db import mongo
 from app.decisions import quotes
@@ -142,7 +142,8 @@ def _tab_query(tab: InboxTab, user_id: str, today: date) -> dict:
     return {"status": {"$in": DECIDED_STATUSES}, "$nor": [flagged]}
 
 
-async def _found(workspace_id: str, decision_id: str) -> dict:
+async def found(workspace_id: str, decision_id: str) -> dict:
+    """The workspace's decision, as stored; 404 when it has none by that id."""
     doc = await mongo.decisions().find_one({"_id": decision_id, "workspace_id": workspace_id})
     if doc is None:
         raise NotFoundError("decision not found", error_code="decision_not_found")
@@ -169,6 +170,22 @@ async def _evidence(workspace_id: str, user_id: str, new: list[NewEvidence], mat
             "added_by": user_id, "added_at": now, "match": match,
         })
     return stored
+
+
+def with_sources(sources: list[dict], evidence: list[dict]) -> list[dict]:
+    """`sources` plus one for each item or page in `evidence` not among them yet, numbered after the last (S1, S2...).
+
+    A number, once given, stays with its source: citations like [S2] in a decision's background refer to it.
+    """
+    known = {(source["kind"], source["ref_id"]) for source in sources}
+    numbered = list(sources)
+    for item in evidence:
+        if (item["kind"], item["ref_id"]) in known:
+            continue
+        known.add((item["kind"], item["ref_id"]))
+        last = max((int(source["id"][1:]) for source in numbered), default=0)
+        numbered.append({"id": f"S{last + 1}", "kind": item["kind"], "ref_id": item["ref_id"], "title": item["title"]})
+    return numbered
 
 
 async def _check_owner(workspace_id: str, owner_id: str | None) -> None:
@@ -215,22 +232,24 @@ async def refresh_attention(workspace_id: str) -> None:
 
 
 async def get(workspace_id: str, decision_id: str) -> dict:
-    return (await _to_decisions(workspace_id, [await _found(workspace_id, decision_id)]))[0]
+    return (await _to_decisions(workspace_id, [await found(workspace_id, decision_id)]))[0]
 
 
 async def create(
-    member: dict, body: CreateDecision, origin: DecisionOrigin = DecisionOrigin.MANUAL,
+    member: dict, body: CreateDecision, origin: DecisionOrigin = DecisionOrigin.MANUAL, *, cited: list[dict] | None = None,
 ) -> dict:
+    """`cited` are sources the decision cites already (a suggestion's S1, S2...); its evidence's sources are added after."""
     workspace_id, user_id = member["workspace_id"], member["user_id"]
     if body.status == DecisionStatus.SUPERSEDED:
         raise FieldValidationError({"status": "A new decision can't start out replaced."})
     await _check_owner(workspace_id, body.owner_id)
     now = utcnow()
+    evidence = await _evidence(workspace_id, user_id, body.evidence)
     doc = {
         "_id": uuid.uuid4().hex, "workspace_id": workspace_id,
         **_review_by(body.model_dump(exclude={"evidence"})),
         "origin": origin, "superseded_by": None,
-        "evidence": await _evidence(workspace_id, user_id, body.evidence),
+        "evidence": evidence, "sources": with_sources(cited or [], evidence),
         "history": [{"status": body.status, "by": user_id, "at": now, "note": None}],
         "created_by": user_id, "created_at": now, "updated_at": now,
     }
@@ -240,7 +259,7 @@ async def create(
 
 async def update(member: dict, decision_id: str, body: UpdateDecision) -> dict:
     workspace_id = member["workspace_id"]
-    await _found(workspace_id, decision_id)
+    await found(workspace_id, decision_id)
     fields = _review_by(body.model_dump(exclude_unset=True))
     if "owner_id" in fields:
         await _check_owner(workspace_id, fields["owner_id"])
@@ -254,12 +273,12 @@ async def update(member: dict, decision_id: str, body: UpdateDecision) -> dict:
 
 async def change_status(member: dict, decision_id: str, body: ChangeStatus) -> dict:
     workspace_id, user_id = member["workspace_id"], member["user_id"]
-    await _found(workspace_id, decision_id)
+    await found(workspace_id, decision_id)
     superseded_by = None
     if body.status == DecisionStatus.SUPERSEDED:
         if not body.superseded_by or body.superseded_by == decision_id:
             raise FieldValidationError({"superseded_by": "Choose the decision that replaces this one."})
-        superseded_by = (await _found(workspace_id, body.superseded_by))["_id"]
+        superseded_by = (await found(workspace_id, body.superseded_by))["_id"]
     now = utcnow()
     await mongo.decisions().update_one({"_id": decision_id}, {
         "$set": {"status": body.status, "superseded_by": superseded_by, "updated_at": now},
@@ -271,21 +290,32 @@ async def change_status(member: dict, decision_id: str, body: ChangeStatus) -> d
 async def add_evidence(member: dict, decision_id: str, body: NewEvidence, match: dict | None = None) -> dict:
     """`match` is set by an automatic check: why it read the source."""
     workspace_id = member["workspace_id"]
-    await _found(workspace_id, decision_id)
+    await found(workspace_id, decision_id)
     [evidence] = await _evidence(workspace_id, member["user_id"], [body], match)
-    # only while there's room, checked in the same update so two adds can't pass the limit together
-    added = await mongo.decisions().update_one(
-        {"_id": decision_id, f"evidence.{MAX_EVIDENCE - 1}": {"$exists": False}},
-        {"$push": {"evidence": evidence}, "$set": {"updated_at": utcnow()}},
-    )
-    if not added.matched_count:
-        raise FieldValidationError({"quote": f"A decision holds up to {MAX_EVIDENCE} passages."})
-    return await get(workspace_id, decision_id)
+    full = FieldValidationError({"quote": f"A decision holds up to {MAX_EVIDENCE} passages."})
+    # a few tries: another add can number a new source between the read and the write
+    for _ in range(3):
+        doc = await found(workspace_id, decision_id)
+        if len(doc["evidence"]) >= MAX_EVIDENCE:
+            raise full
+        current = doc.get("sources", [])
+        numbered = with_sources(current, [*doc["evidence"], evidence])
+        # only while there's room and the sources are as read, checked in the same update
+        added = await mongo.decisions().update_one(
+            {
+                "_id": decision_id, f"evidence.{MAX_EVIDENCE - 1}": {"$exists": False},
+                f"sources.{len(current)}": {"$exists": False},
+            },
+            {"$push": {"evidence": evidence}, "$set": {"sources": numbered, "updated_at": utcnow()}},
+        )
+        if added.matched_count:
+            return await get(workspace_id, decision_id)
+    raise ConflictError("The decision changed while adding that passage; try again", error_code="decision_busy")
 
 
 async def remove_evidence(member: dict, decision_id: str, evidence_id: str) -> dict:
     workspace_id = member["workspace_id"]
-    await _found(workspace_id, decision_id)
+    await found(workspace_id, decision_id)
     removed = await mongo.decisions().update_one(
         {"_id": decision_id, "evidence.id": evidence_id},
         {"$pull": {"evidence": {"id": evidence_id}}, "$set": {"updated_at": utcnow()}},

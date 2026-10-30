@@ -9,6 +9,7 @@ from mongomock_motor import AsyncMongoMockClient
 
 from app.core.config import get_settings
 from app.db import mongo
+from app.realtime.hub import get_hub, use_hub
 from app.main import create_app
 from app.integrations import embeddings, github_app, llm
 from app.workers import jobs
@@ -108,6 +109,14 @@ def graph_store():
     yield store
     use_knowledge_graph_store(None)
     use_facts_store(None)
+
+
+@pytest.fixture(autouse=True)
+def realtime_hub():
+    """Every test starts with nobody connected."""
+    use_hub(None)
+    yield get_hub()
+    use_hub(None)
 
 
 @pytest.fixture(autouse=True)

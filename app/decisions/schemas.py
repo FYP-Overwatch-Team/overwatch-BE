@@ -65,6 +65,16 @@ class HistoryEntry(BaseModel):
     note: str | None = None
 
 
+class DecisionSource(BaseModel):
+    """An item or page a decision rests on, numbered so its background can cite it as [S1]."""
+
+    id: str
+    kind: EvidenceKind | None
+    ref_id: str | None
+    #: as it was when first cited, kept in case the source goes away
+    title: str
+
+
 class Decision(BaseModel):
     id: str
     title: str
@@ -80,6 +90,8 @@ class Decision(BaseModel):
     #: the decision that replaced this one
     superseded_by: str | None
     evidence: list[Evidence]
+    #: the items and pages it rests on (its evidence's, and any its background cites), S1 first
+    sources: list[DecisionSource] = []
     #: every status it has had, oldest first
     history: list[HistoryEntry]
     #: accepted, but its evidence broke or was contradicted since it was settled: it's in Needs you

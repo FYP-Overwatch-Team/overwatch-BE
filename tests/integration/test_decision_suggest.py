@@ -161,13 +161,13 @@ async def test_a_suggestion_is_written_up_with_its_sources_cited(client, fake_ll
         "### Background\nGuests asked to export [S1].\n\n"
         "### What it means\nOnly members export.\n\n"
         "### Example\nA guest opens a report and sees no Export button.\n\n"
-        "### Pros\n- Simpler permissions\n- Less data leaves\n- Fewer support tickets\n- Clear rule\n\n"
-        "### Sources\n- [S1] Export PRD\n\n"
-        "*Pros, cons and the example are the AI's reading of the sources: check them before accepting.*"
+        "### Pros\n- Simpler permissions\n- Less data leaves\n- Fewer support tickets\n- Clear rule"
     )
+    # the sources it cites are kept on the decision, numbered as cited, not listed in the text
+    assert made["sources"] == [{"id": "S1", "kind": "document", "ref_id": prd["id"], "title": "Export PRD"}]
 
 
-async def test_a_long_write_up_is_cut_but_keeps_its_sources_and_note(client, fake_llm):
+async def test_a_long_write_up_is_cut_and_keeps_its_sources(client, fake_llm):
     headers = await signed_in(client)
     prd = await page(client, headers, PRD)
     fake_llm.stream_response = reply(("Guest export", "Guests can't export reports."), background="x" * 30_000, pros=["Simple"])
@@ -175,8 +175,8 @@ async def test_a_long_write_up_is_cut_but_keeps_its_sources_and_note(client, fak
     [made] = (await suggest(client, headers, prd)).json()["data"]
 
     assert len(made["context_md"]) == CONTEXT["max_length"]
-    assert "x…\n\n### Sources\n- [S1] Export PRD\n\n*Pros, cons" in made["context_md"]
-    assert made["context_md"].endswith("check them before accepting.*")
+    assert made["context_md"].endswith("x…")
+    assert [source["id"] for source in made["sources"]] == ["S1"]
 
 
 async def test_a_dropped_suggestion_leaves_its_quotes_for_the_next(client, fake_llm, fake_embedder):
@@ -222,7 +222,10 @@ async def test_related_sources_are_read_and_can_be_quoted_but_s1_must_be(client,
     assert [(e["ref_id"], e["quote"]) for e in decision["evidence"]] == [
         (quoted["id"], "Guests can't export reports."), (linked["id"], "Members download a PDF of a report."),
     ]
-    assert f"- [S2] {linked['key']} PDF export" in decision["context_md"]
+    assert decision["sources"] == [
+        {"id": "S1", "kind": "work_item", "ref_id": quoted["id"], "title": f"{quoted['key']} Export"},
+        {"id": "S2", "kind": "work_item", "ref_id": linked["id"], "title": f"{linked['key']} PDF export"},
+    ]
 
 
 async def test_at_most_five_suggestions_are_kept(client, fake_llm):
