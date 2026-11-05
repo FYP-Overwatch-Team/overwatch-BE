@@ -2,10 +2,13 @@ from datetime import date, datetime
 
 from pydantic import BaseModel
 
-from app.core.constants import UsageFeature, UsageLimitKind
+from app.core.constants import UsageLimitKind
 
 
 class UsageTotals(BaseModel):
+    #: what was taken from the monthly allowance: chat questions, suggestion runs, sources checked
+    actions: int
+    #: model calls, embeddings included; one action may make several
     calls: int
     prompt_tokens: int
     completion_tokens: int
@@ -17,13 +20,6 @@ class UsageTotals(BaseModel):
 class DailyUsage(UsageTotals):
     #: in the time zone the summary was asked for
     day: date
-    #: the day's calls per feature and per member, for charting either way
-    calls_by_feature: dict[UsageFeature, int]
-    calls_by_member: dict[str, int]
-
-
-class FeatureUsage(UsageTotals):
-    feature: UsageFeature
 
 
 class MemberUsage(UsageTotals):
@@ -31,14 +27,13 @@ class MemberUsage(UsageTotals):
 
 
 class UsageSummary(BaseModel):
-    """A workspace's AI usage over the last `days` (today included), in total and split by day, feature and member."""
+    """A workspace's AI usage over the last `days` (today included), in total and split by day and member."""
 
     days: int
     #: the time zone the days are counted in
     time_zone: str
     total: UsageTotals
     by_day: list[DailyUsage]
-    by_feature: list[FeatureUsage]
     by_member: list[MemberUsage]
 
 

@@ -143,7 +143,7 @@ async def _suggest(member: dict, kind: EvidenceKind, ref_id: str, source: dict) 
     if scan.get("fingerprint") == fingerprint:
         raise ConflictError("Nothing has changed here since it was last checked", error_code="source_unchanged")
 
-    await limits.take_suggestion(workspace_id)
+    await limits.take_suggestion(workspace_id, member["user_id"])
     related = await _related(workspace_id, member["user_id"], (kind, ref_id), source["text"])
     found = await service.sources(workspace_id, related) if related else {}
     # S1 is the source asked about; the related ones follow in order

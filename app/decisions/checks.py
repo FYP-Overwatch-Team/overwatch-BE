@@ -285,7 +285,7 @@ async def _check(workspace_id: str, user_id: str) -> dict:
         if last_read.get(ref[1], fingerprint if quoted_as_is else None) == fingerprint:
             continue  # unchanged since it was last read, or since it was quoted
         try:
-            await limits.take_check(workspace_id)
+            await limits.take_check(workspace_id, user_id)
         except AppError:
             capped = True
             break
@@ -362,7 +362,7 @@ async def scan_accepted(workspace_id: str, decision_id: str, user_id: str) -> di
         if ref not in found:
             continue
         try:
-            await limits.take_check(workspace_id)
+            await limits.take_check(workspace_id, user_id)
         except AppError:
             capped = True
             break

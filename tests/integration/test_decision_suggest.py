@@ -109,6 +109,17 @@ async def test_suggestions_have_a_daily_cap_per_workspace(client, fake_llm, sugg
     assert len(fake_llm.calls) == 1
 
 
+async def test_a_used_up_monthly_allowance_stops_suggestions(client, fake_llm, monkeypatch):
+    monkeypatch.setenv("AI_WORKSPACE_MONTHLY_LIMIT", "0")
+    get_settings.cache_clear()
+    headers = await signed_in(client)
+
+    resp = await suggest(client, headers, await page(client, headers))
+
+    assert (resp.status_code, resp.json()["meta"]["error_code"]) == (429, "ai_allowance_used_up")
+    assert fake_llm.calls == []
+
+
 async def test_an_unreadable_reply_is_an_error_and_the_source_can_be_tried_again(client, fake_llm):
     headers = await signed_in(client)
     prd = await page(client, headers, PRD)
