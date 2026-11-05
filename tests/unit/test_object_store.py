@@ -41,7 +41,7 @@ def test_an_upload_is_bound_to_its_type_and_exact_size(monkeypatch):
 
 
 def test_an_r2_upload_is_a_put_signed_for_its_type_and_length(monkeypatch):
-    target = r2(monkeypatch).upload_target("a1", "workspaces/w/docs/n/images/a1.png", "image/png", 1024)
+    target = r2(monkeypatch).upload_target("a1", "workspaces/w/docs/n/images/a1.png", "image/png", 1024, api_path="/decision-attachments")
     url = urlsplit(target["url"])
     query = parse_qs(url.query)
 
@@ -90,6 +90,14 @@ def test_a_download_link_is_signed_and_expires(monkeypatch):
     url = store(monkeypatch).download_url("a1", "ws/w/docs/n/a1", 600)
 
     assert "docs-bucket" in url and "X-Amz-Signature=" in url and "X-Amz-Expires=600" in url
+
+
+def test_a_download_link_can_save_the_file_under_its_name(monkeypatch):
+    url = store(monkeypatch).download_url("a1", "ws/w/d/a1.pdf", 120, download_name="Q3 plan ✓.pdf")
+    shown = store(monkeypatch).download_url("a1", "ws/w/d/a1.png", 120)
+
+    assert "response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27Q3%2520plan%2520%25E2%259C%2593.pdf" in url
+    assert "response-content-disposition=inline" in shown
 
 
 async def test_a_missing_file_reads_as_none(monkeypatch):

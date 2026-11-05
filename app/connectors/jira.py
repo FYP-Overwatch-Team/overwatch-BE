@@ -25,6 +25,8 @@ AGILE_SCOPES = (
     "read:sprint:jira-software",
     "write:sprint:jira-software",
     "read:issue:jira-software",
+    # finding a project's board, and reading its columns, also need the project read
+    "read:project:jira",
 )
 AGILE_SCOPE = "read:board-scope.admin:jira-software"
 
@@ -97,13 +99,16 @@ def _workflow(raw: dict, statuses: dict[str, dict]) -> dict:
 
 
 def _reachable(transitions: list[dict]) -> list[dict]:
-    """The statuses an issue's available transitions lead to: [{status_id, status, status_category, transition_id, transition_name}]."""
+    """The statuses an issue's available transitions lead to: [{status_id, status, status_category, transition_id,
+    transition_name, required_fields}], `required_fields` naming what Jira's screen for the move must be given."""
     found = []
     for transition in transitions:
         to = transition.get("to") or {}
+        fields = (transition.get("fields") or {}).values()
         found.append({
             "status_id": str(to["id"]) if to.get("id") is not None else None, "status": to.get("name"), "status_category": status_category(to),
             "transition_id": str(transition["id"]), "transition_name": transition.get("name") or "",
+            "required_fields": [f.get("name") or f.get("key") or "" for f in fields if f.get("required") and not f.get("hasDefaultValue")],
         })
     return found
 
@@ -509,8 +514,10 @@ class JiraAdapter:
     async def allowed_statuses(self, auth: AuthBackend, conn: dict, external_id: str) -> list[dict]:
         """Where the issue can move now, as Jira decides for the connected account (conditions included)."""
         url = _url(conn, f"/rest/api/3/issue/{external_id}/transitions")
+        # with each move's screen fields, to tell which need input only Jira can take
+        params = {"expand": "transitions.fields"}
         return _reachable(_check(
-            await auth.request(conn, "GET", url), {200}, "jira_transitions_unavailable", "could not read Jira transitions",
+            await auth.request(conn, "GET", url, params=params), {200}, "jira_transitions_unavailable", "could not read Jira transitions",
         ).json().get("transitions", []))
 
     async def workflow(self, auth: AuthBackend, conn: dict, target_key: str) -> dict | None:
@@ -562,6 +569,11 @@ class JiraAdapter:
             allowed = ", ".join(dict.fromkeys(r["status"] for r in reachable if r["status"])) or "nowhere"
             raise ConflictError(
                 f"Jira's workflow doesn't allow that move. From here it allows: {allowed}.", error_code="transition_not_allowed",
+            )
+        if target["required_fields"]:
+            raise ConflictError(
+                f"Jira needs {', '.join(target['required_fields'])} to move it to {target['status']}: make this move in Jira.",
+                error_code="transition_needs_input",
             )
         _check(
             await auth.request(conn, "POST", _url(conn, f"/rest/api/3/issue/{external_id}/transitions"), json={"transition": {"id": target["transition_id"]}}),

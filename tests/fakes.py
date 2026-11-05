@@ -1,6 +1,8 @@
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
-from app.integrations.llm import REQUEST_TIMEOUT_SECONDS, Delta, LLMClient, ToolCall, ToolRound, Turn
+from app.core.constants import EmbedPurpose
+
+from app.integrations.llm import REQUEST_TIMEOUT_SECONDS, CallUsage, Delta, LLMClient, ToolCall, ToolRound, Turn
 
 
 class FakeLLMClient(LLMClient):
@@ -22,6 +24,8 @@ class FakeLLMClient(LLMClient):
         #: raw replies for the stream calls after the lookups, in order; the last one repeats
         self.replies: list[str] = []
         self.calls: list[dict] = []
+        #: what each call reports it used, to anyone passing `on_usage`
+        self.usage = CallUsage("fake/model", None, prompt_tokens=100, completion_tokens=20, cached_tokens=0, cost_usd=0.001)
 
     async def stream_text(
         self,
@@ -35,7 +39,10 @@ class FakeLLMClient(LLMClient):
         tool_choice: str = "auto",
         closing: str = "",
         session: str = "",
+        on_usage: Callable[[CallUsage], Awaitable[None]] | None = None,
     ) -> AsyncIterator[Delta | ToolCall]:
+        if on_usage:
+            await on_usage(self.usage)
         self.calls.append({
             "mode": "stream", "system": system_instruction, "prompt": prompt, "history": list(history),
             "tools": list(tools), "rounds": list(rounds), "tool_choice": tool_choice, "closing": closing,
@@ -63,3 +70,26 @@ def written(reply: dict) -> str:
     )
     answerable = "yes" if reply.get("answerable", True) else "no"
     return f"ANSWERABLE: {answerable}\nRELATIONS: {relations or 'none'}\n---\n{reply.get('answer', '')}"
+
+
+class FakeEmbedder:
+    """Deterministic stand-in for an embedding model: one dimension per word in `vocabulary`.
+
+    A text's vector counts the vocabulary words in it, so texts sharing those words read as close
+    in meaning and texts sharing none as unrelated. Words outside the vocabulary are ignored.
+    """
+
+    model = "fake/embedder"
+
+    def __init__(self):
+        self.vocabulary = ["export", "guest", "pdf", "report", "dark", "mode", "billing", "invoice"]
+        self.calls: list[dict] = []
+        self.usage = CallUsage(self.model, None, prompt_tokens=10, completion_tokens=0, cached_tokens=0, cost_usd=0.00001)
+
+    async def embed(
+        self, texts: Sequence[str], purpose: EmbedPurpose, *, on_usage: Callable[[CallUsage], Awaitable[None]] | None = None,
+    ) -> list[list[float]]:
+        self.calls.append({"texts": list(texts), "purpose": purpose})
+        if on_usage:
+            await on_usage(self.usage)
+        return [[float(text.lower().count(word)) + 0.001 for word in self.vocabulary] for text in texts]

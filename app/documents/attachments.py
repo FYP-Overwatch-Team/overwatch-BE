@@ -12,7 +12,7 @@ from app.core.responses import api_router
 from app.core.time import utcnow
 from app.db import mongo
 from app.documents import repository
-from app.storage import keys
+from app.storage import keys, sniff
 from app.storage.proxied import valid_signature
 from app.storage.store import ProxiedStore, get_object_store
 
@@ -61,19 +61,6 @@ def _check_file(content_type: str, size: int) -> None:
         raise AppError(f"Images can be at most {MAX_BYTES // (1024 * 1024)} MB", error_code="file_too_large", status_code=413)
 
 
-def _sniffed_type(data: bytes) -> str | None:
-    """The image type from the file's first bytes, so a renamed file can't pass as an image."""
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    return None
-
-
 async def _pending(workspace_id: str, attachment_id: str) -> dict:
     doc = await mongo.doc_attachments().find_one({"_id": attachment_id, "workspace_id": workspace_id})
     if not doc:
@@ -115,7 +102,7 @@ async def upload_content(attachment_id: str, request: Request, member: dict = De
         data.extend(chunk)
         if len(data) > MAX_BYTES:
             raise AppError("Images can be at most 10 MB", error_code="file_too_large", status_code=413)
-    if _sniffed_type(bytes(data)) != record["content_type"]:
+    if sniff.image_type(bytes(data)) != record["content_type"]:
         raise AppError("That file isn't the image it says it is", error_code="unsupported_file_type", status_code=415)
     await store.write(record["key"], bytes(data), record["content_type"])
 
@@ -182,7 +169,7 @@ async def copy_from_source(workspace_id: str, node_id: str, source: str, file: d
     `file` is the source's description ({external_id, media_id, filename, content_type, external_version}).
     None when it isn't an image we can show.
     """
-    content_type = _sniffed_type(data)
+    content_type = sniff.image_type(data)
     if content_type not in IMAGE_TYPES or len(data) > MAX_BYTES:
         return None
     existing = await mongo.doc_attachments().find_one({"workspace_id": workspace_id, "source": source, "external_id": file["external_id"]})

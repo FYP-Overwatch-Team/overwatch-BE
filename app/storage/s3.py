@@ -10,7 +10,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from app.storage.store import StoredFile, UploadTarget
+from app.storage.store import StoredFile, UploadTarget, disposition
 
 UPLOAD_WINDOW_SECONDS = 600
 
@@ -29,7 +29,9 @@ class S3Store:
             ),
         )
 
-    def upload_target(self, attachment_id: str, key: str, content_type: str, size: int) -> UploadTarget:
+    def upload_target(
+        self, attachment_id: str, key: str, content_type: str, size: int, *, api_path: str = "/attachments",
+    ) -> UploadTarget:
         """A signed form: S3 checks the policy's type and size before it stores anything."""
         post = self.client.generate_presigned_post(
             self.bucket, key,
@@ -39,9 +41,12 @@ class S3Store:
         )
         return {"method": "POST", "url": post["url"], "fields": post["fields"], "headers": {}, "via_api": False}
 
-    def download_url(self, attachment_id: str, key: str, ttl: int) -> str:
+    def download_url(
+        self, attachment_id: str, key: str, ttl: int, *, download_name: str | None = None, api_path: str = "/attachments",
+    ) -> str:
         return self.client.generate_presigned_url(
-            "get_object", Params={"Bucket": self.bucket, "Key": key, "ResponseContentDisposition": "inline"}, ExpiresIn=ttl,
+            "get_object", Params={"Bucket": self.bucket, "Key": key, "ResponseContentDisposition": disposition(download_name)},
+            ExpiresIn=ttl,
         )
 
     async def head(self, key: str) -> StoredFile | None:
@@ -52,6 +57,15 @@ class S3Store:
                 return None
             raise
         return {"size": meta["ContentLength"], "content_type": meta.get("ContentType", "")}
+
+    async def read_start(self, key: str, size: int) -> bytes | None:
+        try:
+            found = await asyncio.to_thread(self.client.get_object, Bucket=self.bucket, Key=key, Range=f"bytes=0-{size - 1}")
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+                return None
+            raise
+        return await asyncio.to_thread(found["Body"].read)
 
     async def write(self, key: str, data: bytes, content_type: str) -> None:
         await asyncio.to_thread(self.client.put_object, Bucket=self.bucket, Key=key, Body=data, ContentType=content_type)
