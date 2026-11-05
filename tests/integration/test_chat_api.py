@@ -202,6 +202,18 @@ async def test_a_spent_daily_budget_answers_503_and_counts_nothing(client, owner
     assert await mongo.usage_counters().count_documents({"count": {"$gt": 0}}) == 0
 
 
+async def test_a_used_up_monthly_allowance_answers_429_and_counts_nothing(client, owner, fake_llm, limits):
+    limits(ai_workspace_monthly_limit=0)
+
+    resp = await ask(client, owner)
+
+    assert resp.status_code == 429
+    assert resp.json()["meta"]["error_code"] == "ai_allowance_used_up"
+    assert await mongo.usage_counters().count_documents({"count": {"$gt": 0}}) == 0
+    assert await mongo.ai_actions().count_documents({}) == 0
+    assert fake_llm.calls == []
+
+
 async def test_a_full_conversation_is_refused(client, owner, fake_llm):
     fake_llm.json_response = GROUNDED
     conversation_id = (await ask(client, owner)).json()["data"]["conversation"]["id"]

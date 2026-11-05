@@ -11,9 +11,11 @@ the window is under its limit; once full, the upsert collides with the existing 
 from datetime import datetime, timedelta
 
 from app.core.config import get_settings
+from app.core.constants import UsageFeature
 from app.core.exceptions import AppError
-from app.core.rate_limit import Window, take_all, take_one
+from app.core.rate_limit import Window, take_one
 from app.core.time import utcnow
+from app.usage.allowance import take_action
 
 
 def member_hourly_key(workspace_id: str, user_id: str, now: datetime) -> str:
@@ -33,10 +35,10 @@ def daily_budget(now: datetime) -> Window:
 
 
 async def take(workspace_id: str, user_id: str) -> None:
-    """Count one question against every limit, or raise without counting any."""
+    """Count one question against the month and every limit, or raise without counting any."""
     settings = get_settings()
     now = utcnow()
-    await take_all([
+    await take_action(workspace_id, user_id, UsageFeature.CHAT, [
         Window(member_hourly_key(workspace_id, user_id, now), settings.chat_user_hourly_limit, now + timedelta(hours=2),
                AppError("You've asked a lot of questions this hour; try again later", error_code="rate_limited", status_code=429)),
         Window(workspace_daily_key(workspace_id, now), settings.chat_workspace_daily_limit, now + timedelta(days=2),
