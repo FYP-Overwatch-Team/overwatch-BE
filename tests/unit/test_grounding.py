@@ -10,6 +10,7 @@ from app.query.grounding import (
     Citation,
     CodeCitation,
     FlowStep,
+    cite_records,
     ground,
     plain_text,
     safe_markdown,
@@ -391,3 +392,14 @@ def test_callouts_are_made_canonical_unknown_kinds_dropped_and_capped():
 
     assert result.text == "> [!WARNING]\n> login [n1] skips it.\n\n>\n> no\n\n> [!TIP]\n> a\n\n>\n> b"
     assert [c.ref for c in result.citations] == ["n1"]
+
+
+def test_only_records_a_lookup_gave_are_cited():
+    records = {"r1": {"ref": "r1", "key": "DEV-1"}, "r2": {"ref": "r2", "key": "DEV-2"}}
+
+    text, cited = cite_records("See [ r2 ] and [r1], not [r7].\n```\n[r7]\n```", records)
+
+    assert text == "See [r2] and [r1], not.\n```\n[r7]\n```"
+    assert [record["key"] for record in cited] == ["DEV-2", "DEV-1"]
+    # an earlier answer goes back to the model with its records as keys
+    assert plain_text("See [r2] and [r1].", [], [], cited) == "See (DEV-2) and (DEV-1)."

@@ -233,7 +233,12 @@ def _stem(word: str) -> str:
 
 def clean(text: object, limit: int = MAX_NAME_CHARS) -> str:
     """Repo text made safe to place inside the fence: one line, escaped, bounded."""
-    return " ".join(str(text).split()).translate(_ESCAPES)[:limit]
+    return escape(" ".join(str(text).split()))[:limit]
+
+
+def escape(text: str) -> str:
+    """Untrusted text that can't close a fence or forge a reference, line breaks kept."""
+    return text.translate(_ESCAPES)
 
 
 async def open_ask_context(
