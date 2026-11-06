@@ -12,7 +12,7 @@ being kept again. Its conversation copy goes as soon as nothing else uses it.
 """
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import structlog
 from pymongo import UpdateOne
@@ -62,10 +62,22 @@ def closing(status: ChatQuestionStatus, **fields) -> dict:
     return {"$set": {"status": status, "closed_at": now, "updated_at": now, **fields}, "$unset": {"quote": ""}}
 
 
-async def settle_conversation(workspace_id: str, thread_ref: str, asked_before: datetime) -> None:
-    """The conversation went on to state a decision: its questions from before then are settled."""
+async def open_in(workspace_id: str, thread_ref: str) -> list[str]:
+    """The ids of the conversation's questions still open."""
+    query = {"workspace_id": workspace_id, "thread_ref": thread_ref, "status": _ACTIVE}
+    return [doc["_id"] async for doc in mongo.chat_questions().find(query, {"_id": 1})]
+
+
+async def settle_conversation(workspace_id: str, thread_ref: str, asked: list[str]) -> None:
+    """The conversation went on to state a decision: its questions `asked` before then are settled.
+
+    They're named by id, not by a time, because Mongo keeps times to the millisecond: a question kept
+    in the same millisecond a later read started would look asked after it.
+    """
+    if not asked:
+        return
     await mongo.chat_questions().update_many(
-        {"workspace_id": workspace_id, "thread_ref": thread_ref, "created_at": {"$lt": asked_before}, "status": _ACTIVE},
+        {"_id": {"$in": asked}, "workspace_id": workspace_id, "thread_ref": thread_ref, "status": _ACTIVE},
         closing(ChatQuestionStatus.SETTLED),
     )
 

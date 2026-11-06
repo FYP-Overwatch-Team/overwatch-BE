@@ -224,7 +224,8 @@ async def _read(
         return 0
     external_url = permalink(workspace_url, conversation.channel, conversation.root)
     await _keep(workspace_id, ref_id, channel_name, external_url, conversation, text)
-    started = utcnow()
+    # asked before this read: a decision it finds settles these, never the questions it finds itself
+    asked = await questions.open_in(workspace_id, ref_id)
 
     async def keep_questions(reply: Reply, source_text: str) -> None:
         await questions.keep_from_reply(workspace_id, conversation.channel, ref_id, external_url, reply, source_text)
@@ -247,7 +248,7 @@ async def _read(
         await chat_sources.release_if_unused(workspace_id, ref_id)
     if created:
         # a question asked earlier in this conversation has now been answered by a decision
-        await questions.settle_conversation(workspace_id, ref_id, started)
+        await questions.settle_conversation(workspace_id, ref_id, asked)
     await _mark_read(workspace_id, conversation, ref_id)
     logger.info("slack_decisions_suggested", workspace_id=workspace_id, channel=conversation.channel, count=len(created))
     return len(created)

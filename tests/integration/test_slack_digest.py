@@ -142,6 +142,19 @@ async def test_a_later_decision_in_the_thread_settles_its_question(fake_llm, wor
     assert (await only_question())["status"] == "settled"
 
 
+async def test_a_question_found_with_a_decision_stays_open(fake_llm, workspace):
+    workspace_id = workspace["X-Workspace-Id"]
+    await post(workspace_id, UNSETTLED)
+    fake_llm.stream_response = reply(
+        decisions=(("Think about billing", "let's think about it"),),
+        open_questions=(("Postgres or Mongo for billing?", "Should billing use Postgres or Mongo?"),),
+    )
+
+    await slack_decisions.scan_workspace(workspace_id, "https://acme.slack.com/")
+
+    assert (await only_question())["status"] == "pending"
+
+
 @pytest.mark.parametrize(("settings", "sent_on", "at_utc", "due"), [
     ({}, None, "10:05", "2026-11-07"),
     ({}, None, "09:55", None),  # not 10:00 yet
