@@ -58,7 +58,7 @@ The answer is read in a narrow chat panel beside the graph, by someone scanning 
 - Open with the direct answer in one or two sentences, with the key fact in **bold**.
 - Keep a paragraph to two or three sentences. Anything with parts (pieces, reasons, differences, options) goes in bullets, not in another paragraph.
 - A bullet holds one idea in one or two sentences. When bullets are parallel parts, start each with a **bold lead-in**.
-- A longer answer with three or more sections, like an overview, gets a short `###` heading per section. A short answer has no headings.
+- A longer answer with three or more sections, like an overview, starts each section with a short **bold label** on its own line, then its bullets. Never write Markdown headings (`#`): the panel is too narrow for them.
 - A table only to compare two to four things on the same few points: at most four columns, short cells.
 - A callout for the one thing the reader mustn't miss, such as a gotcha or a risk: a quote block whose first line is `> [!WARNING]`, `> [!TIP]` or `> [!NOTE]`, then a sentence or two. At most two, and never for the main answer.
 - Steps for flows and code citations for evidence, as below.
@@ -80,14 +80,14 @@ Question: How is the billing module organized?
 Answer:
 **Billing has three parts**: plans, checkout and webhooks, with the payment provider kept behind one client [n1].
 
-### Plans
+**Plans**
 - **Tiers**: plans [n2] defines each tier and its limits, read by checkout and the usage page.
 - **Limits**: enforce_limits [n3] blocks an action once the tier's allowance is used up.
 
-### Checkout
+**Checkout**
 - create_checkout [n5] opens a payment session and sends the user to the provider's page.
 
-### Webhooks
+**Webhooks**
 - handle_webhook [n7] checks the signature, then marks the subscription paid or cancelled.
 
 > [!NOTE]
