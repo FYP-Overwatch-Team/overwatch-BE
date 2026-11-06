@@ -113,18 +113,19 @@ async def test_channels_are_listed_across_pages(client, slack_app):
     with respx.mock as router:
         listing = router.get(CHANNELS_URL).mock(side_effect=[
             Response(200, json={
-                "ok": True, "channels": [{"id": "C0RANDOM", "name": "random"}],
+                "ok": True, "channels": [{"id": "C0RANDOM", "name": "random", "is_member": False}],
                 "response_metadata": {"next_cursor": "page-2"},
             }),
             Response(200, json={
-                "ok": True, "channels": [{"id": "C0GENERAL", "name": "general"}], "response_metadata": {"next_cursor": ""},
+                "ok": True, "channels": [{"id": "C0GENERAL", "name": "general", "is_member": True}], "response_metadata": {"next_cursor": ""},
             }),
         ])
         available = await client.get("/connections/slack/targets/available", headers=headers)
 
+    # a channel the app isn't in can't be heard yet, so it says what to do
     assert available.json()["data"] == [
-        {"key": "C0GENERAL", "name": "#general", "id": "C0GENERAL"},
-        {"key": "C0RANDOM", "name": "#random", "id": "C0RANDOM"},
+        {"key": "C0GENERAL", "name": "#general", "id": "C0GENERAL", "hint": None},
+        {"key": "C0RANDOM", "name": "#random", "id": "C0RANDOM", "hint": "invite the app to it first (/invite in the channel)"},
     ]
     first, second = listing.calls
     assert first.request.headers["Authorization"] == "Bearer xoxb-test"
@@ -157,7 +158,11 @@ async def test_channels_are_listened_to_not_synced(client, slack_app, monkeypatc
     monkeypatch.setattr(jobs.sync, "run_work_item_sync", record)
     monkeypatch.setattr(jobs.doc_sync, "run_document_sync", record)
 
-    added = await client.post("/connections/slack/targets", json={"key": "C0GENERAL", "name": "#general"}, headers=headers)
+    with respx.mock as router:
+        router.get(CHANNELS_URL).mock(return_value=Response(200, json={
+            "ok": True, "channels": [{"id": "C0GENERAL", "name": "general", "is_member": True}],
+        }))
+        added = await client.post("/connections/slack/targets", json={"key": "C0GENERAL", "name": "#general"}, headers=headers)
     sync_now = await client.post("/connections/slack/sync", headers=headers)
     await jobs.run_connector_sync(headers["X-Workspace-Id"], "slack", "C0GENERAL")
 

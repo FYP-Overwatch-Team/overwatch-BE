@@ -24,7 +24,7 @@ from app.core.constants import (
 from app.core.exceptions import ConflictError, FieldValidationError, NotFoundError
 from app.core.time import utcnow
 from app.db import mongo
-from app.decisions import quotes
+from app.decisions import chat_sources, quotes
 from app.decisions.schemas import MAX_EVIDENCE, ChangeStatus, CreateDecision, NewEvidence, UpdateDecision
 from app.workspaces import repository as workspaces
 
@@ -322,11 +322,15 @@ async def add_evidence(member: dict, decision_id: str, body: NewEvidence, match:
 
 async def remove_evidence(member: dict, decision_id: str, evidence_id: str) -> dict:
     workspace_id = member["workspace_id"]
-    await found(workspace_id, decision_id)
+    decision = await found(workspace_id, decision_id)
     removed = await mongo.decisions().update_one(
         {"_id": decision_id, "evidence.id": evidence_id},
         {"$pull": {"evidence": {"id": evidence_id}}, "$set": {"updated_at": utcnow()}},
     )
     if not removed.matched_count:
         raise NotFoundError("evidence not found", error_code="evidence_not_found")
+    # a kept chat conversation goes once no decision quotes it
+    for evidence in decision["evidence"]:
+        if evidence["id"] == evidence_id and evidence["kind"] == EvidenceKind.CHAT_THREAD:
+            await chat_sources.release_if_unused(workspace_id, evidence["ref_id"])
     return await get(workspace_id, decision_id)

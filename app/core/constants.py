@@ -315,6 +315,8 @@ class ChatQuestionStatus(StrEnum):
     SETTLED = "settled"
     #: nobody acted on it in time
     EXPIRED = "expired"
+    #: the message that raised it was deleted or edited away in the chat
+    WITHDRAWN = "withdrawn"
 
 
 # questions still waiting on someone; their conversation is kept for them

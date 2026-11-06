@@ -1,5 +1,6 @@
 """Every connector Overwatch supports; adding a provider is an adapter plus an entry here."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from app.connectors import atlassian, confluence, jira, slack
@@ -8,6 +9,7 @@ from app.connectors.oauth import OAuth2Flow, OAuthConfig
 from app.connectors.ports import AuthBackend, ChatSource, DocSource, WorkItemSource
 from app.core.constants import AuthBackendName, ConnectorCategory, Provider
 from app.core.exceptions import NotFoundError
+from app.slack import cleanup as slack_cleanup
 
 # one flow (and token) per OAuth app, so products sharing an app share their credential
 _flows: dict[str, OAuth2Flow] = {}
@@ -26,6 +28,10 @@ class Connector:
     write_scope: str | None
     # the scope that lets the tracker's boards and sprints be read and changed; None if it has no sprints
     sprint_scope: str | None = None
+    # the external account (a Slack workspace) can be connected to one Bearings workspace at a time
+    exclusive_account: bool = False
+    # what else goes when a workspace disconnects, besides the connection and its token
+    on_disconnect: Callable[[str], Awaitable[None]] | None = None
     flow: OAuth2Flow = field(init=False)
     backends: dict[str, AuthBackend] = field(init=False)
 
@@ -57,6 +63,7 @@ CONNECTORS = {
     Provider.SLACK: Connector(
         provider=Provider.SLACK, name="Slack", category=ConnectorCategory.CHAT, oauth=slack.OAUTH,
         adapter=slack.SlackAdapter(), scopes=slack.SCOPES, write_scope=None,
+        exclusive_account=True, on_disconnect=slack_cleanup.forget_on_disconnect,
     ),
 }
 

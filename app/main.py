@@ -110,7 +110,8 @@ async def _slack_messages_loop() -> None:
     while True:
         await slack_messages.buffer.wait_until_due(slack_messages.FLUSH_SECONDS)
         try:
-            await slack_messages.buffer.flush()
+            if written := await slack_messages.buffer.flush():
+                structlog.get_logger("app.slack").info("slack_messages_flushed", count=written, waiting=len(slack_messages.buffer))
         except Exception:
             structlog.get_logger("app.slack").exception("slack_messages_flush_error")
 
@@ -186,6 +187,8 @@ async def lifespan(app: FastAPI):
     slack_messages_task.cancel()
     slack_decisions_task.cancel()
     slack_digest_task.cancel()
+    # a flush cancelled mid-write puts its batch back once it has stopped, so wait for that before the last one
+    await asyncio.gather(slack_messages_task, slack_decisions_task, slack_digest_task, return_exceptions=True)
     try:
         # what's still in memory would be lost with the process: Slack doesn't resend acknowledged events
         await slack_messages.buffer.flush()

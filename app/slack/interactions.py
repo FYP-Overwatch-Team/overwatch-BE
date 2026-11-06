@@ -22,15 +22,16 @@ from app.connectors import registry
 from app.connectors.oauth import http
 from app.connectors.repository import ACTIVE
 from app.core.constants import ACTIVE_QUESTION_STATUSES, ChatQuestionStatus, DecisionOrigin, DecisionStatus, EvidenceKind, Provider
-from app.core.exceptions import AppError, UnauthorizedError
+from app.core.exceptions import AppError, FieldValidationError, NotFoundError, UnauthorizedError
 from app.core.responses import api_router
 from app.core.time import utcnow
 from app.db import mongo
 from app.decisions import service as decisions
 from app.decisions.schemas import CreateDecision, NewEvidence
 from app.integrations.http_log import log_call
+from app.slack import questions
 from app.slack.digest import CREATE_ACTION, SETTLE_ACTION, question_block_id
-from app.slack.events import verify_signature
+from app.slack.events import read_body, verify_signature
 from app.workspaces.service import require_member
 
 router = api_router(prefix="/webhooks/slack", tags=["webhooks"])
@@ -43,7 +44,7 @@ TITLE_CHARS = 200
 
 @router.post("/interactions")
 async def slack_interactions(request: Request, background_tasks: BackgroundTasks) -> Response:
-    raw_body = await request.body()
+    raw_body = await read_body(request)
     if not verify_signature(raw_body, request.headers.get("x-slack-request-timestamp"), request.headers.get("x-slack-signature")):
         logger.warning("slack_interaction_bad_signature")
         raise UnauthorizedError("invalid Slack signature", error_code="slack_bad_signature")
@@ -112,6 +113,11 @@ async def _track(payload: dict, question: dict, slack_user: str, user_id: str) -
     )
     try:
         decision = await decisions.create(member, body, DecisionOrigin.SUGGESTED)
+    except (NotFoundError, FieldValidationError):
+        # the message it quotes was deleted or edited in Slack since: there's nothing to track any more
+        await mongo.chat_questions().update_one({"_id": question["_id"]}, {"$set": {"status": question["status"]}})
+        await questions.withdraw_unquoted(question["workspace_id"], question["thread_ref"], None)
+        return _only_you("The message this question came from was changed or deleted in Slack, so it can't be tracked.")
     except Exception:
         # put it back, so it can be tried again
         await mongo.chat_questions().update_one({"_id": question["_id"]}, {"$set": {"status": question["status"]}})

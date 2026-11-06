@@ -104,7 +104,7 @@ async def test_list_projects(client):
         resp = await client.get("/jira/projects", headers=headers)
 
     assert resp.status_code == 200
-    assert resp.json()["data"] == [{"key": "OVR", "name": "Overwatch", "id": "10001"}]
+    assert resp.json()["data"] == [{"key": "OVR", "name": "Overwatch", "id": "10001", "hint": None}]
 
 
 async def test_disconnect_soft_deletes_connection_and_allows_reconnect(client):

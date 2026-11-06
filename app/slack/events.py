@@ -22,7 +22,8 @@ from app.core.constants import ConnectionStatus, Provider
 from app.core.exceptions import AppError, UnauthorizedError
 from app.core.responses import api_router
 from app.db import mongo, oauth_tokens
-from app.slack import decisions, messages
+from app.slack import cleanup, decisions, messages
+from app.slack.connections import live_workspace_ids
 
 router = api_router(prefix="/webhooks/slack", tags=["webhooks"])
 logger = structlog.get_logger("app.slack")
@@ -31,6 +32,8 @@ logger = structlog.get_logger("app.slack")
 MAX_REQUEST_AGE_SECONDS = 300
 # who listens to a Slack workspace is looked up at most this often; a newly watched channel waits this long
 LISTENERS_TTL_SECONDS = 60
+# Slack's events and clicks are a few KB; anything far bigger isn't from Slack and isn't read
+MAX_BODY_BYTES = 1_000_000
 # the app is gone from the Slack workspace, so its token is too
 UNINSTALL_EVENTS = {"app_uninstalled", "tokens_revoked"}
 EDIT_SUBTYPES = {"message_changed", "message_deleted"}
@@ -63,12 +66,30 @@ def verify_signature(raw_body: bytes, timestamp: str | None, signature: str | No
     if age > MAX_REQUEST_AGE_SECONDS:
         return False
     expected = hmac.new(secret.encode(), b"v0:" + timestamp.encode() + b":" + raw_body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature, f"v0={expected}")
+    try:
+        # compared as bytes: a header with characters outside ASCII is a mismatch, not an error
+        return hmac.compare_digest(signature.encode(), f"v0={expected}".encode())
+    except (UnicodeEncodeError, TypeError):
+        return False
+
+
+async def read_body(request: Request) -> bytes:
+    """The request body, refused before reading when it says it's far larger than Slack ever sends."""
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > MAX_BODY_BYTES:
+        raise AppError("request too large", error_code="payload_too_large", status_code=413)
+    raw_body = await request.body()
+    if len(raw_body) > MAX_BODY_BYTES:
+        raise AppError("request too large", error_code="payload_too_large", status_code=413)
+    return raw_body
 
 
 @router.post("/events")
 async def slack_events(request: Request) -> Response:
-    raw_body = await request.body()
+    raw_body = await read_body(request)
     if not verify_signature(raw_body, request.headers.get("x-slack-request-timestamp"), request.headers.get("x-slack-signature")):
         logger.warning("slack_event_bad_signature")
         raise UnauthorizedError("invalid Slack signature", error_code="slack_bad_signature")
@@ -117,6 +138,8 @@ async def _read_listeners(team_id: str) -> list[Listener]:
             {"provider": Provider.SLACK, "external_account.id": team_id, **ACTIVE}, {"workspace_id": 1},
         )
     ]
+    # a deleted workspace hears nothing more
+    workspace_ids = list(await live_workspace_ids(workspace_ids))
     if not workspace_ids:
         return []
     channels: dict[str, set[str]] = {workspace_id: set() for workspace_id in workspace_ids}
@@ -128,12 +151,14 @@ async def _read_listeners(team_id: str) -> list[Listener]:
 
 
 async def _uninstalled(team_id: str) -> None:
-    """The app was removed from the Slack workspace: ask for a reconnect, and drop its chat text."""
-    for listener in await _read_listeners(team_id):
-        await oauth_tokens.set_status(listener.workspace_id, Provider.SLACK, ConnectionStatus.NEEDS_REAUTH)
-        await messages.delete_workspace(listener.workspace_id)
-        # including the conversations kept for decisions: their evidence then shows the source is gone
-        await mongo.chat_threads().delete_many({"workspace_id": listener.workspace_id, "provider": Provider.SLACK})
-        await mongo.chat_questions().delete_many({"workspace_id": listener.workspace_id, "provider": Provider.SLACK})
+    """The app was removed from the Slack workspace: ask for a reconnect, and drop everything held from it.
+
+    That includes workspaces that had already disconnected, and the conversations kept for decisions:
+    their evidence then shows the source is gone.
+    """
+    query = {"provider": Provider.SLACK, "external_account.id": team_id}
+    for workspace_id in {conn["workspace_id"] async for conn in mongo.connections().find(query, {"workspace_id": 1})}:
+        await oauth_tokens.set_status(workspace_id, Provider.SLACK, ConnectionStatus.NEEDS_REAUTH)
+        await cleanup.forget_workspace(workspace_id, keep_decision_sources=False)
     _listeners.pop(team_id, None)
     logger.info("slack_app_uninstalled", team_id=team_id)

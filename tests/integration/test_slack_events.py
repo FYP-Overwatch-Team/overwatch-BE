@@ -24,6 +24,7 @@ async def slack(monkeypatch):
     get_settings.cache_clear()
     monkeypatch.setattr(messages, "buffer", messages.MessageBuffer())
     events.forget_listeners()
+    await mongo.workspaces().insert_one({"_id": WORKSPACE, "name": "Acme", "deleted_at": None})
     await connections.save_connection(
         WORKSPACE, "slack", auth_backend="native_oauth", scopes=[], connected_by="u-1",
         external_account={"id": TEAM, "name": "Acme", "url": None},

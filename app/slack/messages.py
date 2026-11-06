@@ -107,7 +107,8 @@ class MessageBuffer:
                 return 0
             try:
                 await mongo.channel_messages().bulk_write([_operation(key, fields) for key, fields in batch.items()], ordered=False)
-            except Exception:
+            except BaseException:
+                # a failed or cancelled write (a deploy) keeps the batch, behind anything newer, for the next flush
                 self._pending = {**batch, **self._pending}
                 raise
             return len(batch)

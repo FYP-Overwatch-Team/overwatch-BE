@@ -19,6 +19,14 @@ class UpdateDigest(BaseModel):
     time: str | None = Field(default=None, pattern=DIGEST_TIME)
     time_zone: str | None = Field(default=None, max_length=64)
 
+    @field_validator("enabled", "time", mode="before")
+    @classmethod
+    def _not_null(cls, value):
+        # leaving a field out keeps it; an explicit null would store a setting nothing can read
+        if value is None:
+            raise ValueError("can't be null; leave it out to keep it")
+        return value
+
     @field_validator("time_zone")
     @classmethod
     def _known_zone(cls, value: str | None) -> str | None:

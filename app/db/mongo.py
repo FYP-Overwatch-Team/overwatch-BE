@@ -370,8 +370,13 @@ async def ensure_indexes() -> None:
     await llm_usage().create_index([("workspace_id", 1), ("created_at", -1)])
     await link_previews().create_index("expires_at", expireAfterSeconds=0)
     await webhook_deliveries().create_index("delivery_id", unique=True)
-    # a chat event names its Slack workspace (team), and is routed to every Bearings workspace connected to it
+    # a chat event names its Slack workspace (team), and is routed to the Bearings workspace connected to it
     await connections().create_index([("provider", 1), ("external_account.id", 1)])
+    # one live Bearings workspace per Slack workspace: a second one could otherwise watch channels it isn't in
+    await connections().create_index(
+        [("external_account.id", 1)], unique=True, name="one_workspace_per_slack_team",
+        partialFilterExpression={"provider": "slack", "status": "active"},
+    )
     # a message is stored once however often Slack redelivers it; chat text is kept only briefly
     await channel_messages().create_index([("workspace_id", 1), ("channel", 1), ("ts", 1)], unique=True)
     await channel_messages().create_index("received_at", expireAfterSeconds=CHANNEL_MESSAGE_TTL_SECONDS)
@@ -381,6 +386,7 @@ async def ensure_indexes() -> None:
     await chat_questions().create_index([("workspace_id", 1), ("thread_ref", 1), ("fingerprint", 1)], unique=True)
     await chat_questions().create_index([("workspace_id", 1), ("channel", 1), ("status", 1), ("created_at", 1)])
     await chat_questions().create_index([("status", 1), ("expires_at", 1)])
+    await chat_questions().create_index([("status", 1), ("closed_at", 1)])
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)
     # last: an Atlas search index can fail where plain indexes don't (an M0 limit, say), and mustn't stop those
     if get_settings().vector_search == VectorSearch.ATLAS:

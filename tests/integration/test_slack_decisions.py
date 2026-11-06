@@ -82,7 +82,7 @@ def test_only_quiet_discussions_are_read(rows, age, ready):
     now = 10_000.0
     messages = tuple(Message(f"{now - age + i:.1f}", user, text, None) for i, (user, text) in enumerate(rows))
 
-    assert Conversation(CHANNEL, messages).is_ready(now) is ready
+    assert Conversation(CHANNEL, messages, messages[0].ts, is_thread=False).is_ready(now) is ready
 
 
 def test_the_link_opens_the_conversation_in_slack():

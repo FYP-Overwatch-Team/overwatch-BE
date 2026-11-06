@@ -84,6 +84,10 @@ and the decisions found since the last digest. Whoever clicks is matched to a Be
 A question nobody acts on expires after `SLACK_QUESTION_EXPIRY_DAYS` (3). Connections made before the digest existed
 lack its scopes and must be reconnected.
 
+A Slack workspace can be connected to one Bearings workspace at a time, and only channels the app has been invited to
+can be watched. Disconnecting gives the app's token back and deletes the chat Bearings held, except conversations a
+decision quotes; removing the app in Slack deletes those too.
+
 ### Email
 
 Sign-up codes, password resets and workspace invites are emailed. Locally `EMAIL_BACKEND=console` logs them
@@ -105,7 +109,7 @@ Return `WithMeta(data, meta)` to add pagination or counts.
 ```
 
 `code` mirrors the HTTP status; `meta` carries pagination, or `error_code` and `message` on errors.
-Only the OAuth callbacks (`/auth/github/callback`, `/jira/callback`) respond with redirects instead.
+Only the OAuth callbacks (`/auth/github/callback`, `/jira/callback`, `/slack/callback`) respond with redirects instead, and the Slack webhooks (`/webhooks/slack/events`, `/webhooks/slack/interactions`) answer Slack in the shape it expects.
 
 ## Tests
 

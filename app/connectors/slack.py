@@ -43,6 +43,7 @@ SCOPES = (
 # the install or its token is gone: only reconnecting helps
 REVOKED_ERRORS = {"invalid_auth", "not_authed", "token_revoked", "token_expired", "account_inactive"}
 CHANNELS_PAGE_SIZE = 200
+NOT_MEMBER_HINT = "invite the app to it first (/invite in the channel)"
 # 10,000 channels: more than any real workspace, and a stop for a cursor that never ends
 MAX_CHANNEL_PAGES = 50
 
@@ -67,7 +68,11 @@ class SlackAdapter:
                 **({"cursor": cursor} if cursor else {}),
             })
             channels += [
-                {"key": channel["id"], "name": f"#{channel['name']}", "id": channel["id"]}
+                {
+                    "key": channel["id"], "name": f"#{channel['name']}", "id": channel["id"],
+                    # Slack only sends a channel's messages to an app that's in it
+                    "hint": None if channel.get("is_member") else NOT_MEMBER_HINT,
+                }
                 for channel in body.get("channels", [])
             ]
             cursor = (body.get("response_metadata") or {}).get("next_cursor") or ""
@@ -83,11 +88,17 @@ class SlackAdapter:
         return body["ts"]
 
     async def user_email(self, auth: AuthBackend, conn: dict, user_id: str) -> str | None:
-        """A Slack member's email, which Slack has verified; None for bots and members without one."""
+        """A Slack member's confirmed email; None for bots, members without one, and emails Slack hasn't confirmed."""
         body = await _call(auth, conn, "users.info", params={"user": user_id})
         user = body.get("user") or {}
         email = (user.get("profile") or {}).get("email")
-        return None if user.get("is_bot") or not email else email.strip().lower()
+        if user.get("is_bot") or not email or user.get("is_email_confirmed") is False:
+            return None
+        return email.strip().lower()
+
+    async def revoke(self, auth: AuthBackend, conn: dict) -> None:
+        """Give the bot token back, so the app stops hearing the workspace's channels."""
+        await _call(auth, conn, "auth.revoke", params={})
 
 
 async def _call(auth: AuthBackend, conn: dict, method: str, *, params: dict | None = None, json: dict | None = None) -> dict:
@@ -100,6 +111,8 @@ async def _call(auth: AuthBackend, conn: dict, method: str, *, params: dict | No
     if body.get("ok"):
         return body
     error = body.get("error")
+    # Slack answers failures with HTTP 200, so the request log shows 200: the error name is what to look at
+    logger.warning("slack_api_error", method=method, error=error)
     if error in REVOKED_ERRORS:
         await oauth_tokens.set_status(conn["workspace_id"], OAUTH.provider, ConnectionStatus.NEEDS_REAUTH)
         raise UnauthorizedError("slack token is no longer valid", error_code="slack_needs_reauth")

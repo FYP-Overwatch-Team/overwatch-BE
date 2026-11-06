@@ -51,6 +51,15 @@ async def get(owner_id: str, provider: str) -> dict | None:
     return await mongo.oauth_tokens().find_one(_key(owner_id, provider))
 
 
+async def forget(owner_id: str, provider: str) -> None:
+    """Drop a disconnected provider's tokens, keeping the record so the connection reads as disconnected."""
+    await mongo.oauth_tokens().update_one(
+        _key(owner_id, provider),
+        {"$set": {"status": ConnectionStatus.DISCONNECTED, "updated_at": utcnow()},
+         "$unset": {"access_token_encrypted": "", "refresh_token_encrypted": ""}},
+    )
+
+
 async def set_status(owner_id: str, provider: str, status: str) -> None:
     await mongo.oauth_tokens().update_one(
         _key(owner_id, provider),
