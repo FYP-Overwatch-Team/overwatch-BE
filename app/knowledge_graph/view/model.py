@@ -77,7 +77,11 @@ class ViewNode:
     #: Finer than the label: a module's `module`/`external`/`routes`, or a
     #: symbol's `function`/`class`. May be absent for nodes that have no kind.
     kind: str | None = None
+    #: A file's path, or the file a symbol is defined in.
     path: str | None = None
+    #: Where a symbol sits in its file; absent for everything else.
+    start_line: int | None = None
+    end_line: int | None = None
     depth: int = 0
     file_count: int = 0
     definition_count: int = 0
