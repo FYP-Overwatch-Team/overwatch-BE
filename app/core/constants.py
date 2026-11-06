@@ -321,6 +321,35 @@ class SearchResultKind(StrEnum):
     DOCUMENT = "document"
 
 
+class ChatRecordKind(StrEnum):
+    """What an AI answer cites from the workspace with `[rN]`."""
+
+    WORK_ITEM = "work_item"
+    DOCUMENT = "document"
+    DECISION = "decision"
+
+
+class ChatActionKind(StrEnum):
+    """A button under an AI answer, added by the server from what the lookups found, never by the model."""
+
+    #: no tracker is connected
+    CONNECT_TRACKER = "connect_tracker"
+    #: no ticket matched
+    CREATE_TICKET = "create_ticket"
+
+
+class ProposalStatus(StrEnum):
+    """Where a ticket, page or decision the AI chat drafted stands; only the person who asked moves it."""
+
+    PENDING = "pending"
+    #: being created right now
+    APPLYING = "applying"
+    APPLIED = "applied"
+    CANCELLED = "cancelled"
+    #: still pending past its expiry; worked out when read, never stored
+    EXPIRED = "expired"
+
+
 class CheckMatch(StrEnum):
     """Why a decision check read a source against a decision, strongest first."""
 

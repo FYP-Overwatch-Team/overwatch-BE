@@ -3,6 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.constants import ChatActionKind, ChatRecordKind, ProposalStatus
 from app.query.context import MAX_OPEN_FOLDERS
 
 MAX_QUESTION_CHARS = 2_000
@@ -11,7 +12,8 @@ MAX_QUESTION_CHARS = 2_000
 class AskRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    repo_full_name: str
+    #: omitted to ask about the workspace alone
+    repo_full_name: str | None = None
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
     #: omitted to start a new conversation
     conversation_id: str | None = None
@@ -70,6 +72,73 @@ class ClarifyingQuestion(BaseModel):
     options: list[str]
 
 
+class RecordRef(BaseModel):
+    """A workspace record an answer cites with `[rN]`: a ticket, page or decision, as it was when the answer was written."""
+
+    #: the `rN` used inline in the answer
+    ref: str
+    kind: ChatRecordKind
+    id: str
+    title: str
+    #: the ticket's key, like DEV-12
+    key: str | None = None
+    #: the tracker or docs source it's from, or `native`; null for a decision
+    source: str | None = None
+    status: str | None = None
+    #: where the app opens it
+    href: str
+
+
+class ChatAction(BaseModel):
+    """A button under an answer, from what its lookups found: connect a tracker, create a ticket."""
+
+    kind: ChatActionKind
+    label: str
+    href: str
+
+
+class ProposalFields(BaseModel):
+    """A drafted ticket, page or decision as the asker approves it, edits included."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    title: str = Field(min_length=1, max_length=200)
+    #: a ticket's description, a page's text or a decision's background, in Markdown
+    body: str = Field(default="", max_length=20_000)
+    #: a decision's statement; empty for the others
+    statement: str = Field(default="", max_length=2_000)
+    #: the board a ticket goes on; null for the others
+    board_id: str | None = None
+
+
+class ProposalBoard(BaseModel):
+    id: str
+    name: str
+
+
+class ProposalResult(BaseModel):
+    """What approving a proposal created."""
+
+    kind: ChatRecordKind
+    id: str
+    title: str
+    href: str
+
+
+class Proposal(BaseModel):
+    """A ticket, page or decision the AI drafted; it exists only once the asker approves it."""
+
+    id: str
+    kind: ChatRecordKind
+    fields: ProposalFields
+    #: the boards a ticket can go on, for picking one; empty for pages and decisions
+    boards: list[ProposalBoard]
+    status: ProposalStatus
+    #: what was created, once approved
+    result: ProposalResult | None
+    expires_at: datetime
+
+
 class ChatMessage(BaseModel):
     id: str
     role: Literal["user", "assistant"]
@@ -83,6 +152,11 @@ class ChatMessage(BaseModel):
     follow_ups: list[str] = []
     #: a question back instead of an answer; null almost always
     ask: ClarifyingQuestion | None = None
+    #: workspace records the answer cites; empty for questions and older answers
+    records: list[RecordRef] = []
+    actions: list[ChatAction] = []
+    #: what the answer drafted for the asker to approve; empty almost always
+    proposals: list[Proposal] = []
     #: false when the answer was refused or the graph couldn't answer it
     grounded: bool = True
     created_at: datetime
@@ -90,7 +164,8 @@ class ChatMessage(BaseModel):
 
 class ConversationSummary(BaseModel):
     id: str
-    repo_full_name: str
+    #: null for a conversation about the workspace alone
+    repo_full_name: str | None
     title: str
     message_count: int
     created_at: datetime

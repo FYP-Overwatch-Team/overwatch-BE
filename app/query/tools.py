@@ -1,5 +1,7 @@
 """What the model can look up while it answers: the graph and the code, read-only.
 
+The workspace's tickets are looked up the same way, by `workspace_tools`.
+
 Each lookup is laid out by the question's `ContextBuilder`, so what it shows is
 numbered with the rest of the context and checked like it: a reference the
 model invents, or code it wasn't shown, is still dropped from the answer.
@@ -19,6 +21,7 @@ from app.knowledge_graph.build.model import EdgeType, NodeLabel
 from app.knowledge_graph.ports import KnowledgeGraphStore
 from app.query.context import ContextBuilder, clean, search_nodes
 from app.query.source import find_in_code, read_snippet
+from app.query.workspace_tools import WORKSPACE_TOOL_NAMES, Workspace
 
 SEARCH_GRAPH = "search_graph"
 RELATED = "related"
@@ -117,6 +120,8 @@ class Lookups:
     store: KnowledgeGraphStore
     repo: str
     commit: str | None
+    #: the workspace's tickets, when its tools are offered
+    workspace: Workspace | None = None
     #: lookups made so far (tool, what was asked), and file ranges being read right now
     asked: set[tuple[str, str]] = field(default_factory=set)
     reading: list[tuple[str, int, int]] = field(default_factory=list)
@@ -132,7 +137,7 @@ class Lookups:
             RELATED: f"Finding what uses {node}" if args.get("direction") == IN else f"Following what {node} uses",
             READ_CODE: f"Reading {node if args.get('ref') else clean(args.get('path', 'a file'), MAX_STATUS_CHARS)}",
             GREP_CODE: f"Searching the code for “{clean(args.get('query', ''), MAX_STATUS_CHARS)}”",
-        }.get(call.name, "Looking further")
+        }.get(call.name) or (self.workspace and self.workspace.status(call.name, args)) or "Looking further"
         return text[:MAX_STATUS_CHARS * 2]
 
     async def run(self, call: ToolCall) -> str:
@@ -142,6 +147,7 @@ class Lookups:
             return "error: the arguments must be a JSON object"
         handler = {
             SEARCH_GRAPH: self._search, RELATED: self._related, READ_CODE: self._read, GREP_CODE: self._grep,
+            **(self.workspace.handlers if self.workspace else {}),
         }.get(call.name)
         if handler is None:
             return f"error: there is no tool called {clean(call.name)}"
@@ -244,6 +250,8 @@ def _asked(tool: str, args: dict) -> str:
     """What a lookup asked for, the same however it's spelled: a ref and direction, or the words searched."""
     if tool == RELATED:
         return f"{_bare(args.get('ref'))}:{IN if args.get('direction') == IN else OUT}"
+    if tool in WORKSPACE_TOOL_NAMES:
+        return json.dumps(args, sort_keys=True).lower()
     return " ".join(str(args.get("query") or "").lower().split())
 
 

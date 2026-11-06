@@ -32,7 +32,7 @@ from dataclasses import dataclass, field, replace
 
 from app.query.context import GroundingContext, Relation, clean
 
-CANNOT_DETERMINE = "This can't be determined from the repository's graph."
+CANNOT_DETERMINE = "This can't be determined from the repository's graph or the workspace."
 #: Where chat attachments are served from; the only place an answer's image may load from.
 ATTACHMENT_PATH = "/chat/attachments/"
 
@@ -61,6 +61,8 @@ _REPEATED_CITATION_RE = re.compile(r"(\[c\d+\])(?:\s*\1)+")
 _CITATION_RE = re.compile(r"([ \t]*)\[(c\d+)\]")
 # a reference with the space before it, so removing one leaves no gap
 _SPACED_REF_RE = re.compile(r"[ \t]*\[(n\d+)\]")
+# a workspace record, `[r1]`, as loosely as models write it
+_RECORD_REF_RE = re.compile(r"([ \t]*)[\[【]\s*(r\d+)\s*[\]】]")
 _FENCE_RE = re.compile(r"(```[\s\S]*?(?:```|$))")
 _IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]\(\s*<?([^)\s>]*)>?(?:\s+[\"'][^\"'\n]*[\"'])?\s*\)")
 _LINK_RE = re.compile(r"(?<!!)\[([^\]\n]+)\]\([^)\n]*\)")
@@ -153,6 +155,8 @@ class GroundedAnswer:
     grounded: bool = True
     #: The question's @-mentions that exist in the graph.
     mentions: tuple[Citation, ...] = ()
+    #: The workspace records (tickets, pages, decisions) the answer cites as `[rN]`, as the lookups gave them.
+    records: tuple[dict, ...] = ()
     #: What was thrown away, for logging.
     dropped_refs: tuple[str, ...] = field(default=(), compare=False)
     dropped_code_refs: tuple[str, ...] = field(default=(), compare=False)
@@ -205,6 +209,19 @@ def ground(
         dropped_refs=tuple(ref for ref in cited if ref not in context.nodes),
         dropped_code_refs=dropped_code,
     )
+
+
+def cite_records(answer: str, records: dict[str, dict]) -> tuple[str, tuple[dict, ...]]:
+    """Keep `[rN]` only where a lookup gave that record out, written `[rN]`; the records cited, in order."""
+    cited: dict[str, dict] = {}
+
+    def cite(match: re.Match) -> str:
+        if match[2] not in records:
+            return ""
+        cited.setdefault(match[2], records[match[2]])
+        return f"{match[1]}[{match[2]}]"
+
+    return _outside_code(answer, lambda part: _RECORD_REF_RE.sub(cite, part)), tuple(cited.values())
 
 
 def _cite_code(context: GroundingContext, text: str) -> tuple[str, tuple[CodeCitation, ...], tuple[str, ...]]:
@@ -429,14 +446,18 @@ def _outside_code(text: str, change: Callable[[str], str]) -> str:
     return "".join(part if index % 2 else change(part) for index, part in enumerate(_FENCE_RE.split(text)))
 
 
-def plain_text(text: str, citations: Sequence[Citation], code_citations: Sequence[CodeCitation] = ()) -> str:
-    """An answer with its references spelled out as names, and its code citations as `(path:L42-58)`.
+def plain_text(
+    text: str, citations: Sequence[Citation], code_citations: Sequence[CodeCitation] = (), records: Sequence[dict] = (),
+) -> str:
+    """An answer with its references spelled out as names, its code citations as `(path:L42-58)` and its records as keys.
 
     References are only meaningful inside the context they came from, so an
     earlier answer goes back to the model as names, never as `[nX]` or `[cN]`.
     """
     where = {c.ref: clean(f"{c.path}:L{c.start_line}-{c.end_line}", 240) for c in code_citations}
     text = _CITATION_RE.sub(lambda match: f"{match[1]}({where[match[2]]})" if match[2] in where else "", text)
+    keys = {record["ref"]: clean(record["key"] or record["title"]) for record in records}
+    text = _RECORD_REF_RE.sub(lambda match: f"{match[1]}({keys[match[2]]})" if match[2] in keys else "", text)
     # names go back to the model, so they're escaped like anything else from the repo
     names = {citation.ref: clean(citation.name) for citation in citations}
 
