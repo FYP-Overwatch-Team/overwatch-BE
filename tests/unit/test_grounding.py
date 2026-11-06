@@ -127,6 +127,14 @@ def test_code_is_left_alone():
     assert safe_markdown(text) == text
 
 
+def test_dashes_between_words_become_commas_but_ranges_and_code_stay():
+    text = "app/ is routes only — thin pages, then auth – login. Lines 42–58 and `a — b` stay.\n\n```\nx — y\n```"
+
+    assert ground(CONTEXT, **reply(text)).text == (
+        "app/ is routes only, thin pages, then auth, login. Lines 42–58 and `a — b` stay.\n\n```\nx — y\n```"
+    )
+
+
 SHA = "a" * 40
 CODE = replace(
     CONTEXT,
@@ -249,7 +257,7 @@ def test_a_flow_is_split_into_its_steps():
 def test_loosely_written_steps_are_understood():
     result = ground(CONTEXT, **reply("Here.\n\n**Steps:**\n1) `login` [n1] — starts it\n2) [n2] ends it"))
 
-    assert [(step.ref, step.text) for step in result.steps] == [("n1", "`login` — starts it"), ("n2", "ends it")]
+    assert [(step.ref, step.text) for step in result.steps] == [("n1", "`login`, starts it"), ("n2", "ends it")]
 
 
 def test_a_step_without_a_known_node_joins_the_step_before():

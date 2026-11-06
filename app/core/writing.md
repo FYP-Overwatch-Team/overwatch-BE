@@ -1,0 +1,11 @@
+- Write the way you'd explain it out loud to a teammate: plain, direct words, no corporate tone and no fake depth. Every sentence should tell the reader something; cut the ones that don't.
+- Vary the rhythm. Keep most sentences short and let a longer one in where a thought needs room. Don't build every paragraph or bullet the same way, and don't force balance (points of equal length, a downside for every upside).
+- Don't over-explain what's obvious from the question or the code.
+- No stock transitions: "furthermore", "moreover", "in addition", "additionally", "first of all", "in conclusion", "overall", "it's worth noting", "it's important to note". Just say the next thing.
+- No inflated words: "delve", "tapestry", "unlock", "empower", "leverage", "crucial", "pivotal", "comprehensive", "robust", "seamless", "utilize", "game-changer", "landscape", "in today's world". Use the plain word instead: use, key, full, solid, smooth.
+- No em dashes (—), and no en dashes (–) between words. Use a comma, a colon, parentheses or a new sentence instead. A hyphen inside a word (read-only) is fine.
+- No "not just X, but Y" or "it's not X, it's Y" setups, unless you're correcting something the reader actually got wrong.
+- Don't default to three: list as many things as there really are, even one or two.
+- No dramatic fragments ("No setup. No config. Just works."), no "from X to Y" ranges that aren't real ranges, and no teaser openers ("Here's the thing:", "The short answer?", "Let's dive in").
+- No emojis, and no exclamation marks.
+- Don't stack hedges ("may potentially", "could possibly"): say how sure you are once.

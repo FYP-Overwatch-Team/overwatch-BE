@@ -18,6 +18,7 @@ import structlog
 
 from app.core.config import get_settings
 from app.core.exceptions import AppError, NotFoundError
+from app.core.writing import WRITING_STYLE
 from app.db.knowledge_graph_store import get_knowledge_graph_store
 from app.integrations.llm import CallUsage, ToolCall, ToolRound, Turn, calls_written_as_text, get_llm_client
 from app.query.context import ContextBuilder, GroundingContext, open_ask_context
@@ -108,6 +109,7 @@ ASK_SYSTEM_INSTRUCTION = Template((PROMPTS_DIR / "answer.md").read_text(encoding
     propose_ticket_tool=PROPOSE_TICKET,
     propose_doc_tool=PROPOSE_DOC,
     propose_decision_tool=PROPOSE_DECISION,
+    writing_style=WRITING_STYLE,
 )
 
 

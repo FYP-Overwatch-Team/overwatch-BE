@@ -63,6 +63,9 @@ _CITATION_RE = re.compile(r"([ \t]*)\[(c\d+)\]")
 _SPACED_REF_RE = re.compile(r"[ \t]*\[(n\d+)\]")
 # a workspace record, `[r1]`, as loosely as models write it
 _RECORD_REF_RE = re.compile(r"([ \t]*)[\[【]\s*(r\d+)\s*[\]】]")
+# a dash between words, which reads as machine-written; an unspaced en dash is a range (42–58) and stays
+_DASH_RE = re.compile(r"[ \t]*—[ \t]*|[ \t]+–[ \t]+")
+_INLINE_CODE_RE = re.compile(r"(`[^`\n]*`)")
 _FENCE_RE = re.compile(r"(```[\s\S]*?(?:```|$))")
 _IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]\(\s*<?([^)\s>]*)>?(?:\s+[\"'][^\"'\n]*[\"'])?\s*\)")
 _LINK_RE = re.compile(r"(?<!!)\[([^\]\n]+)\]\([^)\n]*\)")
@@ -176,7 +179,7 @@ def ground(
     `relations` are those the reply says the answer relies on; `may_ask` is False right
     after a question back: another one is written into the text instead.
     """
-    text = _outside_code(safe_markdown(answer.strip()), _canonical_refs)
+    text = _outside_code(safe_markdown(answer.strip()), lambda part: _canonical_refs(_no_dashes(part)))
     text, follow_ups, ask = _split_trailing(text)
     if ask and not may_ask:
         text, ask = f"{text}\n\n{ask.question}\n\n" + "\n".join(f"- {option}" for option in ask.options), None
@@ -439,6 +442,13 @@ def _canonical_code_refs(match: re.Match) -> str:
         source = range_[1] or source
         refs.append(f"[{source}:{range_[2]}-{range_[3]}]" if range_[3] else f"[{source}:{range_[2]}]")
     return "".join(refs)
+
+
+def _no_dashes(text: str) -> str:
+    """Em dashes, and en dashes between words, as commas; inline code is left alone."""
+    return "".join(
+        part if index % 2 else _DASH_RE.sub(", ", part) for index, part in enumerate(_INLINE_CODE_RE.split(text))
+    )
 
 
 def _outside_code(text: str, change: Callable[[str], str]) -> str:
