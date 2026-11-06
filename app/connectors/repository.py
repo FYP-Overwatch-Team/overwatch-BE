@@ -20,6 +20,11 @@ async def active_connection(workspace_id: str, provider: str) -> dict | None:
     return await mongo.connections().find_one({"workspace_id": workspace_id, "provider": provider, **ACTIVE})
 
 
+async def connection_for_account(provider: str, account_id: str) -> dict | None:
+    """The live connection to an external account (a Slack workspace), whichever Bearings workspace holds it."""
+    return await mongo.connections().find_one({"provider": provider, "external_account.id": account_id, **ACTIVE})
+
+
 async def list_connections(workspace_id: str) -> list[dict]:
     return [doc async for doc in mongo.connections().find({"workspace_id": workspace_id})]
 

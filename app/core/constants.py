@@ -18,6 +18,7 @@ class Provider(StrEnum):
     GITHUB = "github"
     JIRA = "jira"
     CONFLUENCE = "confluence"
+    SLACK = "slack"
 
 
 class CredentialGroup(StrEnum):
@@ -27,10 +28,14 @@ class CredentialGroup(StrEnum):
 
 
 class ConnectorCategory(StrEnum):
-    """What a connector mirrors: tracker tickets into `work_items`, or pages into `documents`."""
+    """What a connector brings in: tracker tickets into `work_items`, pages into `documents`, or chat it listens to.
+
+    Chat isn't mirrored or polled: the provider pushes messages as they're posted.
+    """
 
     WORK_ITEMS = "work_items"
     DOCUMENTS = "documents"
+    CHAT = "chat"
 
 
 # `work_items.source` for items created in Overwatch; tracker items carry their provider
@@ -288,10 +293,34 @@ class DecisionOrigin(StrEnum):
 
 
 class EvidenceKind(StrEnum):
-    """What a piece of evidence quotes: a board item or a docs page."""
+    """What a piece of evidence quotes: a board item, a docs page, or a chat conversation (a Slack thread)."""
 
     WORK_ITEM = "work_item"
     DOCUMENT = "document"
+    CHAT_THREAD = "chat_thread"
+
+
+class ChatQuestionStatus(StrEnum):
+    """Where a question raised in chat but not settled there stands."""
+
+    #: found, waiting for the next daily digest
+    PENDING = "pending"
+    #: listed in a digest, nobody has acted on it yet
+    POSTED = "posted"
+    #: someone said they'll settle it in the conversation
+    SETTLING = "settling"
+    #: someone made an open decision of it
+    TRACKED = "tracked"
+    #: the conversation went on to state a decision
+    SETTLED = "settled"
+    #: nobody acted on it in time
+    EXPIRED = "expired"
+    #: the message that raised it was deleted or edited away in the chat
+    WITHDRAWN = "withdrawn"
+
+
+# questions still waiting on someone; their conversation is kept for them
+ACTIVE_QUESTION_STATUSES = (ChatQuestionStatus.PENDING, ChatQuestionStatus.POSTED, ChatQuestionStatus.SETTLING)
 
 
 class EvidenceStance(StrEnum):

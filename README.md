@@ -56,6 +56,38 @@ scopes): `read:board-scope:jira-software`, `write:board-scope:jira-software`, `r
 `read:sprint:jira-software`, `write:sprint:jira-software`, `read:issue:jira-software`.
 Then set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`.
 
+### Slack
+
+Create an app at [api.slack.com/apps](https://api.slack.com/apps) (From scratch). Under **OAuth & Permissions**
+add the redirect URL `<APP_BASE_URL>/slack/callback` and the bot token scopes `channels:read`, `groups:read`,
+`channels:history`, `groups:history`, `chat:write`, `users:read` and `users:read.email`. Under **Event Subscriptions**,
+set the request URL to `<public API URL>/webhooks/slack/events` and subscribe to the bot events `message.channels`,
+`message.groups`, `app_uninstalled` and `tokens_revoked`. Under **Interactivity & Shortcuts**, turn interactivity on
+with the request URL `<public API URL>/webhooks/slack/interactions` (the daily digest's buttons). Under **Manage Distribution**, allow public distribution so other workspaces
+can install it. Then set `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` and `SLACK_SIGNING_SECRET` (all under
+**Basic Information**); while the first two are empty, Slack isn't offered under Integrations, and without the signing
+secret every event is rejected.
+
+Slack only redirects to HTTPS, and the browser must call the API on the same host the OAuth state cookie was set on, so
+locally both run on HTTPS: `APP_BASE_URL=https://localhost:8000` and `FRONTEND_ORIGIN=https://localhost:3000` with a
+[mkcert](https://github.com/FiloSottile/mkcert) certificate (`mkcert localhost`; `*.pem` is gitignored). Start the API with
+`--ssl-certfile localhost.pem --ssl-keyfile localhost-key.pem`, and the frontend with `next dev --experimental-https`
+using the same files. Slack can't reach `localhost` for events, so expose it with a tunnel
+(`cloudflared tunnel --url https://localhost:8000 --no-tls-verify`) and use the tunnel's address as the request URL.
+A watched channel's messages are only delivered once the bot is in it (`/invite @<app>`); the text is kept in
+`channel_messages` for three hours.
+
+Quiet conversations are read for decisions (proposed in Decisions) and for important questions left unsettled.
+Once a day, at the time an admin sets under Integrations → Slack (10:00 by default), the bot posts a digest in each
+watched channel: the unsettled questions, with buttons to track one as an open decision or settle it in the thread,
+and the decisions found since the last digest. Whoever clicks is matched to a Bearings member by their Slack email.
+A question nobody acts on expires after `SLACK_QUESTION_EXPIRY_DAYS` (3). Connections made before the digest existed
+lack its scopes and must be reconnected.
+
+A Slack workspace can be connected to one Bearings workspace at a time, and only channels the app has been invited to
+can be watched. Disconnecting gives the app's token back and deletes the chat Bearings held, except conversations a
+decision quotes; removing the app in Slack deletes those too.
+
 ### Email
 
 Sign-up codes, password resets and workspace invites are emailed. Locally `EMAIL_BACKEND=console` logs them
@@ -77,7 +109,7 @@ Return `WithMeta(data, meta)` to add pagination or counts.
 ```
 
 `code` mirrors the HTTP status; `meta` carries pagination, or `error_code` and `message` on errors.
-Only the OAuth callbacks (`/auth/github/callback`, `/jira/callback`) respond with redirects instead.
+Only the OAuth callbacks (`/auth/github/callback`, `/jira/callback`, `/slack/callback`) respond with redirects instead, and the Slack webhooks (`/webhooks/slack/events`, `/webhooks/slack/interactions`) answer Slack in the shape it expects.
 
 ## Tests
 

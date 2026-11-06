@@ -3,6 +3,9 @@ from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from app.core.config import get_settings
 from app.core.constants import NATIVE_SOURCE, SprintState, VectorSearch
 
+# how long chat text stays before Mongo deletes it: read for decisions within minutes, never archived
+CHANNEL_MESSAGE_TTL_SECONDS = 3 * 3600
+
 _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
 
@@ -205,6 +208,21 @@ def link_previews():
     return get_db()["link_previews"]
 
 
+def channel_messages():
+    """Chat messages from watched channels (Slack today), kept only until they've been read for decisions."""
+    return get_db()["channel_messages"]
+
+
+def chat_threads():
+    """Chat conversations a decision was found in, kept as its source after the messages themselves expire."""
+    return get_db()["chat_threads"]
+
+
+def chat_questions():
+    """Questions raised in a chat conversation but not settled there, listed in the channel's daily digest."""
+    return get_db()["chat_questions"]
+
+
 def embeddings():
     """One vector per work item, page or decision, from the configured embedding model."""
     return get_db()["embeddings"]
@@ -352,6 +370,23 @@ async def ensure_indexes() -> None:
     await llm_usage().create_index([("workspace_id", 1), ("created_at", -1)])
     await link_previews().create_index("expires_at", expireAfterSeconds=0)
     await webhook_deliveries().create_index("delivery_id", unique=True)
+    # a chat event names its Slack workspace (team), and is routed to the Bearings workspace connected to it
+    await connections().create_index([("provider", 1), ("external_account.id", 1)])
+    # one live Bearings workspace per Slack workspace: a second one could otherwise watch channels it isn't in
+    await connections().create_index(
+        [("external_account.id", 1)], unique=True, name="one_workspace_per_slack_team",
+        partialFilterExpression={"provider": "slack", "status": "active"},
+    )
+    # a message is stored once however often Slack redelivers it; chat text is kept only briefly
+    await channel_messages().create_index([("workspace_id", 1), ("channel", 1), ("ts", 1)], unique=True)
+    await channel_messages().create_index("received_at", expireAfterSeconds=CHANNEL_MESSAGE_TTL_SECONDS)
+    # an edit or delete in Slack finds the kept conversations its message is in
+    await chat_threads().create_index([("workspace_id", 1), ("channel", 1), ("messages.ts", 1)])
+    # a question is stored once per conversation however often the conversation is reread
+    await chat_questions().create_index([("workspace_id", 1), ("thread_ref", 1), ("fingerprint", 1)], unique=True)
+    await chat_questions().create_index([("workspace_id", 1), ("channel", 1), ("status", 1), ("created_at", 1)])
+    await chat_questions().create_index([("status", 1), ("expires_at", 1)])
+    await chat_questions().create_index([("status", 1), ("closed_at", 1)])
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)
     # last: an Atlas search index can fail where plain indexes don't (an M0 limit, say), and mustn't stop those
     if get_settings().vector_search == VectorSearch.ATLAS:

@@ -10,6 +10,7 @@ same text.
 """
 
 import re
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from app.decision_comments import service as decision_comments
 from app.realtime import topics
 from app.realtime.events import EventName, UnsubscribeReason
 from app.realtime.hub import get_hub
-from app.decisions import ai, leases, limits, mentions, overview, quotes, service
+from app.decisions import ai, chat_sources, leases, limits, mentions, overview, quotes, service
 from app.decisions.schemas import CONTEXT, QUOTE, STATEMENT, CreateDecision, NewEvidence
 from app.embeddings import service as embeddings
 
@@ -63,12 +64,31 @@ class Suggestion(BaseModel):
     quotes: list[Quote] = []
 
 
+class OpenQuestion(BaseModel):
+    """A question S1 raises but doesn't settle; only the chat prompt asks for these."""
+
+    question: str = Field(min_length=1, max_length=300)
+    quote: str = Field(**QUOTE)
+
+
 class Reply(BaseModel):
     decisions: list[Suggestion]
+    questions: list[OpenQuestion] = []
+
+#: what a caller does with the reply once its decisions are saved, given S1's text (e.g. keep its open questions)
+OnReply = Callable[[Reply, str], Awaitable[None]]
 
 
-async def suggest(member: dict, kind: EvidenceKind, ref_id: str) -> list[dict]:
-    """Draft the decisions one board item or page states, as `proposed` decisions quoting it."""
+async def suggest(
+    member: dict, kind: EvidenceKind, ref_id: str, *,
+    system: str = SYSTEM_INSTRUCTION, take_limit: Callable[[str], Awaitable[None]] = limits.take_suggestion,
+    on_reply: OnReply | None = None,
+) -> list[dict]:
+    """Draft the decisions one board item, page or chat conversation states, as `proposed` decisions quoting it.
+
+    `system` is the prompt for the kind of source (a chat reads differently from a ticket),
+    `take_limit` the daily limit the read counts against, and `on_reply` gets the whole reply.
+    """
     workspace_id = member["workspace_id"]
     source = (await service.sources(workspace_id, [(kind, ref_id)])).get((kind, ref_id))
     if source is None:
@@ -76,7 +96,7 @@ async def suggest(member: dict, kind: EvidenceKind, ref_id: str) -> list[dict]:
     key = {"workspace_id": workspace_id, "ref_id": ref_id}
     busy = ConflictError("Suggestions for this are already being drafted", error_code="suggest_in_progress")
     async with leases.lease(mongo.decision_scans(), key, LEASE, busy):
-        return await _suggest(member, kind, ref_id, source)
+        return await _suggest(member, kind, ref_id, source, system, take_limit, on_reply)
 
 
 async def _related(workspace_id: str, user_id: str, ref: Ref, text: str) -> list[Ref]:
@@ -87,7 +107,11 @@ async def _related(workspace_id: str, user_id: str, ref: Ref, text: str) -> list
         found += [(EvidenceKind.WORK_ITEM, linked["_id"]) for linked in await service.linked_items(workspace_id, item)]
     found += [named for named, _ in await mentions.named_in(workspace_id, text)]
     try:
-        vector = (await embeddings.refresh(workspace_id, user_id, EmbeddingKind(ref[0]), {ref[1]: text})).get(ref[1])
+        # only items and pages have embeddings; a chat finds its related sources by what it names
+        vector = (
+            (await embeddings.refresh(workspace_id, user_id, EmbeddingKind(ref[0]), {ref[1]: text})).get(ref[1])
+            if ref[0] in set(EmbeddingKind) else None
+        )
     except ExternalServiceError:
         logger.warning("decision_suggest_embeddings_unavailable", workspace_id=workspace_id)
         vector = None
@@ -136,14 +160,17 @@ async def _known(workspace_id: str, ref_ids: list[str]) -> set[tuple[str, str]]:
     return known
 
 
-async def _suggest(member: dict, kind: EvidenceKind, ref_id: str, source: dict) -> list[dict]:
+async def _suggest(
+    member: dict, kind: EvidenceKind, ref_id: str, source: dict, system: str, take_limit: Callable[[str], Awaitable[None]],
+    on_reply: OnReply | None,
+) -> list[dict]:
     workspace_id = member["workspace_id"]
     fingerprint = quotes.fingerprint(source["text"])
     scan = await mongo.decision_scans().find_one({"workspace_id": workspace_id, "ref_id": ref_id}) or {}
     if scan.get("fingerprint") == fingerprint:
         raise ConflictError("Nothing has changed here since it was last checked", error_code="source_unchanged")
 
-    await limits.take_suggestion(workspace_id)
+    await take_limit(workspace_id)
     related = await _related(workspace_id, member["user_id"], (kind, ref_id), source["text"])
     found = await service.sources(workspace_id, related) if related else {}
     # S1 is the source asked about; the related ones follow in order
@@ -155,7 +182,7 @@ async def _suggest(member: dict, kind: EvidenceKind, ref_id: str, source: dict) 
         for sid, (_, src) in sources.items()
     )
     reply = await ai.ask_json(
-        Reply, SYSTEM_INSTRUCTION, prompt, workspace_id=workspace_id, user_id=member["user_id"],
+        Reply, system, prompt, workspace_id=workspace_id, user_id=member["user_id"],
         feature=UsageFeature.DECISION_SUGGEST, timeout=TIMEOUT_SECONDS,
     )
     suggestions = reply.decisions[:MAX_SUGGESTIONS]
@@ -194,6 +221,8 @@ async def _suggest(member: dict, kind: EvidenceKind, ref_id: str, source: dict) 
         ]
         created.append(await service.create(member, body, DecisionOrigin.SUGGESTED, cited=cited))
     logger.info("decision_suggest", ref_id=ref_id, related=len(sources) - 1, suggested=len(suggestions), kept=len(created))
+    if on_reply is not None:
+        await on_reply(reply, source["text"])
 
     await mongo.decision_scans().update_one(
         {"workspace_id": workspace_id, "ref_id": ref_id},
@@ -221,3 +250,6 @@ async def dismiss(member: dict, decision_id: str) -> None:
             {"workspace_id": workspace_id, "ref_id": evidence["ref_id"]},
             {"$addToSet": {"dismissed_quotes": quotes.fingerprint(evidence["quote"])}}, upsert=True,
         )
+        # a kept chat conversation is only kept for the decisions, and open questions, found in it
+        if evidence["kind"] == EvidenceKind.CHAT_THREAD:
+            await chat_sources.release_if_unused(workspace_id, evidence["ref_id"])
