@@ -134,5 +134,6 @@ async def _uninstalled(team_id: str) -> None:
         await messages.delete_workspace(listener.workspace_id)
         # including the conversations kept for decisions: their evidence then shows the source is gone
         await mongo.chat_threads().delete_many({"workspace_id": listener.workspace_id, "provider": Provider.SLACK})
+        await mongo.chat_questions().delete_many({"workspace_id": listener.workspace_id, "provider": Provider.SLACK})
     _listeners.pop(team_id, None)
     logger.info("slack_app_uninstalled", team_id=team_id)

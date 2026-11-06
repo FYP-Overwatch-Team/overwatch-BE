@@ -32,6 +32,14 @@ Rules:
   Where the sources don't say, write "Not stated in the sources." instead of guessing.
 - Report at most 5 decisions, the most important first. Report none when there are none.
 
+Separately, list in `questions` the important questions S1 raises but does not settle: a product,
+technical, design or process choice someone asked about or proposed, that nobody agreed on and
+that the team would need to decide. Never list small talk, personal plans, greetings or questions
+answered later in S1 (an answered question is a decision, or nothing). `question` restates it as
+one short question; `quote` is the passage that raises it, copied word for word from S1 without
+the `person:` prefix. List at most 3, the most important first, and none when there are none.
+
 Reply with JSON only, no other text, in exactly this shape:
 {"decisions": [{"title": "...", "statement": "...", "background": "...", "meaning": "...",
-"example": "...", "pros": ["..."], "cons": ["..."], "quotes": [{"source": "S1", "text": "..."}]}]}
+"example": "...", "pros": ["..."], "cons": ["..."], "quotes": [{"source": "S1", "text": "..."}]}],
+"questions": [{"question": "...", "quote": "..."}]}

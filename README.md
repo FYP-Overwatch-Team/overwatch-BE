@@ -60,9 +60,10 @@ Then set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`.
 
 Create an app at [api.slack.com/apps](https://api.slack.com/apps) (From scratch). Under **OAuth & Permissions**
 add the redirect URL `<APP_BASE_URL>/slack/callback` and the bot token scopes `channels:read`, `groups:read`,
-`channels:history` and `groups:history`. Under **Event Subscriptions**, set the request URL to
-`<public API URL>/webhooks/slack/events` and subscribe to the bot events `message.channels`, `message.groups`,
-`app_uninstalled` and `tokens_revoked`. Under **Manage Distribution**, allow public distribution so other workspaces
+`channels:history`, `groups:history`, `chat:write`, `users:read` and `users:read.email`. Under **Event Subscriptions**,
+set the request URL to `<public API URL>/webhooks/slack/events` and subscribe to the bot events `message.channels`,
+`message.groups`, `app_uninstalled` and `tokens_revoked`. Under **Interactivity & Shortcuts**, turn interactivity on
+with the request URL `<public API URL>/webhooks/slack/interactions` (the daily digest's buttons). Under **Manage Distribution**, allow public distribution so other workspaces
 can install it. Then set `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` and `SLACK_SIGNING_SECRET` (all under
 **Basic Information**); while the first two are empty, Slack isn't offered under Integrations, and without the signing
 secret every event is rejected.
@@ -75,6 +76,13 @@ using the same files. Slack can't reach `localhost` for events, so expose it wit
 (`cloudflared tunnel --url https://localhost:8000 --no-tls-verify`) and use the tunnel's address as the request URL.
 A watched channel's messages are only delivered once the bot is in it (`/invite @<app>`); the text is kept in
 `channel_messages` for three hours.
+
+Quiet conversations are read for decisions (proposed in Decisions) and for important questions left unsettled.
+Once a day, at the time an admin sets under Integrations → Slack (10:00 by default), the bot posts a digest in each
+watched channel: the unsettled questions, with buttons to track one as an open decision or settle it in the thread,
+and the decisions found since the last digest. Whoever clicks is matched to a Bearings member by their Slack email.
+A question nobody acts on expires after `SLACK_QUESTION_EXPIRY_DAYS` (3). Connections made before the digest existed
+lack its scopes and must be reconnected.
 
 ### Email
 

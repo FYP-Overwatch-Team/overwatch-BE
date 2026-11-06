@@ -218,6 +218,11 @@ def chat_threads():
     return get_db()["chat_threads"]
 
 
+def chat_questions():
+    """Questions raised in a chat conversation but not settled there, listed in the channel's daily digest."""
+    return get_db()["chat_questions"]
+
+
 def embeddings():
     """One vector per work item, page or decision, from the configured embedding model."""
     return get_db()["embeddings"]
@@ -372,6 +377,10 @@ async def ensure_indexes() -> None:
     await channel_messages().create_index("received_at", expireAfterSeconds=CHANNEL_MESSAGE_TTL_SECONDS)
     # an edit or delete in Slack finds the kept conversations its message is in
     await chat_threads().create_index([("workspace_id", 1), ("channel", 1), ("messages.ts", 1)])
+    # a question is stored once per conversation however often the conversation is reread
+    await chat_questions().create_index([("workspace_id", 1), ("thread_ref", 1), ("fingerprint", 1)], unique=True)
+    await chat_questions().create_index([("workspace_id", 1), ("channel", 1), ("status", 1), ("created_at", 1)])
+    await chat_questions().create_index([("status", 1), ("expires_at", 1)])
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)
     # last: an Atlas search index can fail where plain indexes don't (an M0 limit, say), and mustn't stop those
     if get_settings().vector_search == VectorSearch.ATLAS:

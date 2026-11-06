@@ -32,9 +32,13 @@ OAUTH = OAuthConfig(
     client_auth="basic_form",
 )
 
-# bot scopes: listing the public channels and the private ones the bot was invited to, and reading
-# their messages (delivered as events; the bot only hears channels it's a member of)
-SCOPES = ("channels:read", "groups:read", "channels:history", "groups:history")
+# bot scopes: listing the public channels and the private ones the bot was invited to, reading their
+# messages (delivered as events; the bot only hears channels it's a member of), posting the daily
+# digest there, and reading the email of someone who clicks a digest button, to find them in Bearings
+SCOPES = (
+    "channels:read", "groups:read", "channels:history", "groups:history",
+    "chat:write", "users:read", "users:read.email",
+)
 
 # the install or its token is gone: only reconnecting helps
 REVOKED_ERRORS = {"invalid_auth", "not_authed", "token_revoked", "token_expired", "account_inactive"}
@@ -56,7 +60,7 @@ class SlackAdapter:
         channels: list[dict] = []
         cursor = ""
         for _ in range(MAX_CHANNEL_PAGES):
-            body = await _call(auth, conn, "conversations.list", {
+            body = await _call(auth, conn, "conversations.list", params={
                 "types": "public_channel,private_channel",
                 "exclude_archived": "true",
                 "limit": CHANNELS_PAGE_SIZE,
@@ -71,10 +75,28 @@ class SlackAdapter:
                 break
         return sorted(channels, key=lambda channel: channel["name"])
 
+    async def post_message(self, auth: AuthBackend, conn: dict, channel: str, text: str, blocks: list[dict]) -> str:
+        """Post as the app's bot in a channel it's in; returns the message's ts. `text` is the notification fallback."""
+        body = await _call(auth, conn, "chat.postMessage", json={
+            "channel": channel, "text": text, "blocks": blocks, "unfurl_links": False, "unfurl_media": False,
+        })
+        return body["ts"]
 
-async def _call(auth: AuthBackend, conn: dict, method: str, params: dict) -> dict:
-    """One Web API call for a connection; a revoked install marks the connection to reconnect."""
-    body = _read(await auth.request(conn, "GET", f"{API_BASE}/{method}", params=params), method)
+    async def user_email(self, auth: AuthBackend, conn: dict, user_id: str) -> str | None:
+        """A Slack member's email, which Slack has verified; None for bots and members without one."""
+        body = await _call(auth, conn, "users.info", params={"user": user_id})
+        user = body.get("user") or {}
+        email = (user.get("profile") or {}).get("email")
+        return None if user.get("is_bot") or not email else email.strip().lower()
+
+
+async def _call(auth: AuthBackend, conn: dict, method: str, *, params: dict | None = None, json: dict | None = None) -> dict:
+    """One Web API call for a connection (a JSON POST when `json` is given); a revoked install marks it to reconnect."""
+    if json is None:
+        resp = await auth.request(conn, "GET", f"{API_BASE}/{method}", params=params)
+    else:
+        resp = await auth.request(conn, "POST", f"{API_BASE}/{method}", json=json, headers={"Content-Type": "application/json; charset=utf-8"})
+    body = _read(resp, method)
     if body.get("ok"):
         return body
     error = body.get("error")

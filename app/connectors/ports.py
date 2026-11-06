@@ -168,3 +168,9 @@ class ChatSource(Protocol):
 
     async def list_targets(self, auth: AuthBackend, conn: dict) -> list[dict]:
         """Channels the app can see, to pick which to listen to: [{key, name, id}]."""
+
+    async def post_message(self, auth: AuthBackend, conn: dict, channel: str, text: str, blocks: list[dict]) -> str:
+        """Post as the app in a channel; returns the message's id there. `text` is what notifications show."""
+
+    async def user_email(self, auth: AuthBackend, conn: dict, user_id: str) -> str | None:
+        """A chat member's verified email, lower-cased, to find them in Bearings; None when there's none."""

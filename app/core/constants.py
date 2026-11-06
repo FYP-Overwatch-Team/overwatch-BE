@@ -300,6 +300,27 @@ class EvidenceKind(StrEnum):
     CHAT_THREAD = "chat_thread"
 
 
+class ChatQuestionStatus(StrEnum):
+    """Where a question raised in chat but not settled there stands."""
+
+    #: found, waiting for the next daily digest
+    PENDING = "pending"
+    #: listed in a digest, nobody has acted on it yet
+    POSTED = "posted"
+    #: someone said they'll settle it in the conversation
+    SETTLING = "settling"
+    #: someone made an open decision of it
+    TRACKED = "tracked"
+    #: the conversation went on to state a decision
+    SETTLED = "settled"
+    #: nobody acted on it in time
+    EXPIRED = "expired"
+
+
+# questions still waiting on someone; their conversation is kept for them
+ACTIVE_QUESTION_STATUSES = (ChatQuestionStatus.PENDING, ChatQuestionStatus.POSTED, ChatQuestionStatus.SETTLING)
+
+
 class EvidenceStance(StrEnum):
     SUPPORTS = "supports"
     CONTRADICTS = "contradicts"

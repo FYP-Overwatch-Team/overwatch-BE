@@ -26,8 +26,10 @@ from app.github.webhooks import router as webhooks_router
 from app.graph.router import router as graph_router
 from app.jira.router import router as jira_router
 from app.slack import decisions as slack_decisions
+from app.slack import digest as slack_digest
 from app.slack import messages as slack_messages
 from app.slack.events import router as slack_events_router
+from app.slack.interactions import router as slack_interactions_router
 from app.slack.router import router as slack_router
 from app.link_previews.router import router as link_previews_router
 from app.onboarding.router import router as onboarding_router
@@ -123,6 +125,16 @@ async def _slack_decisions_loop(tick_seconds: int) -> None:
             structlog.get_logger("app.slack").exception("slack_decisions_loop_error")
 
 
+async def _slack_digest_loop(tick_seconds: int) -> None:
+    """Expire unsettled Slack questions and post the daily digests whose time has come."""
+    while True:
+        await asyncio.sleep(tick_seconds)
+        try:
+            await slack_digest.run_due()
+        except Exception:
+            structlog.get_logger("app.slack").exception("slack_digest_loop_error")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     mongo.connect()
@@ -167,11 +179,13 @@ async def lifespan(app: FastAPI):
     merge_task = asyncio.create_task(_merge_loop())
     slack_messages_task = asyncio.create_task(_slack_messages_loop())
     slack_decisions_task = asyncio.create_task(_slack_decisions_loop(get_settings().slack_decision_tick_seconds))
+    slack_digest_task = asyncio.create_task(_slack_digest_loop(get_settings().slack_digest_tick_seconds))
     decision_check_task = asyncio.create_task(_decision_check_loop(get_settings().decision_check_tick_seconds))
     yield
     decision_check_task.cancel()
     slack_messages_task.cancel()
     slack_decisions_task.cancel()
+    slack_digest_task.cancel()
     try:
         # what's still in memory would be lost with the process: Slack doesn't resend acknowledged events
         await slack_messages.buffer.flush()
@@ -213,6 +227,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(jira_router)
     app.include_router(slack_router)
     app.include_router(slack_events_router)
+    app.include_router(slack_interactions_router)
     app.include_router(onboarding_router)
     app.include_router(graph_router)
     app.include_router(webhooks_router)

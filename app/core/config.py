@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # against chat_daily_budget), and how often it looks for conversations that went quiet
     slack_decision_scans_per_day: int = 20
     slack_decision_tick_seconds: int = 300
+    # how long a question raised in Slack but not settled waits for someone to act on it, and how often the
+    # daily digests (each workspace picks its own time) are looked for
+    slack_question_expiry_days: int = 3
+    slack_digest_tick_seconds: int = 300
 
     # the AI chat's model: any OpenAI-compatible chat API (Groq, OpenRouter, DeepSeek...)
     model_api_key: str = ""

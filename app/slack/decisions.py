@@ -9,8 +9,11 @@ read and unchanged since is skipped for free.
 The read is the Decisions suggest flow (`app.decisions.suggest`), with a prompt for chat: what it
 finds is saved as `proposed`, quotes checked word for word, exactly as for a ticket. A Decisions
 source has to stay readable for as long as its decision lives, so the conversation is copied to
-`chat_threads` as that source, and the copy is kept only if a decision was found in it; every other
-conversation expires with its messages.
+`chat_threads` as that source, and the copy is kept only while a decision or an unsettled question
+found in it uses it (`app.decisions.chat_sources`); every other conversation expires with its messages.
+
+The same read lists important questions the conversation raised but didn't settle; they're kept for
+the channel's daily digest (`app.slack.questions`, `app.slack.digest`).
 """
 
 import uuid
@@ -29,8 +32,10 @@ from app.core.exceptions import AppError, ConflictError, ExternalServiceError
 from app.core.rate_limit import Window, take_all
 from app.core.time import utcnow
 from app.db import mongo
-from app.decisions import quotes, suggest
+from app.decisions import chat_sources, quotes, suggest
 from app.decisions.checks import SYSTEM_USER
+from app.decisions.suggest import Reply
+from app.slack import questions
 
 logger = structlog.get_logger("app.slack")
 
@@ -156,11 +161,17 @@ async def _read(workspace_id: str, workspace_url: str | None, channel_name: str,
     scan = await mongo.decision_scans().find_one({"workspace_id": workspace_id, "ref_id": ref_id}, {"fingerprint": 1}) or {}
     if scan.get("fingerprint") == quotes.fingerprint(text):
         return 0  # read before and nothing new was said
-    await _keep(workspace_id, ref_id, channel_name, workspace_url, conversation, text)
+    external_url = permalink(workspace_url, conversation.channel, conversation.first_ts)
+    await _keep(workspace_id, ref_id, channel_name, external_url, conversation, text)
+    started = utcnow()
+
+    async def keep_questions(reply: Reply, source_text: str) -> None:
+        await questions.keep_from_reply(workspace_id, conversation.channel, ref_id, external_url, reply, source_text)
+
     try:
         created = await suggest.suggest(
             {"workspace_id": workspace_id, "user_id": SYSTEM_USER}, EvidenceKind.CHAT_THREAD, ref_id,
-            system=CHAT_PROMPT, take_limit=take_scan,
+            system=CHAT_PROMPT, take_limit=take_scan, on_reply=keep_questions,
         )
     except ConflictError:
         return 0  # another read holds it (and its copy) right now, or it's unchanged
@@ -171,19 +182,22 @@ async def _read(workspace_id: str, workspace_url: str | None, channel_name: str,
     except AppError:
         await _release_if_unused(workspace_id, ref_id)
         raise  # out of reads for today: the caller stops
+    if created:
+        # a question asked earlier in this conversation has now been answered by a decision
+        await questions.settle_conversation(workspace_id, ref_id, started)
     await _release_if_unused(workspace_id, ref_id)
     logger.info("slack_decisions_suggested", workspace_id=workspace_id, channel=conversation.channel, count=len(created))
     return len(created)
 
 
 async def _keep(
-    workspace_id: str, ref_id: str, channel_name: str, workspace_url: str | None, conversation: Conversation, text: str,
+    workspace_id: str, ref_id: str, channel_name: str, external_url: str | None, conversation: Conversation, text: str,
 ) -> None:
     now = utcnow()
     await mongo.chat_threads().update_one({"_id": ref_id}, {
         "$set": {
             "workspace_id": workspace_id, "provider": Provider.SLACK, "channel": conversation.channel,
-            "title": f"Slack {channel_name}", "external_url": permalink(workspace_url, conversation.channel, conversation.first_ts),
+            "title": f"Slack {channel_name}", "external_url": external_url,
             "messages": [{"ts": m.ts, "user": m.user, "text": m.text} for m in conversation.messages],
             "text": text, "updated_at": now,
         },
@@ -192,9 +206,7 @@ async def _keep(
 
 
 async def _release_if_unused(workspace_id: str, ref_id: str) -> None:
-    """Drop the copy unless a decision rests on it: only conversations a decision came from are kept."""
-    if not await mongo.decisions().find_one({"workspace_id": workspace_id, "evidence.ref_id": ref_id}, {"_id": 1}):
-        await mongo.chat_threads().delete_one({"_id": ref_id})
+    await chat_sources.release_if_unused(workspace_id, ref_id)
 
 
 async def follow_edit(workspace_id: str, channel: str, ts: str, text: str | None) -> None:
