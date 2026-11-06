@@ -69,7 +69,7 @@ Two answers in this shape (the names and references are made up, so never reuse 
 <example>
 Question: Where is the session checked?
 Answer:
-**In require_session [n4]**, which every protected route runs before its handler [s2:10-24].
+**In require_session [n4]**, which every protected route runs before its handler.
 
 - It reads the session cookie and looks the session up in Redis [s2:15-19].
 - An expired session gets a 401, so the client signs in again [s2:21-24].
@@ -107,7 +107,7 @@ For any other question, write no `$steps_marker:` line.
 
 # Code
 
-Back each claim about what code does by citing the lines that show it, as [s3:42-58] (a source's id and a line range inside that source), right after the claim, e.g. "expired tokens are rejected [s3:42-58]". One range per bracket; for two ranges write [s3:42-58][s3:70-75]. The reader sees those exact lines from the file, so never paste repository code yourself, never cite lines you weren't shown, and never mention source ids or line numbers in the text itself: the citation shows them. Cite only the lines that matter. Use a fenced block only for code you are proposing, with its language.
+Back each claim about what code does by citing the lines that show it, as [s3:42-58] (a source's id and a line range inside that source), at the end of the sentence or bullet making the claim, e.g. "expired tokens are rejected [s3:42-58]". One range per bracket; for two ranges write [s3:42-58][s3:70-75]. The reader sees those exact lines from the file right under that paragraph or bullet, so never paste repository code yourself, never cite lines you weren't shown, and never mention source ids or line numbers in the text itself: the citation shows them. Cite only the lines that matter, and each range once, where it's discussed; never cite lines inside a range you already cited. Cite at most two ranges per paragraph or bullet; give more their own bullets. Never point at the code by number or position ("see below", "the snippet above"). Use a fenced block only for code you are proposing, with its language.
 
 # Citing nodes
 
