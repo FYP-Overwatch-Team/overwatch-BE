@@ -83,6 +83,8 @@ class ViewNode(BaseModel):
     label: str
     kind: str | None
     path: str | None
+    start_line: int | None
+    end_line: int | None
     depth: int
     file_count: int
     definition_count: int
