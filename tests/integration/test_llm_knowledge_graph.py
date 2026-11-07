@@ -19,6 +19,7 @@ from app.query.context import (
 from app.integrations.llm import ToolCall
 from app.query.grounding import CANNOT_DETERMINE, ground
 from app.query.tools import ALREADY_LOOKED_UP, GREP_CODE, NO_CODE, READ_CODE, SEARCH_GRAPH, Lookups
+from tests.fakes import written
 from tests.git_fixtures import commit_all
 from app.db.knowledge_graph_store import (
     InMemoryKnowledgeGraphStore,
@@ -361,6 +362,74 @@ async def test_answer_refuses_a_relationship_the_graph_lacks(graph, fake_llm):
 
     assert not result.grounded
     assert result.text == CANNOT_DETERMINE
+    assert len(fake_llm.calls) == 2  # written once more without it, which claimed it again
+
+
+async def test_answer_is_written_again_without_a_relationship_the_graph_lacks(graph, fake_llm):
+    context = await build_ask_context(graph, REPO, "what does handle_login call?")
+    handler, helper = ref_of(context, HANDLER), ref_of(context, HELPER)
+    fake_llm.replies = [
+        written({"answer": "Backwards.", "relations": [{"source": helper, "type": "calls", "target": handler}]}),
+        written({"answer": f"handle_login [{handler}] calls verify_password [{helper}].",
+                 "relations": [{"source": handler, "type": "calls", "target": helper}]}),
+    ]
+
+    events = [event async for event in grounding.answer_stream(REPO, "what does handle_login call?")]
+
+    result = events[-1].result
+    assert result.grounded
+    assert result.text.startswith("handle_login")
+    # the reader never saw the first reply, only that it's being checked
+    assert not any(isinstance(event, grounding.AnswerText) and "Backwards" in event.text for event in events)
+    assert grounding.Looking(grounding.REWRITING) in events
+    rewrite = fake_llm.calls[-1]
+    assert f"[{helper}] --calls--> [{handler}]" in rewrite["closing"]
+    assert grounding.OR_ASK_BACK in rewrite["closing"]
+    assert rewrite["tool_choice"] == "none"
+
+
+async def test_a_rewrite_never_offers_to_ask_back_right_after_a_question_back(graph, fake_llm):
+    context = await build_ask_context(graph, REPO, "what does handle_login call?")
+    handler, helper = ref_of(context, HANDLER), ref_of(context, HELPER)
+    fake_llm.json_response = {"answer": "x", "relations": [{"source": helper, "type": "calls", "target": handler}]}
+
+    await answer(REPO, "what does handle_login call?", may_ask=False)
+
+    assert grounding.OR_ASK_BACK not in fake_llm.calls[-1]["closing"]
+
+
+async def test_answer_refuses_without_a_rewrite_when_the_budget_is_spent(graph, fake_llm):
+    context = await build_ask_context(graph, REPO, "what does handle_login call?")
+    handler, helper = ref_of(context, HANDLER), ref_of(context, HELPER)
+    fake_llm.json_response = {"answer": "x", "relations": [{"source": helper, "type": "calls", "target": handler}]}
+
+    async def spent() -> bool:
+        return False
+
+    result = await answer(REPO, "what does handle_login call?", before_extra_model_call=spent)
+
+    assert result.text == CANNOT_DETERMINE
+    assert len(fake_llm.calls) == 1
+
+
+async def test_answer_accepts_a_relationship_the_graph_has_though_it_was_not_shown(graph, fake_llm):
+    context = await build_ask_context(graph, REPO, "what does handle_login call?")
+    module, file_ref = ref_of(context, MODULE), ref_of(context, FILE)
+    claimed = Relation(module, "contains", file_ref)
+    assert not context.supports(claimed)
+    fake_llm.json_response = {"answer": f"api [{module}] holds handlers.py [{file_ref}].",
+                              "relations": [{"source": module, "type": "contains", "target": file_ref}]}
+
+    result = await answer(REPO, "what does handle_login call?")
+
+    assert result.grounded
+    assert len(fake_llm.calls) == 1
+
+
+async def test_an_overview_question_is_shown_the_folder_tree(graph):
+    context = await build_ask_context(graph, REPO, "how is the code structured?")
+
+    assert context.supports(Relation(ref_of(context, MODULE), "contains", ref_of(context, FILE)))
 
 
 async def test_answer_sends_the_conversation_so_far(graph, fake_llm):

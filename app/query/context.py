@@ -35,7 +35,8 @@ from app.knowledge_graph.build.ids import module_id, module_of, repository_id
 from app.knowledge_graph.build.model import EdgeType, NodeLabel
 from app.knowledge_graph.ports import KnowledgeGraphStore
 from app.knowledge_graph.redaction import redact_lines
-from app.query.retrieval import BUDGETS, merge_hits, route_of
+from app.knowledge_graph.view.model import SYNTHETIC_KINDS
+from app.query.retrieval import BUDGETS, is_overview, merge_hits, route_of
 from app.query.source import Snippet, find_in_code, language_of, prompt_line, read_snippet
 
 #: Hard ceilings on what one prompt may carry.
@@ -305,6 +306,8 @@ async def open_ask_context(
         *best_matches[:budget.seeds],
     ]
     holders = [
+        # "how is it structured?": the top folders and what they hold, so the model never guesses the nesting
+        *(_top_folders(view) if is_overview(question, mentioned) else ()),
         *open_folder_ids[:MAX_OPEN_FOLDERS],
         *(focus.detail["id"] for focus in (selected, *focused) if focus and _holds(focus.detail["labels"])),
         *(row["id"] for row in matched if _holds(row.get("labels", []))),
@@ -486,6 +489,11 @@ async def _follow_flow(store: KnowledgeGraphStore, repo: str, seeds: Sequence[di
     return reached
 
 
+def _top_folders(view: dict) -> list[str]:
+    """The repository's top-level folders, leaving out made-up groupings like external dependencies."""
+    return [node["id"] for node in view["nodes"] if node.get("kind") not in SYNTHETIC_KINDS]
+
+
 async def _subtree(store: KnowledgeGraphStore, repo: str, root_ids: list[str]) -> list[dict]:
     return await store.subtree(repo, root_ids, limit=MAX_CONTENTS) if root_ids else []
 
@@ -614,12 +622,29 @@ class ContextBuilder:
         source, target = self.refs.get(edge["source"]), self.refs.get(edge["target"])
         if source is None or target is None:
             return
-        relation = Relation(source, edge["type"].lower(), target)
-        self.lines.append(_Line(
+        self.lines.append(self._edge_line(Relation(source, edge["type"].lower(), target), suffix))
+
+    def _edge_line(self, relation: Relation, suffix: str = "") -> _Line:
+        source, target = relation.source, relation.target
+        return _Line(
             f"- [{source}] {self.names[source]} --{relation.type}--> [{target}] {self.names[target]}{suffix}",
             (source, target),
             relation,
-        ))
+        )
+
+    async def confirm(self, store: KnowledgeGraphStore, relations: Sequence[Relation]) -> list[Relation]:
+        """Of relationships claimed between nodes shown, keep those the graph has, as if shown; the rest come back.
+
+        The model often states an edge it can infer but wasn't shown (a folder inside its parent);
+        the graph, not the prompt, is what an answer must agree with.
+        """
+        edges = {
+            relation: (self.node_of(relation.source), relation.type.upper(), self.node_of(relation.target))
+            for relation in relations
+        }
+        found = await store.existing_edges(self.repo, [edge for edge in edges.values() if None not in edge])
+        self.looked_up += [self._edge_line(relation) for relation, edge in edges.items() if edge in found]
+        return [relation for relation, edge in edges.items() if edge not in found]
 
     def add_focus(self, heading: str, focus: _Focus, around_heading: str | None = None) -> None:
         """A node and one or two hops around it: what it uses and what uses it."""

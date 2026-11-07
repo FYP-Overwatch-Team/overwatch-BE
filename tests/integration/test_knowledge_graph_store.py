@@ -284,6 +284,22 @@ async def test_neighbours_stay_inside_the_repository(store):
     assert result == {"nodes": [], "edges": []}
 
 
+async def test_existing_edges_are_those_the_repository_has(store):
+    await store.apply(detail_delta())
+    await store.apply(detail_delta(OTHER_REPO))
+    api, file_id = module_id(REPO, "api"), f"{REPO}:api/handlers.py"
+
+    found = await store.existing_edges(REPO, [
+        (api, "CONTAINS", file_id),
+        (file_id, "CONTAINS", api),  # backwards
+        (api, "CALLS", file_id),  # another type
+        (module_id(OTHER_REPO, "api"), "CONTAINS", f"{OTHER_REPO}:api/handlers.py"),  # another repository
+    ])
+
+    assert found == {(api, "CONTAINS", file_id)}
+    assert await store.existing_edges(REPO, []) == set()
+
+
 async def test_search_matches_symbols_and_files_by_name(store):
     await store.apply(detail_delta())
 

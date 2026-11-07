@@ -21,7 +21,7 @@ from app.core.exceptions import AppError, NotFoundError
 from app.core.writing import WRITING_STYLE
 from app.db.knowledge_graph_store import get_knowledge_graph_store
 from app.integrations.llm import CallUsage, ToolCall, ToolRound, Turn, calls_written_as_text, get_llm_client
-from app.query.context import ContextBuilder, GroundingContext, clean, open_ask_context
+from app.query.context import ContextBuilder, GroundingContext, Relation, clean, open_ask_context
 from app.query.grounding import (
     ASK_MARKER,
     CANNOT_DETERMINE,
@@ -71,6 +71,16 @@ ANSWER_NOW = (
     "That's all the looking up there's room for. Answer now from what you've found, in the reply "
     "format, and say briefly what you couldn't check."
 )
+#: Sent once, instead of refusing, when a reply claims relationships the graph doesn't have.
+REWRITE_WITHOUT = (
+    "Your reply claimed relationships the graph doesn't have:\n$relations\n"
+    "Write the reply again in the reply format, without them and without anything that depended on them. "
+    "Claim only relationships you were shown."
+)
+#: Added to `REWRITE_WITHOUT` when a question back is allowed.
+OR_ASK_BACK = " If you're not sure what the reader means, ask them instead (see Asking back)."
+#: Shown while the answer is written again.
+REWRITING = "Checking the answer against the graph"
 #: When even that reply is only lookups, which happens when a model writes calls as text.
 LOOKUPS_RAN_OUT = (
     "I looked through the code but ran out of room before writing the answer. Try asking about "
@@ -151,6 +161,13 @@ class Answered:
 AnswerEvent = Started | Thinking | Looking | AnswerText | Answered
 
 
+@dataclass(frozen=True, slots=True)
+class _Unsupported:
+    """The reply's header claims relationships the context didn't show; the graph is checked next."""
+
+    relations: tuple[Relation, ...]
+
+
 async def answer_stream(
     repo_full_name: str | None,
     question: str,
@@ -223,12 +240,14 @@ async def answer_stream(
     looking_until = time.monotonic() + LOOKING_SECONDS
     rounds: list[ToolRound] = []
     looked = 0
+    #: set once a reply claimed relationships the graph lacks: the one rewrite's instruction
+    rewrite = ""
     while True:
         # look further only while there's room for it; after that the model must answer
-        looking = looked < max_lookups and time.monotonic() < looking_until and builder.lookup_room > 0
+        looking = not rewrite and looked < max_lookups and time.monotonic() < looking_until and builder.lookup_room > 0
         # every call after the first is charged, the one that must answer too; a spent budget
-        # still lets that answer be written from what was found
-        if rounds and before_extra_model_call and not await before_extra_model_call() and looking:
+        # still lets that answer be written from what was found (a rewrite was charged already)
+        if rounds and not rewrite and before_extra_model_call and not await before_extra_model_call() and looking:
             logger.info("llm_lookups_stopped_by_budget", repo=repo_full_name, lookups=looked)
             looking = False
         reader = ReplyReader()
@@ -239,8 +258,9 @@ async def answer_stream(
         stream = get_llm_client().stream_text(
             ASK_SYSTEM_INSTRUCTION, prompt, history=history, timeout=ANSWER_TIMEOUT_SECONDS,
             tools=tools, rounds=rounds, tool_choice="auto" if looking else "none",
-            closing="" if looking or not rounds else ANSWER_NOW, session=session, on_usage=on_usage,
+            closing=rewrite or ("" if looking or not rounds else ANSWER_NOW), session=session, on_usage=on_usage,
         )
+        unsupported: list[Relation] = []
         try:
             async for item in stream:
                 if isinstance(item, ToolCall):
@@ -258,12 +278,28 @@ async def answer_stream(
                     answering, text_in = True, "".join(held)
                 else:
                     text_in = item.text
-                for event in _read(reader, text_in, context, repo_full_name):
+                for event in _read(reader, text_in, context):
+                    if isinstance(event, _Unsupported):
+                        unsupported = await builder.confirm(store, event.relations)
+                        context = builder.build()
+                        if unsupported:
+                            break
+                        continue
                     yield event
-                    if isinstance(event, Answered):
-                        return
+                if unsupported:
+                    break
         finally:
             await stream.aclose()
+
+        if unsupported:
+            # one rewrite without them beats refusing a whole answer over a few wrong edges
+            if rewrite or (before_extra_model_call and not await before_extra_model_call()):
+                yield Answered(_refused(repo_full_name, context, unsupported))
+                return
+            logger.info("llm_answer_rewritten", repo=repo_full_name, relations=_described(unsupported))
+            rewrite = _rewrite_instruction(unsupported, may_ask=may_ask)
+            yield Looking(REWRITING)
+            continue
 
         if not answering and not calls:
             # some models write their calls into the text instead; they count as calls
@@ -289,10 +325,14 @@ async def answer_stream(
         if calls:
             logger.warning("llm_lookups_ignored", repo=repo_full_name, calls=[call.name for call in calls])
         if not answering and held:
-            for event in _read(reader, "".join(held), context, repo_full_name):
+            for event in _read(reader, "".join(held), context):
+                if isinstance(event, _Unsupported):
+                    if unsupported := await builder.confirm(store, event.relations):
+                        yield Answered(_refused(repo_full_name, builder.build(), unsupported))
+                        return
+                    context = builder.build()
+                    continue
                 yield event
-                if isinstance(event, Answered):
-                    return
         break
 
     if text := reader.finish():
@@ -305,8 +345,12 @@ async def answer_stream(
 
     if looked:
         logger.info("llm_lookups", repo=repo_full_name, lookups=looked, rounds=len(rounds), repeats=lookups.repeats)
-    # relationships stated after the answer (models misplace the header) are checked here instead
+    # relationships stated after the answer (models misplace the header) are checked here instead;
+    # the text is out by then, so those the graph has count and any others refuse it
     context = builder.build()
+    if claimed := [relation for relation in reader.relations if not context.supports(relation)]:
+        await builder.confirm(store, claimed)
+        context = builder.build()
     answer_text, records = cite_records(answer_text, workspace.records if workspace else {})
     result = ground(context, answer_text, answerable=reader.answerable, relations=reader.relations, may_ask=may_ask)
     yield Answered(_checked(repo_full_name, context, replace(result, records=records)))
@@ -317,14 +361,26 @@ def _starts_reply(text: str) -> bool:
     return bool(_REPLY_START_RE.match(text))
 
 
-def _read(reader: ReplyReader, text: str, context: GroundingContext, repo_full_name: str) -> list[AnswerEvent]:
-    """Feed reply text on: the answer so far, or a refusal as soon as the header claims an edge the context lacks."""
+def _read(reader: ReplyReader, text: str, context: GroundingContext) -> list[AnswerEvent | _Unsupported]:
+    """Feed reply text on: the answer so far, after the header's claims the context lacks, to check first."""
     was_reading_header = not reader.header_read
     shown = reader.feed(text)
+    events: list[AnswerEvent | _Unsupported] = []
     if was_reading_header and reader.header_read:
-        if unsupported := [r for r in reader.relations if not context.supports(r)]:
-            return [Answered(_refused(repo_full_name, context, unsupported))]
-    return [AnswerText(shown)] if shown else []
+        if unsupported := tuple(r for r in reader.relations if not context.supports(r)):
+            events.append(_Unsupported(unsupported))
+    return [*events, AnswerText(shown)] if shown else events
+
+
+def _described(relations: Sequence[Relation]) -> list[str]:
+    return [f"{r.source} --{r.type}--> {r.target}" for r in relations]
+
+
+def _rewrite_instruction(relations: Sequence[Relation], *, may_ask: bool) -> str:
+    """What the rewrite is told: each wrong relationship by reference (names come from code, so they stay
+    in the fenced context), and whether it may ask back instead."""
+    lines = "\n".join(f"- [{r.source}] --{r.type}--> [{r.target}]" for r in relations)
+    return Template(REWRITE_WITHOUT).substitute(relations=lines) + (OR_ASK_BACK if may_ask else "")
 
 
 def _checked(repo_full_name: str, context: GroundingContext, result: GroundedAnswer) -> GroundedAnswer:
@@ -339,10 +395,7 @@ def _checked(repo_full_name: str, context: GroundingContext, result: GroundedAns
 
 
 def _refused(repo_full_name: str, context: GroundingContext, unsupported: list) -> GroundedAnswer:
-    logger.warning(
-        "llm_unsupported_relations_refused", repo=repo_full_name,
-        relations=[f"{r.source} --{r.type}--> {r.target}" for r in unsupported],
-    )
+    logger.warning("llm_unsupported_relations_refused", repo=repo_full_name, relations=_described(unsupported))
     return GroundedAnswer(CANNOT_DETERMINE, grounded=False, mentions=_mentions(context), unsupported=tuple(unsupported))
 
 

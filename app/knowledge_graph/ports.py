@@ -105,6 +105,11 @@ class KnowledgeGraphStore(Protocol):
     ) -> dict:
         """What a node references and what references it."""
 
+    async def existing_edges(
+        self, repo_full_name: str, edges: Sequence[tuple[str, str, str]],
+    ) -> set[tuple[str, str, str]]:
+        """Which of these `(source id, edge type, target id)` edges the repository's graph has."""
+
     async def follow(
         self,
         repo_full_name: str,

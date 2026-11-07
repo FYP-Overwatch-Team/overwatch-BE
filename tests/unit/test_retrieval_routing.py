@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.query.retrieval import BUDGETS, Route, merge_hits, route_of
+from app.query.retrieval import BUDGETS, Route, is_overview, merge_hits, route_of
 
 
 @pytest.mark.parametrize("question", [
@@ -30,6 +30,25 @@ def test_a_plain_question_goes_to_meaning_search(question):
 
 def test_a_mention_goes_to_keyword_search():
     assert route_of("how does this work", ["acme/api:app.py#run"]) == Route.KEYWORD
+
+
+@pytest.mark.parametrize("question", [
+    "how is the code structured in this repo?",
+    "how is this project organised",
+    "give me an overview of the architecture",
+    "what folders are there",
+])
+def test_a_question_about_the_whole_layout_is_an_overview(question):
+    assert is_overview(question)
+
+
+@pytest.mark.parametrize(("question", "mentioned"), [
+    ("how is the SignupForm structured", ()),  # names code
+    ("how is this structured", ("acme/api:app.py#run",)),  # about what's mentioned
+    ("how does a user sign up", ()),
+])
+def test_a_question_about_one_part_is_not_an_overview(question, mentioned):
+    assert not is_overview(question, mentioned)
 
 
 def rows(*ids: str) -> list[dict]:

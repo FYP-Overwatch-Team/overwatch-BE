@@ -494,6 +494,22 @@ class Neo4jKnowledgeGraphStore:
             "edges": sorted(edges.values(), key=lambda e: (e["source"], e["target"], e["type"])),
         }
 
+    async def existing_edges(
+        self, repo_full_name: str, edges: Sequence[tuple[str, str, str]],
+    ) -> set[tuple[str, str, str]]:
+        if not edges:
+            return set()
+        rows = await self._store.run(
+            f"""
+            UNWIND $edges AS e
+            MATCH (a:{BASE_LABEL} {{id: e[0], repo: $repo}})-[r]->(b:{BASE_LABEL} {{id: e[2], repo: $repo}})
+            WHERE type(r) = e[1]
+            RETURN DISTINCT e[0] AS source, e[1] AS type, e[2] AS target
+            """,
+            repo=repo_full_name, edges=[list(edge) for edge in edges],
+        )
+        return {(row["source"], row["type"], row["target"]) for row in rows}
+
     async def follow(
         self,
         repo_full_name: str,
@@ -881,6 +897,15 @@ class InMemoryKnowledgeGraphStore:
             "properties": properties,
             "children": children,
         }
+
+    async def existing_edges(
+        self, repo_full_name: str, edges: Sequence[tuple[str, str, str]],
+    ) -> set[tuple[str, str, str]]:
+        stored = {
+            (edge["source"], edge["type"], edge["target"])
+            for edge in self.edges.values() if edge["repo"] == repo_full_name
+        }
+        return {edge for edge in edges if edge in stored}
 
     async def subtree(
         self, repo_full_name: str, root_ids: Sequence[str], *, limit: int = 100,

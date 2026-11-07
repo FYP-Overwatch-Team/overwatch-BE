@@ -65,6 +65,17 @@ def route_of(question: str, mentioned_node_ids: Sequence[str] = ()) -> Route:
     return Route.MEANING
 
 
+#: Words for how the whole codebase is laid out, rather than one part of it.
+OVERVIEW_PATTERN = re.compile(
+    r"\b(?:structur\w*|organi[sz]\w*|architecture|layout|laid out|overview|folders?)\b", re.IGNORECASE,
+)
+
+
+def is_overview(question: str, mentioned_node_ids: Sequence[str] = ()) -> bool:
+    """A question about the codebase's overall shape, naming no code: its folder tree answers it best."""
+    return route_of(question, mentioned_node_ids) == Route.MEANING and bool(OVERVIEW_PATTERN.search(question))
+
+
 def merge_hits(route: Route, keyword: Sequence[dict], meaning: Sequence[dict], keyword_share: int, meaning_share: int) -> list[dict]:
     """Both searches' hits in one order: the leading search's share, the other's share, then the rest.
 
