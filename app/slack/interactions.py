@@ -116,7 +116,11 @@ async def _track(payload: dict, question: dict, slack_user: str, user_id: str) -
     except (NotFoundError, FieldValidationError):
         # the message it quotes was deleted or edited in Slack since: there's nothing to track any more
         await mongo.chat_questions().update_one({"_id": question["_id"]}, {"$set": {"status": question["status"]}})
-        await questions.withdraw_unquoted(question["workspace_id"], question["thread_ref"], None)
+        # checked against what the conversation says now: its other questions may still stand
+        thread = await mongo.chat_threads().find_one(
+            {"_id": question["thread_ref"], "workspace_id": question["workspace_id"]}, {"text": 1},
+        )
+        await questions.withdraw_unquoted(question["workspace_id"], question["thread_ref"], thread and thread["text"])
         return _only_you("The message this question came from was changed or deleted in Slack, so it can't be tracked.")
     except Exception:
         # put it back, so it can be tried again

@@ -19,12 +19,12 @@ from app.slack import decisions as slack_decisions
 from app.slack import digest, events, messages, questions
 from app.slack.decisions import Message, conversations, thread_id
 from tests.integration.test_slack_connection import CHANNELS_URL, connect, slack
-from tests.integration.test_slack_decisions import CHANNEL, SETTLED, post, reply
+from tests.integration.test_slack_decisions import CHANNEL, SETTLED, decision, post, reply
 from tests.integration.test_slack_digest import (
     UNSETTLED, answer_in_thread, only_question, press, read_unsettled, send_digest,
 )
 from tests.integration.test_slack_digest import workspace as workspace  # noqa: F401  (fixture)
-from tests.integration.test_workspaces import user
+from tests.integration.test_workspaces import bearer, in_workspace, team, user
 
 REVOKE_URL = "https://slack.com/api/auth.revoke"
 POST_URL = "https://slack.com/api/chat.postMessage"
@@ -46,11 +46,26 @@ async def test_a_slack_workspace_connects_to_one_bearings_workspace_at_a_time(cl
     second = await connect(client, bob)
 
     assert first.headers["location"].endswith(f"slack=connected&w={alice['X-Workspace-Id']}")
-    assert second.headers["location"].endswith("/settings/integrations?slack=error")
+    # the admin is told why, not just that it failed
+    assert second.headers["location"].endswith("/settings/integrations?slack=taken")
     assert await slack(client, bob) is not None and (await slack(client, bob))["status"] == "disconnected"
     # a reconnect by the workspace that holds it still works
     assert (await connect(client, alice)).headers["location"].endswith("slack=connected&w=" + alice["X-Workspace-Id"])
 
+
+
+async def test_deleting_a_workspace_frees_its_slack_workspace(client, slack_app):
+    alice = await user(client, "alice")
+    acme = await team(client, alice)
+    await connect(client, in_workspace(alice, acme))
+
+    with respx.mock as router:
+        revoke = router.get(REVOKE_URL).mock(return_value=Response(200, json={"ok": True, "revoked": True}))
+        deleted = await client.delete(f"/workspaces/{acme}", headers=bearer(alice))
+    elsewhere = await connect(client, in_workspace(alice, await team(client, alice, "Other")))
+
+    assert (deleted.status_code, len(revoke.calls)) == (200, 1)  # its bot token is given back
+    assert "slack=connected" in elsewhere.headers["location"]
 
 async def test_only_channels_the_app_is_in_can_be_watched(client, slack_app):
     alice = await user(client, "alice")
@@ -241,12 +256,33 @@ async def test_disconnect_gives_the_token_back_and_forgets_the_chat_but_not_deci
     assert await mongo.chat_threads().count_documents({}) == 1
 
 
-async def test_an_uninstall_after_disconnect_still_drops_everything(client, fake_llm, workspace):  # noqa: F811
+async def test_slacks_answer_to_a_disconnect_keeps_what_decisions_quote(client, fake_llm, workspace):  # noqa: F811
     workspace_id = workspace["X-Workspace-Id"]
     await post(workspace_id, SETTLED)
     fake_llm.stream_response = reply(("Sessions last 7 days", "OK, 7 days then"))
     await slack_decisions.scan_workspace(workspace_id)
-    await connections.disconnect(workspace_id, "slack")
+    made = await mongo.decisions().find_one({})
+
+    async def revoked(request):
+        # Slack reports the app removed (tokens_revoked, app_uninstalled) for the token we give back,
+        # and those events can land before the revoke call has even returned
+        await events._uninstalled("T0ACME")
+        return Response(200, json={"ok": True, "revoked": True})
+
+    with respx.mock as router:
+        router.get(REVOKE_URL).mock(side_effect=revoked)
+        await client.delete("/connections/slack", headers=workspace)
+    await events._uninstalled("T0ACME")
+
+    assert await mongo.chat_threads().count_documents({}) == 1
+    assert (await decision(client, workspace, made["_id"]))["evidence"][0]["state"] == "current"
+
+
+async def test_removing_the_app_in_slack_drops_even_what_decisions_quote(fake_llm, workspace):  # noqa: F811
+    workspace_id = workspace["X-Workspace-Id"]
+    await post(workspace_id, SETTLED)
+    fake_llm.stream_response = reply(("Sessions last 7 days", "OK, 7 days then"))
+    await slack_decisions.scan_workspace(workspace_id)
 
     await events._uninstalled("T0ACME")
 

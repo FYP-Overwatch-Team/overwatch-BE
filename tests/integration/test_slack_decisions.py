@@ -134,6 +134,40 @@ async def test_a_conversation_still_going_or_unwatched_is_left_alone(fake_llm, w
     assert fake_llm.calls == []
 
 
+
+async def test_a_late_reply_to_an_old_thread_keeps_what_was_found_in_it(client, fake_llm, workspace):
+    workspace_id = workspace["X-Workspace-Id"]
+    await post(workspace_id, SETTLED)
+    fake_llm.stream_response = reply(("Sessions last 7 days", "OK, 7 days then"))
+    await slack_decisions.scan_workspace(workspace_id)
+    made = await mongo.decisions().find_one({})
+    await mongo.channel_messages().delete_many({})  # hours pass: the thread's messages expire
+    late = [("U0CAROL", "late to this, why 7?", 0), ("U0BOB", "shared laptops", 0), ("U0CAROL", "fair", 0)]
+    await mongo.channel_messages().insert_many([
+        {"workspace_id": workspace_id, "channel": CHANNEL, "ts": ts(60 + i), "user": user, "text": text,
+         "thread_ts": ts(0), "received_at": utcnow()}
+        for i, (user, text, _) in enumerate(late)
+    ])
+    fake_llm.stream_response = reply()
+
+    await slack_decisions.scan_workspace(workspace_id)
+
+    assert len(fake_llm.calls) == 2  # the late replies were read
+    copy = await mongo.chat_threads().find_one({"_id": made["evidence"][0]["ref_id"]})
+    assert [m["text"] for m in copy["messages"]] == [text for _, text, _ in SETTLED + late]
+    # the conversation grew but still says what was quoted, as an edited ticket would (not quote_missing)
+    assert (await decision(client, workspace, made["_id"]))["evidence"][0]["state"] == "changed"
+
+
+async def test_a_spent_ai_budget_pauses_the_reads_like_an_outage(fake_llm, workspace, monkeypatch):
+    monkeypatch.setenv("CHAT_DAILY_BUDGET", "0")
+    get_settings.cache_clear()
+    await post(workspace["X-Workspace-Id"], SETTLED)
+
+    with pytest.raises(slack_decisions.AIUnavailable):
+        await slack_decisions.scan_workspace(workspace["X-Workspace-Id"])
+    assert fake_llm.calls == []
+
 async def test_edits_and_deletes_in_slack_reach_the_decisions_evidence(client, fake_llm, workspace):
     workspace_id = workspace["X-Workspace-Id"]
     stamps = await post(workspace_id, SETTLED)

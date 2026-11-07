@@ -93,9 +93,6 @@ class Conversation:
         discussion = len(self.messages) >= MIN_MESSAGES and len({m.user for m in self.messages}) >= MIN_PEOPLE
         return quiet and discussion and any(m.read_ref is None for m in self.messages)
 
-    def text(self) -> str:
-        return "\n".join(f"{m.user}: {m.text}" for m in self.messages)
-
 
 def conversations(channel: str, messages: list[Message]) -> list[Conversation]:
     """A channel's messages as conversations: each thread, then runs of messages outside threads."""
@@ -211,6 +208,9 @@ async def scan_workspace(workspace_id: str, workspace_url: str | None = None) ->
             if exc.error_code == "rate_limited":
                 logger.info("slack_decision_scan_limited", workspace_id=workspace_id)
                 break
+            if exc.error_code in OUTAGE_ERRORS:
+                # the AI's daily budget is spent, for every workspace: the same pause as an outage
+                raise AIUnavailable from exc
             raise
     return suggested
 
@@ -218,12 +218,12 @@ async def scan_workspace(workspace_id: str, workspace_url: str | None = None) ->
 async def _read(
     workspace_id: str, workspace_url: str | None, channel_name: str, conversation: Conversation, ref_id: str, scan: dict,
 ) -> int:
-    text = conversation.text()
+    messages, text = await _with_kept(workspace_id, ref_id, conversation)
     if scan.get("fingerprint") == quotes.fingerprint(text):
         await _mark_read(workspace_id, conversation, ref_id)  # read before and nothing new was said
         return 0
     external_url = permalink(workspace_url, conversation.channel, conversation.root)
-    await _keep(workspace_id, ref_id, channel_name, external_url, conversation, text)
+    await _keep(workspace_id, ref_id, channel_name, external_url, conversation.channel, messages, text)
     # asked before this read: a decision it finds settles these, never the questions it finds itself
     asked = await questions.open_in(workspace_id, ref_id)
 
@@ -273,16 +273,29 @@ async def _failed(workspace_id: str, conversation: Conversation, ref_id: str, sc
     await mongo.decision_scans().update_one({"workspace_id": workspace_id, "ref_id": ref_id}, {"$set": update}, upsert=True)
 
 
+async def _with_kept(workspace_id: str, ref_id: str, conversation: Conversation) -> tuple[list[dict], str]:
+    """The conversation with the messages its kept copy still holds, oldest first, and its text.
+
+    A late reply to an old thread arrives after its first messages expired: what a decision found earlier
+    quotes lives on only in the copy, so the copy is added to, never replaced. Edits and deletes reach the
+    copy through `follow_edit`.
+    """
+    kept = await mongo.chat_threads().find_one({"_id": ref_id, "workspace_id": workspace_id}, {"messages": 1}) or {}
+    merged = {m["ts"]: m for m in kept.get("messages", [])}
+    merged |= {m.ts: {"ts": m.ts, "user": m.user, "text": m.text} for m in conversation.messages}
+    messages = sorted(merged.values(), key=lambda m: float(m["ts"]))
+    return messages, "\n".join(f"{m['user']}: {m['text']}" for m in messages)
+
+
 async def _keep(
-    workspace_id: str, ref_id: str, channel_name: str, external_url: str | None, conversation: Conversation, text: str,
+    workspace_id: str, ref_id: str, channel_name: str, external_url: str | None, channel: str, messages: list[dict], text: str,
 ) -> None:
     now = utcnow()
     await mongo.chat_threads().update_one({"_id": ref_id}, {
         "$set": {
-            "workspace_id": workspace_id, "provider": Provider.SLACK, "channel": conversation.channel,
+            "workspace_id": workspace_id, "provider": Provider.SLACK, "channel": channel,
             "title": f"Slack {channel_name}", "external_url": external_url,
-            "messages": [{"ts": m.ts, "user": m.user, "text": m.text} for m in conversation.messages],
-            "text": text, "updated_at": now,
+            "messages": messages, "text": text, "updated_at": now,
         },
         "$setOnInsert": {"created_at": now},
     }, upsert=True)

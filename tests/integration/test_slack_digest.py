@@ -155,6 +155,31 @@ async def test_a_question_found_with_a_decision_stays_open(fake_llm, workspace):
     assert (await only_question())["status"] == "pending"
 
 
+
+async def test_a_question_that_cant_be_tracked_leaves_the_threads_other_questions(client, fake_llm, workspace):
+    workspace_id = workspace["X-Workspace-Id"]
+    await post(workspace_id, [
+        ("U0ALICE", "Should billing use Postgres or Mongo?", None),
+        ("U0BOB", "Should we cache sessions in Redis?", 0),
+        ("U0ALICE", "let's think about both", 0),
+    ])
+    fake_llm.stream_response = reply(open_questions=(
+        ("Postgres or Mongo for billing?", "Should billing use Postgres or Mongo?"),
+        ("Redis for sessions?", "Should we cache sessions in Redis?"),
+    ))
+    await slack_decisions.scan_workspace(workspace_id)
+    billing, redis = [q async for q in mongo.chat_questions().find({}).sort("created_at", 1)]
+    await send_digest(workspace_id)
+    thread = {"_id": billing["thread_ref"]}
+    # the billing question was edited away in Slack; the Redis one still stands
+    await mongo.chat_threads().update_one(thread, {"$set": {"text": "U0BOB: Should we cache sessions in Redis?"}})
+
+    _, answer = await press(client, "question_create", billing["_id"])
+
+    assert "changed or deleted" in answer["text"]
+    statuses = {q["_id"]: q["status"] async for q in mongo.chat_questions().find({})}
+    assert statuses == {billing["_id"]: "withdrawn", redis["_id"]: "posted"}
+
 @pytest.mark.parametrize(("settings", "sent_on", "at_utc", "due"), [
     ({}, None, "10:05", "2026-11-07"),
     ({}, None, "09:55", None),  # not 10:00 yet
@@ -168,6 +193,18 @@ def test_the_digest_is_due_once_a_day_at_the_workspaces_time(settings, sent_on, 
     now = datetime(2026, 11, 7, hour, minute, tzinfo=timezone.utc)
 
     assert digest.due_day({"digest": settings, "digest_sent_on": sent_on}, now) == due
+
+
+@pytest.mark.parametrize(("connected", "time", "due"), [
+    ("18:20", "10:00", None),  # connected after today's time: the first digest is tomorrow's
+    ("18:20", "18:55", "2026-11-07"),  # a time later today still comes today
+    ("09:00", "10:00", "2026-11-07"),
+])
+def test_connecting_after_the_digest_time_waits_for_the_next_one(connected, time, due):
+    hour, minute = map(int, connected.split(":"))
+    conn = {"digest": {"time": time}, "connected_at": datetime(2026, 11, 7, hour, minute, tzinfo=timezone.utc)}
+
+    assert digest.due_day(conn, datetime(2026, 11, 7, 19, 0, tzinfo=timezone.utc)) == due
 
 
 async def test_the_digest_lists_questions_with_buttons_once_a_day(fake_llm, workspace):

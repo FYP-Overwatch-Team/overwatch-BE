@@ -43,7 +43,8 @@ def set_state_cookie(response: Response, provider: str, state: str) -> None:
 
 
 async def oauth_callback(credential: str, request: Request, state: str, code: str | None, error: str | None) -> RedirectResponse:
-    """Lands back where the flow started with ?{provider}=connected|denied|error.
+    """Lands back where the flow started with ?{provider}=connected|denied|taken|error; `taken` means the
+    account is already connected to another Bearings workspace.
 
     One callback per OAuth app; the state says which of its products was being connected.
     """
@@ -65,10 +66,10 @@ async def oauth_callback(credential: str, request: Request, state: str, code: st
             outcome = "connected"
         except AppError as exc:
             logger.warning("oauth_callback_failed", provider=provider, workspace_id=workspace_id, error_code=exc.error_code, reason=str(exc))
-            outcome = "error"
+            outcome = "taken" if exc.error_code == "account_already_connected" else "error"
 
     landing = LANDING.get(return_to, LANDING["onboarding"]).format(provider=provider)
-    query = f"{provider}={outcome}" + (f"&w={workspace_id}" if outcome != "error" else "")
+    query = f"{provider}={outcome}" + (f"&w={workspace_id}" if outcome in ("connected", "denied") else "")
     response = RedirectResponse(f"{get_settings().frontend_origin}{landing}?{query}")
     response.delete_cookie(_state_cookie(credential), path=registry.get(provider).oauth.redirect_path)
     return response

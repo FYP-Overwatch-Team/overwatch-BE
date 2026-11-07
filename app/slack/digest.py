@@ -61,7 +61,9 @@ def due_day(conn: dict, now: datetime) -> str | None:
     """The day (where the workspace is) whose digest is due now, or None.
 
     That's today once its time has passed, or yesterday if its time passed less than `CATCH_UP` ago
-    (a digest set for 23:58 is caught at 00:01), and only if that day's digest wasn't sent.
+    (a digest set for 23:58 is caught at 00:01), and only if that day's digest wasn't sent. A day whose
+    time had passed before Slack was connected isn't due: the first digest is at the next time it's set to,
+    not straight away (and empty) on connecting, which would also use up that day's.
     """
     settings = settings_of(conn)
     if not settings["enabled"]:
@@ -79,6 +81,9 @@ def due_day(conn: dict, now: datetime) -> str | None:
     elif local - slot(today - timedelta(days=1)) <= CATCH_UP:
         day = today - timedelta(days=1)
     else:
+        return None
+    connected_at = conn.get("connected_at")
+    if connected_at is not None and slot(day) < connected_at:
         return None
     return None if conn.get("digest_sent_on") == day.isoformat() else day.isoformat()
 

@@ -151,12 +151,14 @@ async def _read_listeners(team_id: str) -> list[Listener]:
 
 
 async def _uninstalled(team_id: str) -> None:
-    """The app was removed from the Slack workspace: ask for a reconnect, and drop everything held from it.
+    """The app was removed from the Slack workspace: ask for a reconnect, and drop everything held from it,
+    including the conversations kept for decisions (their evidence then shows the source is gone).
 
-    That includes workspaces that had already disconnected, and the conversations kept for decisions:
-    their evidence then shows the source is gone.
+    Only a live connection is wiped. Disconnecting in Bearings revokes the token, and Slack answers that
+    with these same events; by then the workspace has already cleaned up, keeping on purpose the
+    conversations its decisions quote.
     """
-    query = {"provider": Provider.SLACK, "external_account.id": team_id}
+    query = {"provider": Provider.SLACK, "external_account.id": team_id, **ACTIVE}
     for workspace_id in {conn["workspace_id"] async for conn in mongo.connections().find(query, {"workspace_id": 1})}:
         await oauth_tokens.set_status(workspace_id, Provider.SLACK, ConnectionStatus.NEEDS_REAUTH)
         await cleanup.forget_workspace(workspace_id, keep_decision_sources=False)

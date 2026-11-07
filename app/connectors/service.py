@@ -128,6 +128,9 @@ def _claimed(connector) -> ConflictError:
 async def disconnect(workspace_id: str, provider: str) -> None:
     connector = registry.get(provider)
     conn = await repository.active_connection(workspace_id, provider)
+    # marked disconnected before the revoke: the provider then reports the app removed (Slack sends
+    # tokens_revoked and app_uninstalled), and that must find nothing live left to wipe
+    await repository.disconnect(workspace_id, provider)
     if conn and connector.category == ConnectorCategory.CHAT:
         try:
             await connector.adapter.revoke(registry.auth_for(conn), conn)
@@ -136,7 +139,6 @@ async def disconnect(workspace_id: str, provider: str) -> None:
             logger.warning("connector_revoke_failed", provider=provider, error_code=exc.error_code)
     if connector.on_disconnect is not None:
         await connector.on_disconnect(workspace_id)
-    await repository.disconnect(workspace_id, provider)
     # a shared token stays while another product still uses it
     if not any([await repository.active_connection(workspace_id, p) for p in registry.siblings(provider)]):
         if connector.category == ConnectorCategory.CHAT:
@@ -144,6 +146,13 @@ async def disconnect(workspace_id: str, provider: str) -> None:
         else:
             await oauth_tokens.set_status(workspace_id, connector.credential, ConnectionStatus.DISCONNECTED)
 
+
+async def disconnect_chat(workspace_id: str) -> None:
+    """Disconnect the workspace's chat connections (when the workspace is deleted): the token is revoked and
+    the chat dropped, and the chat workspace is free to connect to another Bearings workspace."""
+    for provider, connector in registry.CONNECTORS.items():
+        if connector.category == ConnectorCategory.CHAT and await repository.active_connection(workspace_id, provider):
+            await disconnect(workspace_id, provider)
 
 async def require_connection(workspace_id: str, provider: str) -> dict:
     registry.get(provider)

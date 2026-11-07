@@ -84,9 +84,10 @@ and the decisions found since the last digest. Whoever clicks is matched to a Be
 A question nobody acts on expires after `SLACK_QUESTION_EXPIRY_DAYS` (3). Connections made before the digest existed
 lack its scopes and must be reconnected.
 
-A Slack workspace can be connected to one Bearings workspace at a time, and only channels the app has been invited to
-can be watched. Disconnecting gives the app's token back and deletes the chat Bearings held, except conversations a
-decision quotes; removing the app in Slack deletes those too.
+A Slack workspace can be connected to one Bearings workspace at a time (deleting a workspace disconnects its Slack),
+and only channels the app has been invited to can be watched. Disconnecting gives the app's token back and deletes the
+chat Bearings held, except conversations a decision quotes; removing the app in Slack while it's connected deletes
+those too.
 
 ### Email
 
