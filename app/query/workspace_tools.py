@@ -30,6 +30,7 @@ from app.core.links import decision_href, document_href, work_item_href
 from app.db import mongo
 from app.github import repository as repos
 from app.query.context import clean, escape
+from app.query.grounding import safe_markdown
 from app.sprints import repository as sprints
 from app.work_items import service as work_items
 from app.workspaces import repository as workspaces
@@ -336,10 +337,11 @@ class Workspace:
         if len(self.drafts) >= MAX_DRAFTS:
             return f"error: at most {MAX_DRAFTS} drafts per answer"
         title = " ".join(str(args.get("title") or "").split())[:MAX_DRAFT_TITLE_CHARS]
-        statement = str(statement or "").strip()[:MAX_STATEMENT_CHARS]
+        # once approved it's a record shown with clickable links, so it's cleaned like an answer
+        statement = safe_markdown(str(statement or "").strip()[:MAX_STATEMENT_CHARS])
         if not title or (kind == ChatRecordKind.DECISION and not statement):
             return "error: give it a title" + (" and a statement" if kind == ChatRecordKind.DECISION else "")
-        fields = {"title": title, "body": str(body or "").strip()[:MAX_DRAFT_BODY_CHARS], "statement": statement}
+        fields = {"title": title, "body": safe_markdown(str(body or "").strip()[:MAX_DRAFT_BODY_CHARS]), "statement": statement}
         self.drafts.append({"kind": kind, "fields": fields})
         return DRAFTED
 

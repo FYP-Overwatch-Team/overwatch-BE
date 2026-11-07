@@ -13,9 +13,9 @@ from datetime import datetime, timedelta
 from app.core.config import get_settings
 from app.core.constants import UsageFeature
 from app.core.exceptions import AppError
-from app.core.rate_limit import Window, take_one
+from app.core.rate_limit import Window, check_all, take_one
 from app.core.time import utcnow
-from app.usage.allowance import take_action
+from app.usage.allowance import month_window, take_action
 
 
 def member_hourly_key(workspace_id: str, user_id: str, now: datetime) -> str:
@@ -34,17 +34,26 @@ def daily_budget(now: datetime) -> Window:
     )
 
 
-async def take(workspace_id: str, user_id: str) -> None:
-    """Count one question against the month and every limit, or raise without counting any."""
+def _windows(workspace_id: str, user_id: str, now: datetime) -> list[Window]:
     settings = get_settings()
-    now = utcnow()
-    await take_action(workspace_id, user_id, UsageFeature.CHAT, [
+    return [
         Window(member_hourly_key(workspace_id, user_id, now), settings.chat_user_hourly_limit, now + timedelta(hours=2),
                AppError("You've asked a lot of questions this hour; try again later", error_code="rate_limited", status_code=429)),
         Window(workspace_daily_key(workspace_id, now), settings.chat_workspace_daily_limit, now + timedelta(days=2),
                AppError("This workspace has reached today's question limit", error_code="rate_limited", status_code=429)),
         daily_budget(now),
-    ])
+    ]
+
+
+async def check(workspace_id: str, user_id: str) -> None:
+    """Raise as `take` would, counting nothing: so a refused question costs no work before it's charged."""
+    now = utcnow()
+    await check_all([month_window(workspace_id, now), *_windows(workspace_id, user_id, now)])
+
+
+async def take(workspace_id: str, user_id: str) -> None:
+    """Count one question against the month and every limit, or raise without counting any."""
+    await take_action(workspace_id, user_id, UsageFeature.CHAT, _windows(workspace_id, user_id, utcnow()))
 
 
 async def take_model_call() -> bool:

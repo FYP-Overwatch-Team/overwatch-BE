@@ -19,12 +19,16 @@ from app.knowledge_graph.build.model import (
     NodeLabel,
 )
 from app.db.knowledge_graph_store import (
+    BASE_LABEL,
     InMemoryKnowledgeGraphStore,
     Neo4jKnowledgeGraphStore,
 )
+from app.knowledge_graph.search_text import SEARCH_PROPERTIES
 
 REPO = "octocat/hello-world"
 OTHER_REPO = "someone-else/private"
+#: a name that contains REPO's, which a careless repository filter would mix up
+NEAR_REPO = "octocat/hello-world-v2"
 
 
 def module_node(repo: str, name: str, kind: str = "module", **properties) -> GraphNode:
@@ -84,10 +88,11 @@ async def store(request):
     driver = await _neo4j_store()
     graph_store = Neo4jKnowledgeGraphStore(driver)
     await graph_store.ensure_schema()
-    for repo in (REPO, OTHER_REPO):
+    await driver.run("CALL db.awaitIndexes(60)")  # a new full-text index fills in the background
+    for repo in (REPO, OTHER_REPO, NEAR_REPO):
         await graph_store.delete_repository(repo)
     yield graph_store
-    for repo in (REPO, OTHER_REPO):
+    for repo in (REPO, OTHER_REPO, NEAR_REPO):
         await graph_store.delete_repository(repo)
     await driver.close()
 
@@ -277,6 +282,22 @@ async def test_neighbours_stay_inside_the_repository(store):
     result = await store.neighbours(REPO, module_id(OTHER_REPO, "api"), depth=2)
 
     assert result == {"nodes": [], "edges": []}
+
+
+async def test_existing_edges_are_those_the_repository_has(store):
+    await store.apply(detail_delta())
+    await store.apply(detail_delta(OTHER_REPO))
+    api, file_id = module_id(REPO, "api"), f"{REPO}:api/handlers.py"
+
+    found = await store.existing_edges(REPO, [
+        (api, "CONTAINS", file_id),
+        (file_id, "CONTAINS", api),  # backwards
+        (api, "CALLS", file_id),  # another type
+        (module_id(OTHER_REPO, "api"), "CONTAINS", f"{OTHER_REPO}:api/handlers.py"),  # another repository
+    ])
+
+    assert found == {(api, "CONTAINS", file_id)}
+    assert await store.existing_edges(REPO, []) == set()
 
 
 async def test_search_matches_symbols_and_files_by_name(store):
@@ -545,3 +566,88 @@ async def test_repo_map_lists_files_near_the_given_folders_then_the_most_used(st
     assert [row["path"] for row in anywhere] == ["lib/db.py", "lib/log.py", "api/handlers.py"]
     assert anywhere[0]["key_symbols"] == ["query", "connect"]
     assert [row["path"] for row in near_api] == ["api/handlers.py", "lib/db.py"]
+
+
+def keyword_delta(repo: str = REPO) -> GraphDelta:
+    """Code a keyword search should tell apart: names to split, and a word found only in a docstring."""
+    form = f"{repo}:web/signup/form.tsx"
+    return GraphDelta(
+        repo_full_name=repo,
+        version="sha-1",
+        upserted_nodes=(
+            GraphNode(form, NodeLabel.FILE, {"name": "form.tsx", "path": "web/signup/form.tsx"}),
+            GraphNode(f"{form}#SignupForm", NodeLabel.SYMBOL, {
+                "name": "SignupForm", "kind": "component", "file_path": "web/signup/form.tsx",
+            }),
+            GraphNode(f"{repo}:api/rate_limit.py#rate_limit", NodeLabel.SYMBOL, {
+                "name": "rate_limit", "kind": "function", "file_path": "api/rate_limit.py",
+            }),
+            GraphNode(f"{repo}:api/chat.py#take", NodeLabel.SYMBOL, {
+                "name": "take", "kind": "function", "file_path": "api/chat.py",
+                "docstring": "Count one question against every limit.",
+            }),
+        ),
+    )
+
+
+async def test_keyword_search_finds_a_code_name_by_its_words_and_their_start(store):
+    await store.apply(keyword_delta())
+
+    signup = await store.search_text(REPO, ["signup"])
+    sign = await store.search_text(REPO, ["sign"])
+
+    assert signup[0]["name"] == "SignupForm"
+    assert "SignupForm" in {row["name"] for row in sign}
+    assert await store.search_text(REPO, ["nothing"]) == []
+
+
+async def test_keyword_search_ranks_a_name_above_a_docstring(store):
+    await store.apply(keyword_delta())
+
+    names = [row["name"] for row in await store.search_text(REPO, ["limit"])]
+
+    assert names.index("rate_limit") < names.index("take")
+
+
+async def test_keyword_search_never_crosses_repositories(store):
+    for repo in (REPO, NEAR_REPO, OTHER_REPO):
+        await store.apply(keyword_delta(repo))
+
+    found = await store.search_text(REPO, ["signup", "limit"])
+
+    assert found and all(row["id"].startswith(f"{REPO}:") for row in found)
+
+
+async def test_search_properties_stay_out_of_node_detail(store):
+    await store.apply(keyword_delta())
+
+    detail = await store.node_detail(REPO, f"{REPO}:web/signup/form.tsx#SignupForm")
+
+    assert detail["properties"]["name"] == "SignupForm"
+    assert not set(SEARCH_PROPERTIES) & set(detail["properties"])
+
+
+async def test_nodes_stored_before_keyword_search_are_backfilled_once():
+    driver = await _neo4j_store()
+    graph_store = Neo4jKnowledgeGraphStore(driver)
+    await graph_store.ensure_schema()
+    await graph_store.ensure_schema()  # boot runs it every time
+    await driver.run("CALL db.awaitIndexes(60)")
+    await graph_store.delete_repository(REPO)
+    await driver.run(
+        f"CREATE (:{BASE_LABEL}:{NodeLabel.SYMBOL} {{id: $id, repo: $repo, name: 'LegacyHandler'}})",
+        id=f"{REPO}:old.py#LegacyHandler", repo=REPO,
+    )
+
+    try:
+        assert await graph_store.search_text(REPO, ["legacy"]) == []
+        assert await graph_store.backfill_search_properties() >= 1
+        assert await graph_store.backfill_search_properties() == 0
+        assert [row["name"] for row in await graph_store.search_text(REPO, ["legacy"])] == ["LegacyHandler"]
+    finally:
+        await graph_store.delete_repository(REPO)
+        await driver.close()
+
+
+async def test_an_in_memory_store_has_nothing_to_backfill():
+    assert await InMemoryKnowledgeGraphStore().backfill_search_properties() == 0

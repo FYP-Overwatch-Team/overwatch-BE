@@ -127,6 +127,8 @@ async def lifespan(app: FastAPI):
             structlog.get_logger("app.knowledge_graph").warning(
                 "legacy_graph_nodes_removed", nodes=removed,
             )
+        if filled := await store.backfill_search_properties():
+            structlog.get_logger("app.knowledge_graph").info("graph_search_properties_filled", nodes=filled)
     except Exception:
         # Constraints are an optimisation and a safety net, not a
         # prerequisite: a database that is briefly unreachable at boot must

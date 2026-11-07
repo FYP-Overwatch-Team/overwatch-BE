@@ -10,6 +10,10 @@ The module-level format is unchanged from the first version of the graph
 """
 
 import posixpath
+from collections import Counter
+from collections.abc import Iterable
+
+from app.knowledge_graph.facts import Definition
 
 #: The single node that stands for "everything outside this repository" in the
 #: module-level view the dashboard renders. Packages hang under it.
@@ -49,6 +53,16 @@ def symbol_id(repo_full_name: str, path: str, qualified_name: str, ordinal: int 
     """
     suffix = "" if ordinal <= 1 else f"@{ordinal}"
     return f"{repo_full_name}:{path}#{qualified_name}{suffix}"
+
+
+def definition_ids(repo_full_name: str, path: str, definitions: Iterable[Definition]) -> list[tuple[Definition, str]]:
+    """Each of a file's definitions with its symbol id, numbering repeated names in the order they're defined."""
+    seen: Counter[str] = Counter()
+    ids = []
+    for definition in definitions:
+        seen[definition.qualified_name] += 1
+        ids.append((definition, symbol_id(repo_full_name, path, definition.qualified_name, seen[definition.qualified_name])))
+    return ids
 
 
 def package_id(repo_full_name: str, ecosystem: str, name: str) -> str:

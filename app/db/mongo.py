@@ -343,6 +343,8 @@ async def ensure_indexes() -> None:
     await work_items().create_index([("workspace_id", 1), ("key", 1)])
     await documents().create_index([("workspace_id", 1), ("updated_at", -1)])
     await embeddings().create_index([("workspace_id", 1), ("kind", 1), ("ref_id", 1)], unique=True)
+    # a repository's code vectors, kept current on every index and dropped with the repository
+    await embeddings().create_index([("repo", 1), ("kind", 1), ("model", 1)])
 
     # Extraction cache: read on every sync to decide what changed, and always
     # scoped to one repository.
@@ -375,10 +377,14 @@ VECTOR_INDEX = "embeddings_vector"
 
 
 async def _ensure_vector_index() -> None:
-    """Atlas Vector Search over embeddings, filtered by workspace, kind and model; updated when the size changes."""
+    """Atlas Vector Search over embeddings, filtered by workspace (or repository, for code), kind and model.
+
+    Updated when the definition changes, which Atlas answers by rebuilding the index.
+    """
     definition = {"fields": [
         {"type": "vector", "path": "vector", "numDimensions": get_settings().embedding_dimensions, "similarity": "cosine"},
         {"type": "filter", "path": "workspace_id"},
+        {"type": "filter", "path": "repo"},
         {"type": "filter", "path": "kind"},
         {"type": "filter", "path": "model"},
     ]}

@@ -18,6 +18,7 @@ def embedder(monkeypatch):
     monkeypatch.setattr(embeddings, "RETRY_BACKOFF_SECONDS", (0.0, 0.0))
     return OpenAICompatibleEmbedder(
         base_url=BASE, api_key="key-123", model="some/embedder", dimensions=3, query_instruction="Find: ",
+        code_query_instruction="Find code: ",
         provider={"order": ["nebius"], "allow_fallbacks": True},
     )
 
@@ -54,6 +55,17 @@ async def test_a_text_to_search_with_gets_the_models_instruction(embedder):
     await embedder.embed(["guest export"], EmbedPurpose.QUERY)
 
     assert __import__("json").loads(route.calls[0].request.content)["input"] == ["Find: guest export"]
+
+
+@respx.mock
+async def test_a_text_to_search_code_with_gets_the_code_instruction_and_code_itself_none(embedder):
+    route = respx.post(f"{BASE}/embeddings").mock(return_value=httpx.Response(200, json=answer([1, 0, 0])))
+
+    await embedder.embed(["reset link expires"], EmbedPurpose.CODE_QUERY)
+    await embedder.embed(["def reset(): ..."], EmbedPurpose.DOCUMENT)
+
+    sent = [__import__("json").loads(call.request.content)["input"] for call in route.calls]
+    assert sent == [["Find code: reset link expires"], ["def reset(): ..."]]
 
 
 @respx.mock

@@ -19,7 +19,7 @@ from app.integrations.llm import ToolCall
 from app.knowledge_graph.build.ids import file_id
 from app.knowledge_graph.build.model import EdgeType, NodeLabel
 from app.knowledge_graph.ports import KnowledgeGraphStore
-from app.query.context import ContextBuilder, clean, search_nodes
+from app.query.context import ContextBuilder, clean, search_nodes, similar_nodes
 from app.query.source import find_in_code, read_snippet
 from app.query.workspace_tools import WORKSPACE_TOOL_NAMES, Workspace
 
@@ -27,10 +27,13 @@ SEARCH_GRAPH = "search_graph"
 RELATED = "related"
 READ_CODE = "read_code"
 GREP_CODE = "grep_code"
+SEARCH_MEANING = "search_code_by_meaning"
 OUT, IN = "out", "in"
 
 MAX_QUERY_CHARS = 100
 MAX_GREP_CHARS = 64
+#: room for a ticket's summary or a few sentences describing what to find
+MAX_MEANING_CHARS = 500
 MIN_GREP_CHARS = 3
 #: What one lookup may return: search hits, relations, lines of code, places found.
 MAX_SEARCH_RESULTS = 10
@@ -112,6 +115,26 @@ TOOLS = [
 ]
 
 
+#: offered when the repository's code is embedded and there's an asker to charge the search to
+MEANING_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": SEARCH_MEANING,
+            "description": (
+                "Find code by what it does, from a plain-English description or a ticket's text; use it when names "
+                "don't match the words."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "maxLength": MAX_MEANING_CHARS}},
+                "required": ["query"],
+            },
+        },
+    },
+]
+
+
 @dataclass(slots=True)
 class Lookups:
     """The tools, run against one question's context."""
@@ -137,6 +160,7 @@ class Lookups:
             RELATED: f"Finding what uses {node}" if args.get("direction") == IN else f"Following what {node} uses",
             READ_CODE: f"Reading {node if args.get('ref') else clean(args.get('path', 'a file'), MAX_STATUS_CHARS)}",
             GREP_CODE: f"Searching the code for “{clean(args.get('query', ''), MAX_STATUS_CHARS)}”",
+            SEARCH_MEANING: "Finding code that does this",
         }.get(call.name) or (self.workspace and self.workspace.status(call.name, args)) or "Looking further"
         return text[:MAX_STATUS_CHARS * 2]
 
@@ -147,6 +171,7 @@ class Lookups:
             return "error: the arguments must be a JSON object"
         handler = {
             SEARCH_GRAPH: self._search, RELATED: self._related, READ_CODE: self._read, GREP_CODE: self._grep,
+            **({SEARCH_MEANING: self._meaning} if self.workspace else {}),
             **(self.workspace.handlers if self.workspace else {}),
         }.get(call.name)
         if handler is None:
@@ -168,6 +193,17 @@ class Lookups:
         query = str(args.get("query") or "")[:MAX_QUERY_CHARS]
         rows = (await search_nodes(self.store, self.repo, query))[:MAX_SEARCH_RESULTS]
         return self.builder.look_up(lambda: self.builder.add_matches(rows, []))
+
+    async def _meaning(self, args: dict) -> str:
+        query = str(args.get("query") or "")[:MAX_MEANING_CHARS].strip()
+        if not query:
+            return "error: describe what the code does"
+        asked_by = (self.workspace.workspace_id, self.workspace.user_id)
+        rows = await similar_nodes(self.store, self.repo, query, asked_by, MAX_SEARCH_RESULTS)
+        if not rows:
+            return f"(nothing close in meaning; try {SEARCH_GRAPH} or {GREP_CODE} with a likely name)"
+        heading = f"Close in meaning to “{clean(query, MAX_STATUS_CHARS)}”"
+        return self.builder.look_up(lambda: self.builder.add_similar(rows, heading, only_new=False))
 
     async def _related(self, args: dict) -> str:
         node_id = self.builder.node_of(_bare(args.get("ref")))
