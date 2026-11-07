@@ -2,6 +2,8 @@
 
 from dataclasses import replace
 
+import pytest
+
 from app.query.context import GroundingContext, Relation, ShownSource, clean
 from app.query.grounding import (
     CANNOT_DETERMINE,
@@ -411,3 +413,17 @@ def test_only_records_a_lookup_gave_are_cited():
     assert [record["key"] for record in cited] == ["DEV-2", "DEV-1"]
     # an earlier answer goes back to the model with its records as keys
     assert plain_text("See [r2] and [r1].", [], [], cited) == "See (DEV-2) and (DEV-1)."
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("[docs](\nhttps://attacker.test/?d=1)", "docs"),
+    ("![a](https://attacker.test/p.png (title))", "a"),
+    ("![a](<https://attacker.test/a b.png>)", "a"),
+    ("![a](\nhttps://attacker.test/p.png)", "a"),
+    ("> [1]: https://attacker.test/p.png", ""),
+    ("[1]:\n  https://attacker.test/p.png", ""),
+    ("<https://attacker.test/?d=1>", "https://attacker.test/?d=1"),
+    ('![c](/chat/attachments/a.png "chart")', '![c](/chat/attachments/a.png "chart")'),
+])
+def test_every_way_of_writing_a_link_or_image_is_caught(text, expected):
+    assert safe_markdown(text) == expected

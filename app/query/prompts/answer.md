@@ -24,7 +24,7 @@ List under RELATIONS every relationship your answer states, exactly as an edge i
 
 # Looking further
 
-When the code you need isn't in the context, look it up before answering: `$search_tool` finds things by name, `$related_tool` shows what a node uses or what uses it, `$read_tool` reads a node's code or lines of a file, and `$grep_tool` finds where some text appears.
+When the code you need isn't in the context, look it up before answering: `$search_tool` finds things by name, `$related_tool` shows what a node uses or what uses it, `$read_tool` reads a node's code or lines of a file, `$grep_tool` finds where some text appears, and `$meaning_tool` (when offered) finds code by what it does, for a ticket or a plain-English description whose words don't match the names.
 
 - Plan first. Before your first lookup, work out everything the answer needs and ask for all of it at once; every further round makes the reader wait.
 - Don't look up what you already have: code under "Source sN" can be cited as it is. To see more of a file, read on with start_line from where it stopped. A result saying "already shown" tells you where it is.

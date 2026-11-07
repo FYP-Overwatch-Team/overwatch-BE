@@ -15,7 +15,8 @@ from app.knowledge_graph.build.ids import module_id
 from app.knowledge_graph.build.model import EdgeType, GraphDelta, GraphEdge, GraphNode, NodeLabel
 from app.query.grounding import CANNOT_DETERMINE
 from app.query.service import ANSWER_NOW, ANSWER_WITHOUT_ASKING, LOOKUPS_RAN_OUT
-from app.query.tools import READ_CODE, RELATED, SEARCH_GRAPH
+from app.integrations.embeddings import use_embedder
+from app.query.tools import READ_CODE, RELATED, SEARCH_GRAPH, SEARCH_MEANING
 from app.query.workspace_tools import (
     DRAFTED,
     FIND_DECISIONS,
@@ -626,6 +627,22 @@ async def test_without_lookups_no_tools_are_offered(client, owner, fake_llm, lim
     assert fake_llm.calls[0]["tools"] == []
 
 
+def offered(call: dict) -> list[str]:
+    return [tool["function"]["name"] for tool in call["tools"]]
+
+
+async def test_searching_code_by_meaning_is_offered_only_with_embeddings(client, owner, fake_llm, fake_embedder):
+    fake_llm.json_response = GROUNDED
+
+    await ask(client, owner)
+    use_embedder(None)
+    await ask(client, owner)
+
+    with_embeddings, without = fake_llm.calls
+    assert SEARCH_MEANING in offered(with_embeddings)
+    assert SEARCH_MEANING not in offered(without) and SEARCH_GRAPH in offered(without)
+
+
 async def test_calls_a_model_writes_as_text_are_run_as_lookups(client, owner, fake_llm):
     fake_llm.replies = [WRITTEN_CALLS, written(GROUNDED)]
 
@@ -994,3 +1011,78 @@ async def test_an_answer_drafts_at_most_a_few_and_a_decision_needs_a_statement(c
     assert results[0] == "error: give it a title and a statement"
     assert results[-1] == f"error: at most {MAX_DRAFTS} drafts per answer"
     assert len(data["answer"]["proposals"]) == MAX_DRAFTS
+
+
+async def test_a_secret_in_the_code_never_reaches_the_model_but_its_citation_shows_the_file(
+    client, owner, fake_llm, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("REPOS_DIR", str(tmp_path / "repos"))
+    get_settings.cache_clear()
+    sha = await with_checkout(tmp_path, {"api/keys.py": 'def keys():\n    return "AKIAABCDEFGHIJKLMNOP"\n'})
+    node = f"{REPO}:api/keys.py#keys"
+    await get_knowledge_graph_store().apply(GraphDelta(
+        repo_full_name=REPO, version=sha,
+        upserted_nodes=(GraphNode(node, NodeLabel.SYMBOL, {
+            "name": "keys", "kind": "function", "file_path": "api/keys.py", "start_line": 1, "end_line": 2,
+        }),),
+    ))
+    fake_llm.json_response = {"answer": "It returns a key [s1:2].", "answerable": True, "relations": []}
+
+    resp = await ask(client, owner, "what does keys return?", focused_node_id=node)
+
+    prompt = fake_llm.calls[-1]["prompt"]
+    assert "AKIAABCDEFGHIJKLMNOP" not in prompt
+    assert '      2 |     return "[REDACTED]"' in prompt
+    assert resp.json()["data"]["answer"]["citations"][0]["code"] == '    return "AKIAABCDEFGHIJKLMNOP"'
+    get_settings.cache_clear()
+
+
+async def test_lookup_results_come_back_fenced_as_data(client, owner, fake_llm):
+    fake_llm.json_response = GROUNDED
+    fake_llm.lookups = [[lookup(SEARCH_GRAPH, query="services")]]
+
+    await ask_streaming(client, owner)
+
+    (result,) = fake_llm.calls[-1]["rounds"][0].results
+    assert result.startswith("<graph_context>\n") and result.endswith("\n</graph_context>")
+
+
+async def test_a_tool_that_wasnt_offered_never_runs(client, owner, fake_llm):
+    fake_llm.json_response = GROUNDED
+    # without embeddings, searching by meaning isn't offered
+    fake_llm.lookups = [[lookup(SEARCH_MEANING, query="where a guest exports a report")]]
+
+    await ask_streaming(client, owner)
+
+    assert fake_llm.calls[-1]["rounds"][0].results == (f"error: there is no tool called {SEARCH_MEANING}",)
+
+
+async def test_a_rate_limited_question_never_pays_for_a_meaning_search(client, owner, fake_llm, fake_embedder, limits):
+    limits(chat_user_hourly_limit=1)
+    await mongo.repos().update_many({"repo_full_name": REPO}, {"$set": {"graph_version": "a" * 40}})
+    fake_llm.json_response = GROUNDED
+    assert (await ask(client, owner)).status_code == 200
+    assert fake_embedder.calls
+    fake_embedder.calls.clear()
+
+    resp = await ask(client, owner)
+
+    assert resp.status_code == 429
+    assert fake_embedder.calls == []
+
+
+async def test_before_the_graph_is_built_nothing_is_searched_by_meaning(client, owner, fake_llm, fake_embedder):
+    fake_llm.json_response = GROUNDED
+
+    await ask(client, owner)
+
+    assert fake_embedder.calls == []
+
+
+async def test_a_drafts_links_and_images_are_stripped_before_it_is_kept(client, owner, fake_llm):
+    body = "See [the docs](https://attacker.test/?d=1) and ![x](https://attacker.test/p.png)."
+    data = await drafted(client, owner, fake_llm, lookup(PROPOSE_DECISION, title="Use X", statement=body, background=body))
+
+    (proposal,) = data["answer"]["proposals"]
+    assert "attacker.test" not in json.dumps(proposal["fields"])
+    assert "See the docs and x." in json.dumps(proposal["fields"])

@@ -18,10 +18,12 @@ first index writes everything; later syncs write only a delta, because
 measurement showed the write — not parsing — is the slow stage.
 """
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any
 
 import structlog
+from neo4j.exceptions import ClientError
 
 from app.db.neo4j_client import get_graph_store
 from app.knowledge_graph.build.ids import EXTERNAL_MODULE
@@ -31,6 +33,16 @@ from app.knowledge_graph.build.model import (
     GraphEdge,
     GraphNode,
     NodeLabel,
+)
+from app.knowledge_graph.search_text import (
+    FIELD_BOOSTS,
+    SEARCH_PROPERTIES,
+    SEARCH_SCOPE,
+    SEARCHABLE_LABELS,
+    TEXT_INDEX,
+    lucene_query,
+    search_properties,
+    text_score,
 )
 from app.knowledge_graph.view.model import (
     CONTAINMENT_EDGE_TYPES,
@@ -144,7 +156,18 @@ SCHEMA_STATEMENTS = (
     f"CREATE INDEX graph_node_repo IF NOT EXISTS FOR (n:{BASE_LABEL}) ON (n.repo)",
     f"CREATE INDEX graph_symbol_name IF NOT EXISTS "
     f"FOR (n:{NodeLabel.SYMBOL}) ON (n.name)",
+    # keyword search (BM25); no stop words, so names like `get` or `is_set` are kept
+    f"CREATE FULLTEXT INDEX {TEXT_INDEX} IF NOT EXISTS "
+    f"FOR (n:{'|'.join(SEARCHABLE_LABELS)}) ON EACH [{', '.join(f'n.{field}' for field in (*FIELD_BOOSTS, SEARCH_SCOPE))}] "
+    f"OPTIONS {{indexConfig: {{`fulltext.analyzer`: 'standard-no-stop-words'}}}}",
 )
+
+#: What a search returns for each node it finds.
+_SEARCH_FIELDS = """n.id AS id, n.name AS name, n.kind AS kind, n.path AS path,
+                   n.file_path AS file_path, n.signature AS signature,
+                   properties(n)['docstring'] AS docstring, properties(n)['start_line'] AS start_line,
+                   properties(n)['end_line'] AS end_line, labels(n) AS labels"""
+_SEARCHABLE = " OR ".join(f"n:{label}" for label in SEARCHABLE_LABELS)
 
 
 def _safe_label(label: NodeLabel) -> str:
@@ -157,6 +180,21 @@ def _safe_type(edge_type: EdgeType) -> str:
     if not isinstance(edge_type, EdgeType):
         raise ValueError(f"unknown edge type: {edge_type!r}")
     return edge_type.value
+
+
+def _without_base_label(row: dict) -> dict:
+    return {**row, "labels": [label for label in row["labels"] if label != BASE_LABEL]}
+
+
+def _search_row(node: dict) -> dict:
+    """An in-memory node in the shape a search returns."""
+    return {
+        "id": node["id"], "name": node.get("name"), "kind": node.get("kind"),
+        "path": node.get("path"), "file_path": node.get("file_path"),
+        "signature": node.get("signature"), "docstring": node.get("docstring"),
+        "start_line": node.get("start_line"), "end_line": node.get("end_line"),
+        "labels": [node["label"]],
+    }
 
 
 def _chunks(rows: Sequence[Any]) -> list[Sequence[Any]]:
@@ -313,6 +351,32 @@ class Neo4jKnowledgeGraphStore:
             if deleted < batch:
                 return total
 
+    async def backfill_search_properties(self, batch: int = 2_000) -> int:
+        """Give nodes written before keyword search its derived properties, in bounded batches.
+
+        Runs at boot; finds nothing to do once every node has them.
+        """
+        total = 0
+        while True:
+            rows = await self._store.run(
+                f"""
+                MATCH (n:{BASE_LABEL}) WHERE ({_SEARCHABLE}) AND n.{SEARCH_SCOPE} IS NULL
+                RETURN n.id AS id, n.repo AS repo, n.name AS name, n.path AS path,
+                       n.file_path AS file_path, properties(n)['qualified_name'] AS qualified_name
+                LIMIT $batch
+                """,
+                batch=batch,
+            )
+            updates = [{"id": row["id"], "properties": search_properties(row["repo"], row)} for row in rows]
+            if updates:
+                await self._store.run_write([(
+                    f"UNWIND $rows AS row MATCH (n:{BASE_LABEL} {{id: row.id}}) SET n += row.properties",
+                    {"rows": updates},
+                )])
+            total += len(rows)
+            if len(rows) < batch:
+                return total
+
     async def node_detail(self, repo_full_name: str, node_id: str) -> dict | None:
         """A node plus the nodes it contains (module → files → symbols).
 
@@ -336,7 +400,7 @@ class Neo4jKnowledgeGraphStore:
         if not rows:
             return None
         row = rows[0]
-        node = dict(row["node"])
+        node = {key: value for key, value in dict(row["node"]).items() if key not in SEARCH_PROPERTIES}
         return {
             "id": node.pop("id"),
             "labels": [label for label in row["labels"] if label != BASE_LABEL],
@@ -491,22 +555,37 @@ class Neo4jKnowledgeGraphStore:
         rows = await self._store.run(
             f"""
             MATCH (n:{BASE_LABEL} {{repo: $repo}})
-            WHERE (n:{NodeLabel.SYMBOL} OR n:{NodeLabel.FILE} OR n:{NodeLabel.MODULE})
+            WHERE ({_SEARCHABLE})
               AND (toLower(coalesce(n.name, '')) CONTAINS toLower($term)
                    OR toLower(coalesce(n.path, '')) CONTAINS toLower($term))
-            RETURN n.id AS id, n.name AS name, n.kind AS kind, n.path AS path,
-                   n.file_path AS file_path, n.signature AS signature,
-                   properties(n)['docstring'] AS docstring, properties(n)['start_line'] AS start_line,
-                   properties(n)['end_line'] AS end_line, labels(n) AS labels
+            RETURN {_SEARCH_FIELDS}
             ORDER BY size(coalesce(n.name, n.path, '')), id
             LIMIT $limit
             """,
             repo=repo_full_name, term=term, limit=min(limit, SEARCH_LIMIT),
         )
-        return [
-            {**row, "labels": [label for label in row["labels"] if label != BASE_LABEL]}
-            for row in rows
-        ]
+        return [_without_base_label(row) for row in rows]
+
+    async def search_text(self, repo_full_name: str, words: Sequence[str], *, limit: int = 20) -> list[dict]:
+        if not words:
+            return []
+        try:
+            rows = await self._store.run(
+                f"""
+                CALL db.index.fulltext.queryNodes($index, $lucene, {{limit: $limit}}) YIELD node AS n, score
+                WHERE n.repo = $repo
+                RETURN {_SEARCH_FIELDS}, score
+                ORDER BY score DESC, id
+                """,
+                index=TEXT_INDEX, lucene=lucene_query(words, repo_full_name), repo=repo_full_name,
+                limit=min(limit, SEARCH_LIMIT),
+            )
+        except ClientError:
+            # the index is missing or still being built: substring search still answers
+            logger.warning("graph_text_search_unavailable", repo=repo_full_name)
+            found = await asyncio.gather(*(self.search(repo_full_name, word, limit=limit) for word in words))
+            return list({row["id"]: row for rows in found for row in rows}.values())[:limit]
+        return [_without_base_label(row) for row in rows]
 
     async def counts(self, repo_full_name: str) -> dict:
         node_rows = await self._store.run(
@@ -630,9 +709,10 @@ class Neo4jKnowledgeGraphStore:
     async def _upsert_nodes(self, repo: str, version: str, nodes: Sequence[GraphNode]) -> None:
         by_label: dict[NodeLabel, list[dict]] = {}
         for node in nodes:
-            by_label.setdefault(node.label, []).append(
-                {"id": node.id, "properties": dict(node.properties)}
-            )
+            properties = dict(node.properties)
+            if node.label in SEARCHABLE_LABELS:
+                properties |= search_properties(repo, properties)
+            by_label.setdefault(node.label, []).append({"id": node.id, "properties": properties})
 
         for label, rows in by_label.items():
             query = (
@@ -770,6 +850,9 @@ class InMemoryKnowledgeGraphStore:
 
     async def purge_legacy_nodes(self, batch: int = 5_000) -> int:
         return 0  # an in-memory store never held the previous version
+
+    async def backfill_search_properties(self, batch: int = 2_000) -> int:
+        return 0  # nothing is stored for search; `search_text` scores nodes as it goes
 
     async def node_detail(self, repo_full_name: str, node_id: str) -> dict | None:
         node = self.nodes.get(node_id)
@@ -938,13 +1021,7 @@ class InMemoryKnowledgeGraphStore:
     async def search(self, repo_full_name: str, term: str, *, limit: int = 20) -> list[dict]:
         needle = term.lower()
         matches = [
-            {
-                "id": node["id"], "name": node.get("name"), "kind": node.get("kind"),
-                "path": node.get("path"), "file_path": node.get("file_path"),
-                "signature": node.get("signature"), "docstring": node.get("docstring"),
-                "start_line": node.get("start_line"), "end_line": node.get("end_line"),
-                "labels": [node["label"]],
-            }
+            _search_row(node)
             for node in self.nodes.values()
             if node["repo"] == repo_full_name
             and node["label"] in (str(NodeLabel.SYMBOL), str(NodeLabel.FILE), str(NodeLabel.MODULE))
@@ -952,6 +1029,17 @@ class InMemoryKnowledgeGraphStore:
         ]
         matches.sort(key=lambda row: (len(str(row["name"] or row["path"] or "")), row["id"]))
         return matches[:min(limit, SEARCH_LIMIT)]
+
+    async def search_text(self, repo_full_name: str, words: Sequence[str], *, limit: int = 20) -> list[dict]:
+        searchable = {str(label) for label in SEARCHABLE_LABELS}
+        scored = [
+            ({**_search_row(node), "score": score}, score)
+            for node in self.nodes.values()
+            if node["repo"] == repo_full_name and node["label"] in searchable
+            and (score := text_score(node, words)) > 0
+        ]
+        scored.sort(key=lambda pair: (-pair[1], len(str(pair[0]["name"] or pair[0]["path"] or "")), pair[0]["id"]))
+        return [row for row, _ in scored[:min(limit, SEARCH_LIMIT)]]
 
     async def view_children(
         self, repo_full_name: str, parent_ids: Sequence[str],

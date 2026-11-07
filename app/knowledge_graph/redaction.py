@@ -10,6 +10,7 @@ unmistakably credentials and leaves everything else alone.
 """
 
 import re
+from collections.abc import Sequence
 
 PLACEHOLDER = "[REDACTED]"
 
@@ -33,6 +34,9 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
+_KEY_BEGIN_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----")
+_KEY_END_RE = re.compile(r"-----END[A-Z ]*PRIVATE KEY-----")
+
 # Index of the group that should survive in the assignment pattern above.
 _ASSIGNMENT_PATTERN = _PATTERNS[-1]
 
@@ -47,6 +51,19 @@ def redact(text: str) -> str:
         else:
             text = pattern.sub(PLACEHOLDER, text)
     return text
+
+
+def redact_lines(lines: Sequence[str]) -> list[str]:
+    """`redact` line by line, keeping the count: every line of a private key block is replaced whole."""
+    redacted, in_key = [], False
+    for line in lines:
+        starts = bool(_KEY_BEGIN_RE.search(line))
+        redacted.append(PLACEHOLDER if starts or in_key else redact(line))
+        if starts:
+            in_key = True
+        if _KEY_END_RE.search(line):
+            in_key = False
+    return redacted
 
 
 def redact_optional(text: str | None) -> str | None:

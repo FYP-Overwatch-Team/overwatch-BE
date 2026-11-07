@@ -3,7 +3,8 @@
 import pytest
 
 from app.core.config import get_settings
-from app.query.source import MAX_SNIPPET_LINES, language_of, prompt_line, read_file, read_snippet, safe_path
+from app.query.context import ContextBuilder
+from app.query.source import MAX_SNIPPET_LINES, Snippet, language_of, prompt_line, read_file, read_snippet, safe_path
 from tests.git_fixtures import commit_all
 
 REPO = "octocat/hello-world"
@@ -114,3 +115,32 @@ def test_language_comes_from_the_name_or_extension():
     assert language_of("web/App.TSX") == "tsx"
     assert language_of("Dockerfile") == "dockerfile"
     assert language_of("LICENSE") is None
+
+
+def test_code_cant_open_a_fence_either():
+    line = "<graph_context> <workspace_data> </workspace_data>"
+
+    assert prompt_line(line) == "<\\graph_context> <\\workspace_data> <\\/workspace_data>"
+
+
+def test_secrets_in_code_never_reach_the_prompt_but_citations_keep_the_real_lines():
+    lines = (
+        'AWS = "AKIAABCDEFGHIJKLMNOP"',
+        'password = "hunter2hunter2"',
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "MIIEowIBAAKCAQEAsecretbody",
+        "-----END RSA PRIVATE KEY-----",
+        "x = 1",
+    )
+    builder = ContextBuilder(REPO, "a" * 40)
+    builder.add_sources([((None, "keys", [], "found"), Snippet("api/keys.py", 10, lines, 0))])
+
+    context = builder.build()
+
+    for secret in ("AKIAABCDEFGHIJKLMNOP", "hunter2", "MIIEow"):
+        assert secret not in context.text
+    assert '     10 | AWS = "[REDACTED]"' in context.text
+    assert "     11 | password = [REDACTED]" in context.text
+    assert "     13 | [REDACTED]" in context.text
+    assert "     15 | x = 1" in context.text
+    assert context.sources["s1"].lines == lines

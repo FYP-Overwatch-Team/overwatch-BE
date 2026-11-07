@@ -2,13 +2,15 @@
 
 Each record keeps the fingerprint of the text it was made from and the model that made it, so
 only changed texts are embedded again, and a new model's vectors are never compared with an old
-one's. Nearest ones come from Atlas Vector Search in prod and are compared here in dev and tests.
+one's. Vectors are stored packed as float32 (BSON binary vectors), a third of the size of a list of
+doubles. Nearest ones come from Atlas Vector Search in prod and are compared here in dev and tests.
 """
 
 import hashlib
 import math
 from collections.abc import Mapping
 
+from bson.binary import Binary, BinaryVectorDtype
 from pymongo import UpdateOne
 
 from app.core.config import get_settings
@@ -31,6 +33,18 @@ def fingerprint(text: str) -> str:
 
 def enabled() -> bool:
     return get_embedder() is not None
+
+
+def encode(vector: list[float]) -> Binary:
+    """A vector as it's stored: packed float32."""
+    return Binary.from_vector(vector, BinaryVectorDtype.FLOAT32)
+
+
+def decode(stored: Binary | bytes | list[float]) -> list[float]:
+    """A stored vector as floats, whether packed or (written before packing) a plain list."""
+    if isinstance(stored, list):
+        return stored
+    return list(Binary(stored, subtype=9).as_vector().data)
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -59,13 +73,15 @@ async def refresh(
         await mongo.embeddings().bulk_write([
             UpdateOne(
                 {"workspace_id": workspace_id, "kind": kind, "ref_id": ref_id},
-                {"$set": {"model": embedder.model, "fingerprint": current[ref_id], "vector": vector, "updated_at": now}},
+                {"$set": {
+                    "model": embedder.model, "fingerprint": current[ref_id], "vector": encode(vector), "updated_at": now,
+                }},
                 upsert=True,
             )
             for ref_id, vector in zip(stale, vectors, strict=True)
         ], ordered=False)
         stored |= {ref_id: {"vector": vector} for ref_id, vector in zip(stale, vectors, strict=True)}
-    return {ref_id: stored[ref_id]["vector"] for ref_id in texts}
+    return {ref_id: decode(stored[ref_id]["vector"]) for ref_id in texts}
 
 
 async def fingerprints(workspace_id: str, kind: EmbeddingKind, ref_ids: list[str]) -> dict[str, str]:
@@ -77,13 +93,15 @@ async def fingerprints(workspace_id: str, kind: EmbeddingKind, ref_ids: list[str
     return {doc["ref_id"]: doc["fingerprint"] async for doc in mongo.embeddings().find(query, {"ref_id": 1, "fingerprint": 1})}
 
 
-async def embed_query(workspace_id: str, user_id: str, text: str) -> list[float] | None:
+async def embed_query(
+    workspace_id: str, user_id: str, text: str, purpose: EmbedPurpose = EmbedPurpose.QUERY,
+) -> list[float] | None:
     """`text` embedded to search with, or None when embeddings are off."""
     embedder = get_embedder()
     if embedder is None:
         return None
     [vector] = await embedder.embed(
-        [text[:MAX_CHARS]], EmbedPurpose.QUERY, on_usage=usage.recorder(workspace_id, user_id, UsageFeature.EMBEDDINGS),
+        [text[:MAX_CHARS]], purpose, on_usage=usage.recorder(workspace_id, user_id, UsageFeature.EMBEDDINGS),
     )
     return vector
 
@@ -95,7 +113,19 @@ async def nearest(
     embedder = get_embedder()
     if embedder is None:
         return []
-    scope = {"workspace_id": workspace_id, "kind": {"$in": list(kinds)}, "model": embedder.model}
+    return await _nearest({"workspace_id": workspace_id, "kind": {"$in": list(kinds)}, "model": embedder.model}, vector, limit)
+
+
+async def nearest_code(repo_full_name: str, vector: list[float], limit: int) -> list[tuple[str, float]]:
+    """The `(graph node id, score)` of the repository's code closest in meaning to `vector`, closest first."""
+    embedder = get_embedder()
+    if embedder is None:
+        return []
+    scope = {"repo": repo_full_name, "kind": EmbeddingKind.CODE, "model": embedder.model}
+    return [(ref_id, score) for _, ref_id, score in await _nearest(scope, vector, limit)]
+
+
+async def _nearest(scope: dict, vector: list[float], limit: int) -> list[tuple[EmbeddingKind, str, float]]:
     if get_settings().vector_search == VectorSearch.ATLAS:
         pipeline = [
             {"$vectorSearch": {
@@ -107,7 +137,7 @@ async def nearest(
         # Atlas scores cosine as (1 + cosine) / 2, so 0..1; turned back so thresholds mean the same everywhere
         return [(doc["kind"], doc["ref_id"], doc["score"] * 2 - 1) async for doc in mongo.embeddings().aggregate(pipeline)]
     scored = [
-        (doc["kind"], doc["ref_id"], cosine(vector, doc["vector"]))
+        (doc["kind"], doc["ref_id"], cosine(vector, decode(doc["vector"])))
         async for doc in mongo.embeddings().find(scope, {"kind": 1, "ref_id": 1, "vector": 1})
     ]
     return sorted(scored, key=lambda row: -row[2])[:limit]

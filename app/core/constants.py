@@ -327,6 +327,8 @@ class ChatRecordKind(StrEnum):
     WORK_ITEM = "work_item"
     DOCUMENT = "document"
     DECISION = "decision"
+    #: a repository's files and functions; kept per repository, not per workspace
+    CODE = "code"
 
 
 class ChatActionKind(StrEnum):
@@ -363,12 +365,18 @@ class CheckMatch(StrEnum):
     SIMILAR = "similar"
 
 
+#: who background work (decision checks, indexing) acts as, in usage and on what it adds
+SYSTEM_USER = "system"
+
+
 class EmbeddingKind(StrEnum):
     """What an embedding was made from."""
 
     WORK_ITEM = "work_item"
     DOCUMENT = "document"
     DECISION = "decision"
+    #: a repository's files and functions; kept per repository, not per workspace
+    CODE = "code"
 
 
 class EmbedPurpose(StrEnum):
@@ -376,6 +384,8 @@ class EmbedPurpose(StrEnum):
 
     DOCUMENT = "document"
     QUERY = "query"
+    #: a question or ticket, searched with for the code it's about
+    CODE_QUERY = "code_query"
 
 
 class VectorSearch(StrEnum):

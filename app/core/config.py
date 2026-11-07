@@ -64,6 +64,10 @@ class Settings(BaseSettings):
         "Instruct: Given a decision or a passage, retrieve the work items, documents and decisions about the same subject\n"
         "Query: "
     )
+    embedding_code_query_instruction: str = (
+        "Instruct: Given a question or ticket about a software project, retrieve the code that implements it or "
+        "must change for it\nQuery: "
+    )
     # OpenRouter provider slugs to prefer, comma-separated, so stored vectors come from one provider
     embedding_provider_order: str = ""
     # "atlas" uses Atlas Vector Search (prod); "local" compares vectors here (dev, tests)
@@ -75,6 +79,18 @@ class Settings(BaseSettings):
     decision_similar_per_source: int = 3
     # sources read against a decision when it's accepted: its closest matches among everything already there
     decision_accept_scan_limit: int = 5
+    # a repository's files and functions embedded so the chat finds code by meaning: at most this many per repo
+    # (0 turns it off), this many new ones per index run (the rest on later runs), and this many in all
+    code_embedding_repo_limit: int = 4000
+    code_embedding_run_limit: int = 1500
+    code_embedding_total_limit: int = 20000
+    # how close in meaning (cosine) code must be to a question to be shown with it, and how much is shown
+    # measured on overwatch-BE (scripts/eval_chat.py retrieval): right answers score 0.59+, off-topic questions at most 0.42
+    code_similarity_threshold: float = 0.45
+    code_similar_per_question: int = 5
+    # how long a question's search by meaning may take before the answer goes on without it; a query
+    # embedding measured 0.8-4.3 s (median 1.5 s) on OpenRouter
+    code_similar_timeout_seconds: float = 6
     # lookups (graph search, reading code) one answer may make before it must answer; 0 turns them off
     chat_max_lookups: int = 20
     # OpenRouter provider routing, empty to send nothing: sort by "latency", "throughput" or "price",

@@ -67,9 +67,15 @@ _RECORD_REF_RE = re.compile(r"([ \t]*)[\[【]\s*(r\d+)\s*[\]】]")
 _DASH_RE = re.compile(r"[ \t]*—[ \t]*|[ \t]+–[ \t]+")
 _INLINE_CODE_RE = re.compile(r"(`[^`\n]*`)")
 _FENCE_RE = re.compile(r"(```[\s\S]*?(?:```|$))")
-_IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]\(\s*<?([^)\s>]*)>?(?:\s+[\"'][^\"'\n]*[\"'])?\s*\)")
-_LINK_RE = re.compile(r"(?<!!)\[([^\]\n]+)\]\([^)\n]*\)")
-_REFERENCE_DEFINITION_RE = re.compile(r"^[ \t]*\[[^\]\n]+\]:[ \t]*\S.*$", re.MULTILINE)
+# an inline destination however it's written: on the next line, `<with spaces>`, with a "title" or (title)
+_DESTINATION = r"\(((?:[^()]|\([^()]*\))*)\)"
+_IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]" + _DESTINATION)
+_LINK_RE = re.compile(r"(?<!!)\[([^\]\n]+)\]" + _DESTINATION)
+# also inside a quote, and with its URL on the next line
+_REFERENCE_DEFINITION_RE = re.compile(
+    r"^[ \t]*(?:>[ \t]*)*\[[^\]\n]+\]:[ \t]*(?:\n[ \t]*(?:>[ \t]*)*)?\S.*$", re.MULTILINE,
+)
+_AUTOLINK_RE = re.compile(r"<((?:https?|ftp|mailto):[^<>\s]*)>", re.IGNORECASE)
 _INLINE_IMAGE_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$")
 # `STEPS:`, or as models dress it up, `**Steps:**` or `### Steps:`
 _STEPS_LINE_RE = re.compile(rf"^[ \t*_#]*{STEPS_MARKER}[ \t*_]*:[ \t*_]*$", re.IGNORECASE | re.MULTILINE)
@@ -485,12 +491,14 @@ def safe_markdown(text: str) -> str:
     """Images only from chat attachments or inline data; links reduced to their text. Code is left alone."""
 
     def image(match: re.Match) -> str:
-        alt, url = match[1], match[2]
+        alt, destination = match[1], match[2].strip()
+        url = destination[1:].partition(">")[0] if destination.startswith("<") else (destination.split() or [""])[0]
         return match[0] if url.startswith(ATTACHMENT_PATH) or _INLINE_IMAGE_RE.match(url) else alt
 
     def outside_code(part: str) -> str:
         part = _IMAGE_RE.sub(image, part)
         part = _LINK_RE.sub(lambda match: match[1], part)
+        part = _AUTOLINK_RE.sub(r"\1", part)
         return _REFERENCE_DEFINITION_RE.sub("", part)
 
     return _outside_code(text, outside_code)

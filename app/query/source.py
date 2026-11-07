@@ -25,8 +25,8 @@ MAX_HITS_PER_FILE = 20
 
 COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
-# Code can't close the fence or forge a reference; everything else stays as written.
-_FENCE_RE = re.compile(r"</(graph_context)", re.IGNORECASE)
+# Code can't open or close a fence or forge a reference; everything else stays as written.
+_FENCE_RE = re.compile(r"<(/?(?:graph_context|workspace_data))", re.IGNORECASE)
 _REF_RE = re.compile(r"\[(n\d+|s\d+:[\d\s-]*)\]")
 
 #: File name or extension -> the language a code block is highlighted as.
@@ -120,4 +120,4 @@ async def read_snippet(
 
 def prompt_line(line: str) -> str:
     """A line of code made safe to place inside the fence."""
-    return _REF_RE.sub(r"(\1)", _FENCE_RE.sub(r"<\\/\1", line))
+    return _REF_RE.sub(r"(\1)", _FENCE_RE.sub(r"<\\\1", line))

@@ -14,7 +14,6 @@ from app.query.context import (
     ShownSource,
     open_ask_context,
     owning_module_id,
-    rank_matches,
     search_terms,
 )
 from app.integrations.llm import ToolCall
@@ -26,6 +25,8 @@ from app.db.knowledge_graph_store import (
     use_knowledge_graph_store,
 )
 
+#: how every lookup result starts: fenced as data, like the context
+FENCE = "<graph_context>\n"
 REPO = "octocat/hello-world"
 MODULE = f"{REPO}:api"
 FILE = f"{REPO}:api/handlers.py"
@@ -185,6 +186,10 @@ def test_keywords_trim_plurals_but_not_double_s():
     assert keywords("dates and classes in process") == ["date", "classe", "process"]
 
 
+def test_a_code_name_is_searched_as_written_and_trimmed():
+    assert keywords("where is rank_matches used in GraphDeltas") == ["rank_matches", "rank_matche", "GraphDeltas", "GraphDelta"]
+
+
 @pytest.fixture
 def checkout(tmp_path, monkeypatch):
     monkeypatch.setenv("REPOS_DIR", str(tmp_path / "repos"))
@@ -308,18 +313,6 @@ def test_a_verb_and_its_particle_are_searched_as_one_word_first():
 
 def test_keywords_drop_verb_endings():
     assert keywords("uploading embedded running") == ["upload", "embed", "run"]
-
-
-def test_names_that_fit_the_question_rank_first():
-    rows = [
-        {"id": "r:a/design.ts#design", "name": "design", "path": None},
-        {"id": "r:auth/signup/page.tsx", "name": "page.tsx", "path": "auth/signup/page.tsx"},
-        {"id": "r:auth/form.tsx#SignupForm", "name": "SignupForm", "path": None},
-    ]
-
-    ranked = rank_matches(rows, ["signup", "sign"], frozenset({"signup"}))
-
-    assert [row["name"] for row in ranked] == ["SignupForm", "page.tsx", "design"]
 
 
 def test_keywords_ignore_filler_words():
@@ -506,7 +499,7 @@ async def test_code_read_by_a_lookup_continues_the_numbering_and_can_be_cited(gr
 
     assert f"[{ref}] SignupForm" in found
     source = f"s{len(before.sources) + 1}"
-    assert read.startswith(f"Source {source} of [{ref}] SignupForm (features/signup/form.tsx:1-4):")
+    assert read.startswith(f"{FENCE}Source {source} of [{ref}] SignupForm (features/signup/form.tsx:1-4):")
     after = lookups.builder.build()
     assert after.text == before.text  # what was sent first stays as it was
     assert after.sources[source].node_id == SIGNUP_FORM
@@ -519,7 +512,7 @@ async def test_a_lookup_only_reads_files_the_graph_indexed(graph, signup):
 
     assert await lookups.run(call(READ_CODE, path="features/hooks.ts")) == "error: that file isn't in the repository's index"
     assert await lookups.run(call(READ_CODE, path="../../etc/passwd")) == "error: that file isn't in the repository's index"
-    assert (await lookups.run(call(READ_CODE, path="app/signup/page.tsx"))).startswith("Source ")
+    assert (await lookups.run(call(READ_CODE, path="app/signup/page.tsx"))).startswith(f"{FENCE}Source ")
 
 
 async def test_bad_lookups_get_an_error_back(graph, signup):
@@ -563,7 +556,7 @@ async def test_a_read_overlapping_whats_shown_reads_only_the_rest(graph, signup)
 
     rest = await lookups.run(call(READ_CODE, path="features/signup/form.tsx", start_line=1, end_line=4))
 
-    assert rest.startswith("lines 1–2 are already shown as s1; reading on from line 3:\nSource s2")
+    assert rest.startswith(f"lines 1–2 are already shown as s1; reading on from line 3:\n{FENCE}Source s2")
     assert lookups.builder.build().sources["s2"].start_line == 3
 
 
@@ -573,7 +566,7 @@ async def test_the_same_read_twice_at_once_is_read_once(graph, signup):
 
     results = await asyncio.gather(lookups.run(read), lookups.run(read))
 
-    assert sorted(result[:6] for result in results) == ["Source", "alread"]
+    assert sorted(result.removeprefix(FENCE)[:6] for result in results) == ["Source", "alread"]
     assert len(lookups.builder.build().sources) == 1
 
 
@@ -583,7 +576,7 @@ async def test_a_repeated_search_or_relation_lookup_points_back(graph, signup):
     first = await lookups.run(call(SEARCH_GRAPH, query="SignupForm"))
     again = await lookups.run(call(SEARCH_GRAPH, query="  signupform "))
 
-    assert first.startswith("Matching definitions")
+    assert first.startswith(f"{FENCE}Matching definitions")
     assert again == ALREADY_LOOKED_UP
 
 

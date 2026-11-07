@@ -132,6 +132,17 @@ class KnowledgeGraphStore(Protocol):
     ) -> list[dict]:
         """Folders, files and symbols whose name (or a folder's or file's path) matches."""
 
+    async def search_text(
+        self, repo_full_name: str, words: Sequence[str], *, limit: int = 20,
+    ) -> list[dict]:
+        """Folders, files and symbols matching any of `words`, best first by keyword relevance (BM25).
+
+        Rows as `search` returns them, plus `score`.
+        """
+
+    async def backfill_search_properties(self, batch: int = 2_000) -> int:
+        """Give nodes stored before keyword search what it needs; how many were updated."""
+
     async def counts(self, repo_full_name: str) -> dict:
         """Live node and edge counts, by label and type."""
 

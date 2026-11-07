@@ -73,6 +73,8 @@ async def ask_stream(member: dict, body: AskRequest) -> AsyncIterator[tuple[str,
 
     earlier = conversation["messages"] if conversation else []
     last_answer = next((m for m in reversed(earlier) if m["role"] == "assistant"), None)
+    # before any work that costs, such as embedding the question; `take` still counts it at the model call
+    await limits.check(workspace_id, user_id)
     workspace = Workspace(workspace_id, user_id)
     events = query.answer_stream(
         body.repo_full_name,

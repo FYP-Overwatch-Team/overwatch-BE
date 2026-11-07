@@ -19,9 +19,11 @@ from pymongo.errors import DuplicateKeyError
 from app.connectors import doc_sync, registry, repository as connectors, sync
 from app.core.config import get_settings
 from app.core.constants import ConnectorCategory, JobStatus
+from app.core.exceptions import ExternalServiceError
 from app.core.time import utcnow
 from app.db import mongo
 from app.documents import service as documents
+from app.embeddings import code as code_embeddings
 from app.github import checkout, repository
 from app.integrations import git_cli
 from app.integrations.github_app import InstallationGone, get_github_app
@@ -90,6 +92,30 @@ async def _index(repo_full_name: str, *, full: bool) -> None:
         "graph_stats": result.as_stats_document(),
         "indexed_at": utcnow(),
     })
+    if code_embeddings.enabled():
+        await _embed_code(repo, result.version, include_symbols=result.stats.get("symbol_layer") == "included")
+
+
+async def _embed_code(repo: dict, version: str, *, include_symbols: bool) -> None:
+    """Keep the repo's code findable by meaning; the graph is already written, so failing here never fails the index."""
+    repo_full_name = repo["repo_full_name"]
+    facts = await get_facts_store().load_all(repo_full_name)
+    try:
+        counts = await code_embeddings.sync(
+            repo_full_name, version, facts, include_symbols=include_symbols, workspace_id=repo["workspace_id"],
+        )
+    except ExternalServiceError:
+        logger.warning("code_embeddings_unavailable", repo=repo_full_name)
+        return
+    except Exception:
+        # a full Atlas tier or a lost connection: the next index tries again
+        logger.exception("code_embeddings_failed", repo=repo_full_name)
+        return
+    # disconnected everywhere while it ran: the purge has been, so what this run wrote goes too
+    if await repository.find_any(repo_full_name) is None:
+        await code_embeddings.delete_repo(repo_full_name)
+        return
+    await repository.update_all(repo_full_name, {"graph_stats.embeddings": counts})
 
 
 async def _claim(repo_full_name: str) -> bool:

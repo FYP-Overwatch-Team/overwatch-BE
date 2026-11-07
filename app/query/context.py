@@ -25,9 +25,17 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
+import structlog
+from pymongo.errors import PyMongoError
+
+from app.core.config import get_settings
+from app.core.exceptions import ExternalServiceError
+from app.embeddings import code as code_embeddings
 from app.knowledge_graph.build.ids import module_id, module_of, repository_id
 from app.knowledge_graph.build.model import EdgeType, NodeLabel
 from app.knowledge_graph.ports import KnowledgeGraphStore
+from app.knowledge_graph.redaction import redact_lines
+from app.query.retrieval import BUDGETS, merge_hits, route_of
 from app.query.source import Snippet, find_in_code, language_of, prompt_line, read_snippet
 
 #: Hard ceilings on what one prompt may carry.
@@ -52,7 +60,6 @@ MAX_FOLDERS = 12
 MAX_OPEN_FOLDERS = 10
 #: Nodes listed under those folders, shallowest first.
 MAX_CONTENTS = 80
-SEARCH_PER_WORD = 10
 #: Words from one question searched for, joined phrases ("sign up" -> `signup`) first.
 MAX_KEYWORDS = 8
 #: Source shown: for the nodes in focus first, then the best matches.
@@ -60,6 +67,8 @@ MAX_SNIPPETS = 10
 MAX_SNIPPET_MATCHES = 4
 MAX_SOURCE_LINES = 400
 MAX_SOURCE_CHARS = 40_000
+logger = structlog.get_logger("app.query")
+
 #: Following what the best matches lead to, so code one or more hops away is shown too:
 #: out along calls, renders and requests, and back from a route to the code serving it.
 #: Logic and rendering are followed separately, so a component rendering many widgets still
@@ -68,8 +77,8 @@ FLOW_EDGES_OUT = (EdgeType.CALLS, EdgeType.REQUESTS, EdgeType.EXTENDS, EdgeType.
 FLOW_EDGES_IN = (EdgeType.HANDLES,)
 FLOW_RENDER_EDGES = (EdgeType.RENDERS,)
 FLOW_DEPTH = 3
-#: Matches followed from; a matching file is followed from the functions it defines.
-MAX_FLOW_SEEDS = 4
+#: How many matches are followed from, and how many shown as code, comes from `retrieval.BUDGETS`;
+#: a matching file is followed from the functions it defines.
 MAX_LIFTED_SYMBOLS = 6
 #: Per hop: nodes followed from, and edges taken from each; nodes reached in all.
 MAX_FLOW_FRONTIER = 12
@@ -100,7 +109,6 @@ _PHRASAL_VERBS = frozenset({
     "shut", "tear", "pick", "drop", "break", "follow", "pop", "sync", "spin", "wake",
 })
 _PARTICLES = frozenset({"up", "in", "out", "on", "off", "down", "back", "over"})
-_WORD_BREAKS = frozenset("_-./ ")
 _STOPWORDS = frozenset({
     "the", "and", "for", "what", "which", "where", "how", "does", "did", "are",
     "was", "were", "this", "that", "with", "from", "into", "when", "why", "who",
@@ -212,10 +220,15 @@ def search_terms(question: str) -> tuple[list[str], frozenset[str]]:
         word = match.strip("_")
         if len(word) < MIN_KEYWORD_CHARS or word.lower() in _STOPWORDS:
             continue
-        word = _stem(word)
-        if word not in seen:
-            seen.append(word)
+        # a code name is searched as written too: `rank_matches` is a name, `rank_match` may be another
+        forms = [word, _stem(word)] if _is_code_name(word) else [_stem(word)]
+        seen += [form for form in dict.fromkeys(forms) if form not in seen]
     return seen[:MAX_KEYWORDS], frozenset(phrases)
+
+
+def _is_code_name(word: str) -> bool:
+    """`rank_matches`, `GraphDelta`, `openAsk`: underscores or capitals inside the word."""
+    return "_" in word or any(letter.isupper() for letter in word[1:])
 
 
 def _stem(word: str) -> str:
@@ -252,6 +265,7 @@ async def open_ask_context(
     open_folder_ids: Sequence[str] = (),
     earlier_ranges: Sequence[tuple[str, int, int]] = (),
     commit: str | None = None,
+    asked_by: tuple[str, str] | None = None,
 ) -> "ContextBuilder":
     """What is in focus, the symbols the question names, what folders in focus hold, then the modules.
 
@@ -260,7 +274,8 @@ async def open_ask_context(
     `mentioned_node_ids` are what the question @-mentions, `earlier_node_ids` what the
     previous answer cited (so "what calls it?" has something to go on), `earlier_ranges`
     the code it cited as `(path, start, end)`, and `open_folder_ids` what's open on the
-    canvas. Code is read at `commit`, the one the graph was built from; without it no
+    canvas. With `asked_by` (workspace id, user id) code close in meaning to the question
+    is shown too, its query charged to them. Code is read at `commit`, the one the graph was built from; without it no
     code is shown. Independent lookups run together, so a question costs two rounds of
     graph queries, not one per lookup.
     """
@@ -268,7 +283,7 @@ async def open_ask_context(
     earlier = [node_id for node_id in dict.fromkeys(earlier_node_ids) if node_id not in mentioned][:MAX_EARLIER_NODES]
 
     terms, phrases = search_terms(question)
-    selected, focused, matched, view, found = await asyncio.gather(
+    selected, focused, matched, view, found, similar = await asyncio.gather(
         _focus(store, repo_full_name, selected_node_id, depth=2, limit=MAX_NEIGHBOURS),
         asyncio.gather(*(
             _focus(store, repo_full_name, node_id, depth=1, limit=MAX_RELATIONS, relations=index < MAX_MENTION_RELATIONS)
@@ -277,12 +292,17 @@ async def open_ask_context(
         search_nodes(store, repo_full_name, question),
         store.module_view(repo_full_name),
         find_in_code(repo_full_name, commit, terms) if commit else _nothing(),
+        similar_nodes(store, repo_full_name, question, asked_by) if asked_by else _nothing(),
     )
     # folders match well by name but hold no code to follow or show
     with_code = [row for row in matched if not _holds_only(row.get("labels", []))]
+    # keyword search leads when the question names code, meaning search when it describes behaviour
+    route = route_of(question, mentioned)
+    budget = BUDGETS[route]
+    best_matches = merge_hits(route, with_code, similar, budget.keyword_seeds, budget.meaning_seeds)
     seeds = [
         *({"id": focus.detail["id"], "labels": focus.detail["labels"]} for focus in (selected, *focused) if focus),
-        *with_code[:MAX_FLOW_SEEDS],
+        *best_matches[:budget.seeds],
     ]
     holders = [
         *open_folder_ids[:MAX_OPEN_FOLDERS],
@@ -292,7 +312,7 @@ async def open_ask_context(
     flow = await _follow_flow(store, repo_full_name, seeds)
     near = {
         posixpath.dirname(path)
-        for row in [*seeds, *matched, *flow]
+        for row in [*seeds, *matched, *similar, *flow]
         if (path := row.get("file_path") or row.get("path")) and "/" in path
     }
     relations, contents, files = await asyncio.gather(
@@ -304,9 +324,10 @@ async def open_ask_context(
         store.repo_map(repo_full_name, near=sorted(near), limit=MAX_MAP_FILES),
     )
     # file reads, all at once: code cited just before, what's in focus, the best matches, then functions in open folders
+    best_code = merge_hits(route, with_code, similar, budget.keyword_snippets, budget.meaning_snippets)
     sources = _source_candidates(
         [selected, *focused], matched, contents, earlier_ranges, _found_ranges(found, len(terms), phrases), question,
-        flow,
+        flow, best_code[:budget.snippets],
     ) if commit else []
     snippets = await asyncio.gather(*(
         read_snippet(repo_full_name, commit, path, start, end) for _, _, _, path, start, end, _ in sources
@@ -322,6 +343,7 @@ async def open_ask_context(
         elif focus:
             builder.add_focus("Mentioned earlier", focus)
     builder.add_matches(matched, relations)
+    builder.add_similar(similar)
     builder.add_flow(flow)
     builder.add_sources([((*source[:3], source[6]), snippet) for source, snippet in zip(sources, snippets) if snippet])
     builder.add_contents(contents)
@@ -346,6 +368,28 @@ async def _focus(
         store.neighbours(repo, node_id, depth=depth, limit=limit) if relations else _no_neighbours(),
     )
     return _Focus(detail, around) if detail else None
+
+
+async def similar_nodes(
+    store: KnowledgeGraphStore, repo: str, text: str, asked_by: tuple[str, str], limit: int | None = None,
+) -> list[dict]:
+    """The repository's code closest in meaning to `text`, as graph rows; nothing when that can't be searched."""
+    if not code_embeddings.enabled():
+        return []
+    workspace_id, user_id = asked_by
+    settings = get_settings()
+    # a bonus, never a wait or a failure: a slow provider or a rebuilding index just means no hits
+    try:
+        async with asyncio.timeout(settings.code_similar_timeout_seconds):
+            hits = await code_embeddings.similar(
+                workspace_id, user_id, repo, text, limit or settings.code_similar_per_question,
+            )
+    except (ExternalServiceError, TimeoutError, PyMongoError) as exc:
+        logger.warning("code_similar_unavailable", repo=repo, error=type(exc).__name__)
+        return []
+    # a vector can outlive its node for an index run; only what the graph still has is shown
+    details = await asyncio.gather(*(store.node_detail(repo, node_id) for node_id, _ in hits))
+    return [{"id": detail["id"], "labels": detail["labels"], **detail["properties"]} for detail in details if detail]
 
 
 async def _no_neighbours() -> dict:
@@ -388,40 +432,12 @@ def _found_ranges(
 
 
 async def search_nodes(store: KnowledgeGraphStore, repo: str, question: str) -> list[dict]:
-    """Nodes whose names appear in the question, best match first — the retrieval step; every word at once."""
-    terms, phrases = search_terms(question)
-    results = await asyncio.gather(*(store.search(repo, word, limit=SEARCH_PER_WORD) for word in terms))
-    found: dict[str, dict] = {}
-    for rows in results:
-        for row in rows:
-            found.setdefault(row["id"], row)
-    return rank_matches(list(found.values()), terms, phrases)[:MAX_RETRIEVED_SYMBOLS]
+    """Nodes matching the question's words, best first by BM25 over names, paths, signatures and docstrings.
 
-
-def rank_matches(rows: list[dict], terms: Sequence[str], phrases: frozenset[str] = frozenset()) -> list[dict]:
-    """Search hits ordered by how well their names fit the question.
-
-    A word in the name counts more than one only in the path, a name that is or
-    starts with the word more again, and a phrase ("signup") more than a single
-    word, so `SignupForm` comes before `design` for "how does a user sign up".
+    BM25's own order is kept: reordering by name match alone ranked worse (scripts/eval_chat.py retrieval).
     """
-    def score(row: dict) -> float:
-        written = str(row.get("name") or "")
-        name = written.lower()
-        path = str(row.get("path") or row.get("file_path") or "").lower()
-        total = 0.0
-        for term in (term.lower() for term in terms):
-            weight = 2 if term in phrases else 1
-            at = name.find(term)
-            if at >= 0:
-                # `SignupForm`, `sign_in`, `onSignUp` start a word with it; `design` only contains it
-                starts_word = at == 0 or written[at].isupper() or written[at - 1] in _WORD_BREAKS
-                total += weight * ((3 if starts_word else 1) + (2 if at == 0 else 0) + (2 if name == term else 0))
-            elif term in path:
-                total += weight
-        return total
-
-    return sorted(rows, key=lambda row: (-score(row), len(str(row.get("name") or row.get("path") or "")), row["id"]))
+    terms, _ = search_terms(question)
+    return await store.search_text(repo, terms, limit=MAX_RETRIEVED_SYMBOLS)
 
 
 async def _follow_flow(store: KnowledgeGraphStore, repo: str, seeds: Sequence[dict]) -> list[dict]:
@@ -480,11 +496,12 @@ def _source_candidates(
     found_ranges: Sequence[tuple[str, int, int]] = (),
     question: str = "",
     flow: Sequence[dict] = (),
+    best: Sequence[dict] = (),
 ) -> list[tuple]:
     """(id, name, labels, path, start, end, note) of the code worth showing, most telling first.
 
     Code cited just before, then what's in focus, files the question names, the
-    best matches and what they lead to, code found by its contents, and only then
+    best matches from both searches (`best`), what the matches lead to, code found by its contents, and only then
     other symbols whose names merely share a word with the question. `id` is None for a range that isn't one node's code; `note`
     says why it's shown.
     """
@@ -500,8 +517,7 @@ def _source_candidates(
         )
     ]
     focus_rows = [{"id": f.detail["id"], "labels": f.detail["labels"], **f.detail["properties"]} for f in focused if f]
-    with_code = [row for row in matched if not _holds_only(row.get("labels", []))]
-    _add_node_sources(candidates, [*focus_rows, *named_files, *with_code[:2]])
+    _add_node_sources(candidates, [*focus_rows, *named_files, *best])
     # the seeds' own functions (hop 0) are in the matched files already
     followed = sorted(
         (row for row in flow if row["hop"] > 0 and NodeLabel.SYMBOL in row["labels"]),
@@ -636,6 +652,16 @@ class ContextBuilder:
                 ref = self.refs[row["id"]]
                 self.add_around(around, MAX_RELATIONS, f"Relations of [{ref}] {self.names[ref]}")
 
+    def add_similar(self, rows: Sequence[dict], heading: str = "Close in meaning to the question", *, only_new: bool = True) -> None:
+        """Code close in meaning to what was asked, though its names may not match; with `only_new`, what's shown already isn't repeated."""
+        rows = [row for row in rows if not only_new or row["id"] not in self.refs]
+        if not rows:
+            return
+        self.heading(heading)
+        for row in rows:
+            labels = row.get("labels", [])
+            self.node(row["id"], row.get("name") or row.get("path"), _describe(row, labels), labels)
+
     def shown_code(self, path: str) -> list[tuple[str, int, int]]:
         """`(source, start, end)` of each block of a file's code shown so far, as it can be cited."""
         return [
@@ -681,7 +707,8 @@ class ContextBuilder:
                 ref = self.ref(node_id, name, labels)
                 self.lines.append(_Line(f"Source {source} of [{ref}] {self.names[ref]} ({where}):", (ref,)))
             shown = 0
-            for offset, code in enumerate(snippet.lines):
+            # the model never sees a credential; the citation keeps the file's own line
+            for offset, code in enumerate(redact_lines(snippet.lines)):
                 number = snippet.start_line + offset
                 text = f"  {number:>5} | {prompt_line(code)}"
                 if shown >= lines_left or len(text) > chars_left:
@@ -752,7 +779,9 @@ class ContextBuilder:
         rendered = [line.text[:MAX_LINE_CHARS] for line in kept]
         if len(added) > len(kept):
             rendered.append(f"… {len(added) - len(kept)} more lines omitted: there's no room to look up more, so answer with what's shown")
-        return "\n".join(rendered) or "(nothing found)"
+        body = "\n".join(rendered) or "(nothing found)"
+        # fenced like the context: what code says is data, whichever way it was found
+        return f"<graph_context>\n{body}\n</graph_context>"
 
     @property
     def lookup_room(self) -> int:
@@ -816,7 +845,6 @@ __all__ = [
     "Relation",
     "ShownSource",
     "clean",
-    "rank_matches",
     "search_terms",
     "module_for",
     "owning_module_id",

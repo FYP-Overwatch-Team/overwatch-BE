@@ -43,12 +43,12 @@ class OpenAICompatibleEmbedder:
 
     def __init__(
         self, *, base_url: str, api_key: str, model: str, dimensions: int, query_instruction: str = "",
-        provider: dict | None = None,
+        code_query_instruction: str = "", provider: dict | None = None,
     ):
         self.model = model
         self._dimensions = dimensions
         #: some models (Qwen3) are trained to read what a search text is for before it
-        self._query_instruction = query_instruction
+        self._instructions = {EmbedPurpose.QUERY: query_instruction, EmbedPurpose.CODE_QUERY: code_query_instruction}
         self._provider = provider
         self._http = httpx.AsyncClient(
             base_url=base_url.rstrip("/"), headers={"Authorization": f"Bearer {api_key}"}, timeout=TIMEOUT_SECONDS,
@@ -57,7 +57,7 @@ class OpenAICompatibleEmbedder:
     async def embed(
         self, texts: Sequence[str], purpose: EmbedPurpose, *, on_usage: Callable[[CallUsage], Awaitable[None]] | None = None,
     ) -> list[list[float]]:
-        prefix = self._query_instruction if purpose == EmbedPurpose.QUERY else ""
+        prefix = self._instructions.get(purpose, "")
         vectors: list[list[float]] = []
         for start in range(0, len(texts), BATCH_SIZE):
             body = {"model": self.model, "input": [prefix + text for text in texts[start:start + BATCH_SIZE]]}
@@ -117,6 +117,7 @@ def get_embedder() -> Embedder | None:
         _embedder = ADAPTERS[settings.embedding_adapter](
             base_url=settings.model_base_url, api_key=settings.model_api_key, model=settings.embedding_model,
             dimensions=settings.embedding_dimensions, query_instruction=settings.embedding_query_instruction,
+            code_query_instruction=settings.embedding_code_query_instruction,
             provider=provider_routing("", settings.embedding_provider_order),
         )
     return _embedder

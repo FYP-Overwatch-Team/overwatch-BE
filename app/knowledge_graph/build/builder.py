@@ -23,6 +23,7 @@ from typing import Any
 from app.knowledge_graph.build.ids import (
     EXTERNAL_MODULE,
     ROUTES_MODULE,
+    definition_ids,
     ecosystem_for_language,
     route_id,
     file_id,
@@ -30,7 +31,6 @@ from app.knowledge_graph.build.ids import (
     owning_module,
     package_id,
     repository_id,
-    symbol_id,
 )
 from app.knowledge_graph.build.model import (
     EdgeType,
@@ -230,11 +230,7 @@ def _add_files_and_symbols(
         if not include_symbols:
             continue
 
-        seen: Counter[str] = Counter()
-        for definition in facts.definitions:
-            seen[definition.qualified_name] += 1
-            ordinal = seen[definition.qualified_name]
-            identifier = symbol_id(repo_full_name, path, definition.qualified_name, ordinal)
+        for definition, identifier in definition_ids(repo_full_name, path, facts.definitions):
             # Only the first definition of a name owns the plain id; later
             # ones are addressable but the linker cannot tell them apart.
             symbol_ids.setdefault((path, definition.qualified_name), identifier)
