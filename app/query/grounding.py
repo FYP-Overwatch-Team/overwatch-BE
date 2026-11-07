@@ -30,6 +30,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 
+from app.knowledge_graph.search_text import identifier_words
 from app.query.context import GroundingContext, Relation, clean
 
 CANNOT_DETERMINE = "This can't be determined from the repository's graph or the workspace."
@@ -61,6 +62,11 @@ _REPEATED_CITATION_RE = re.compile(r"(\[c\d+\])(?:\s*\1)+")
 _CITATION_RE = re.compile(r"([ \t]*)\[(c\d+)\]")
 # a reference with the space before it, so removing one leaves no gap
 _SPACED_REF_RE = re.compile(r"[ \t]*\[(n\d+)\]")
+#: How close (in characters) a `code` name must be to a node reference to be the thing it names.
+_NAMED_WITHIN = 40
+_CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
+#: Words are compared by their first letters, so `features` names a node `feature`.
+_NAME_PREFIX = 4
 # a workspace record, `[r1]`, as loosely as models write it
 _RECORD_REF_RE = re.compile(r"([ \t]*)[\[【]\s*(r\d+)\s*[\]】]")
 # a dash between words, which reads as machine-written; an unspaced en dash is a range (42–58) and stays
@@ -201,8 +207,9 @@ def ground(
         return GroundedAnswer(CANNOT_DETERMINE, grounded=False, unsupported=unsupported)
 
     cited = list(dict.fromkeys(REF_RE.findall(text)))
-    known = [ref for ref in cited if ref in context.nodes]
-    text = _SPACED_REF_RE.sub(lambda match: match[0] if match[1] in context.nodes else "", text)
+    text = _SPACED_REF_RE.sub(lambda match: match[0] if _names_its_node(context, match) else "", text)
+    kept = set(REF_RE.findall(text))
+    known = [ref for ref in cited if ref in kept]
     text, code_citations, dropped_code = _cite_code(context, text)
     if ask:  # a question back walks through nothing yet
         text, steps = _outside_code(text, lambda part: _EXACT_STEPS_LINE_RE.sub("", part)), ()
@@ -215,9 +222,34 @@ def ground(
         steps,
         follow_ups,
         ask,
-        dropped_refs=tuple(ref for ref in cited if ref not in context.nodes),
+        dropped_refs=tuple(ref for ref in cited if ref not in kept),
         dropped_code_refs=dropped_code,
     )
+
+
+def _names_its_node(context: GroundingContext, match: re.Match) -> bool:
+    """Whether a reference was given out and isn't written beside a `code` name for something else.
+
+    "the migration plan [n1] (in `docs/plans/migration.md`)", n1 being a folder, would
+    highlight the wrong thing, so it's dropped like a made-up reference. Prose around a
+    reference ("the route [n1]") says nothing for sure, so it's trusted.
+    """
+    ref = match[1]
+    if ref not in context.nodes:
+        return False
+    text, start, end = match.string, match.start(), match.end()
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end < 0:
+        line_end = len(text)
+    beside = [
+        span[1] for span in _CODE_SPAN_RE.finditer(text, line_start, line_end)
+        if start - _NAMED_WITHIN <= span.end() <= start or end <= span.start() <= end + _NAMED_WITHIN
+    ]
+    if not beside:
+        return True
+    name = {word[:_NAME_PREFIX] for word in identifier_words(context.labels[ref]).split()}
+    return any(word[:_NAME_PREFIX] in name for word in identifier_words(*beside).split())
 
 
 def cite_records(answer: str, records: dict[str, dict]) -> tuple[str, tuple[dict, ...]]:
