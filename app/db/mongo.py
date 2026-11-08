@@ -195,6 +195,11 @@ def llm_usage():
     return get_db()["llm_usage"]
 
 
+def ai_actions():
+    """One record per AI action taken from a workspace's monthly allowance: who, for what, when."""
+    return get_db()["ai_actions"]
+
+
 def usage_counters():
     """Fixed-window request counters for rate limits; expire with their window."""
     return get_db()["usage_counters"]
@@ -350,6 +355,7 @@ async def ensure_indexes() -> None:
     await decision_checks().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
     # a workspace's usage over a window, as Settings → Usage reads it
     await llm_usage().create_index([("workspace_id", 1), ("created_at", -1)])
+    await ai_actions().create_index([("workspace_id", 1), ("created_at", -1)])
     await link_previews().create_index("expires_at", expireAfterSeconds=0)
     await webhook_deliveries().create_index("delivery_id", unique=True)
     await webhook_deliveries().create_index("received_at", expireAfterSeconds=30 * 24 * 3600)

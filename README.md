@@ -165,7 +165,8 @@ The application `.env` and the origin certificate are never copied from GitHub.
    - `JIRA_CLIENT_ID`, `JIRA_CLIENT_SECRET`
    - `GEMINI_API_KEY`, and optionally the AI chat limits `CHAT_USER_HOURLY_LIMIT` (30),
      `CHAT_WORKSPACE_DAILY_LIMIT` (200) and `CHAT_DAILY_BUDGET` (500); keep the budget below
-     the Gemini project's daily quota
+     the Gemini project's daily quota, and each workspace's monthly allowance of AI actions
+     `AI_WORKSPACE_MONTHLY_LIMIT` (1000)
    - `APP_BASE_URL` (your deployed API URL — used to build OAuth callbacks)
    - `FRONTEND_ORIGIN` (your deployed frontend URL — CORS is locked to exactly this origin)
 5. Moving from the old GitHub OAuth app: delete the old per-repo webhooks, then run

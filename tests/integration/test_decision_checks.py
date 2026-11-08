@@ -128,6 +128,20 @@ async def test_checks_stop_at_the_daily_cap_and_pick_up_the_rest_later(client, f
     assert await run(client, headers) == {"checked": 1, "conflicts": 0, "capped": True}
 
 
+async def test_checks_stop_when_the_monthly_allowance_runs_out(client, fake_llm, monkeypatch):
+    monkeypatch.setenv("AI_WORKSPACE_MONTHLY_LIMIT", "1")
+    get_settings.cache_clear()
+    headers = await signed_in(client)
+    first, second = await page(client, headers), await page(client, headers)
+    await accepted(client, headers, first, "Guests can't export reports.")
+    await accepted(client, headers, second, "Guests can't export reports.")
+    await edit(first["id"], CHANGED)
+    await edit(second["id"], CHANGED)
+    fake_llm.stream_response = reply()
+
+    assert await run(client, headers) == {"checked": 1, "conflicts": 0, "capped": True}
+
+
 async def test_the_background_pass_checks_workspaces_that_are_due_and_on(client, fake_llm):
     due, off, daily = await signed_in(client), await user(client, "someone-else"), await user(client, "third")
     for headers in (due, off, daily):

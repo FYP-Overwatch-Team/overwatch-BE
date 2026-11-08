@@ -1,6 +1,6 @@
-"""AI usage, one record per model call, kept per workspace so each one's usage can be shown and billed."""
+"""AI usage, one record per model call and one per action taken from the monthly allowance, kept per workspace."""
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Awaitable, Callable, Hashable
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -13,9 +13,9 @@ from app.core.time import utcnow
 from app.db import mongo
 from app.decisions import limits as decision_limits
 from app.integrations.llm import CallUsage
+from app.usage import allowance
 from app.usage.schemas import (
     DailyUsage,
-    FeatureUsage,
     MemberUsage,
     UsageLimit,
     UsageLimits,
@@ -44,8 +44,10 @@ def recorder(workspace_id: str, user_id: str, feature: UsageFeature) -> Callable
     return record
 
 
-def _totals(rows: list[dict]) -> UsageTotals:
+def _totals(rows: list[dict], actions: list[dict]) -> UsageTotals:
+    """`rows` are model calls (tokens, cost), `actions` what was taken from the monthly allowance."""
     return UsageTotals(
+        actions=len(actions),
         calls=len(rows),
         prompt_tokens=sum(row["prompt_tokens"] for row in rows),
         completion_tokens=sum(row["completion_tokens"] for row in rows),
@@ -54,47 +56,53 @@ def _totals(rows: list[dict]) -> UsageTotals:
     )
 
 
-def _grouped(rows: list[dict], key: Callable[[dict], Hashable]) -> dict:
+def _grouped(rows: list[dict], key: Callable[[dict], Hashable]) -> defaultdict:
     groups = defaultdict(list)
     for row in rows:
         groups[key(row)].append(row)
     return groups
 
 
-def _day(rows: list[dict], day) -> DailyUsage:
-    return DailyUsage(
-        day=day,
-        calls_by_feature=Counter(row["feature"] for row in rows),
-        calls_by_member=Counter(row["user_id"] for row in rows),
-        **_totals(rows).model_dump(),
-    )
-
-
 async def summary(workspace_id: str, days: int, tz: ZoneInfo) -> UsageSummary:
     """Usage over the last `days` days in `tz`, today included, so a chart of them has one bar per day."""
     today = utcnow().astimezone(tz).date()
     since = datetime.combine(today - timedelta(days=days - 1), time(), tz)
-    rows = await mongo.llm_usage().find({"workspace_id": workspace_id, "created_at": {"$gte": since}}).to_list(None)
-    by_day = _grouped(rows, lambda row: row["created_at"].astimezone(tz).date())
-    by_feature = _grouped(rows, lambda row: row["feature"])
-    by_member = _grouped(rows, lambda row: row["user_id"])
+    query = {"workspace_id": workspace_id, "created_at": {"$gte": since}}
+    rows = await mongo.llm_usage().find(query).to_list(None)
+    actions = await mongo.ai_actions().find(query).to_list(None)
+
+    def day(row: dict):
+        return row["created_at"].astimezone(tz).date()
+
+    def member(row: dict) -> str:
+        return row["user_id"]
+
+    rows_by_day, actions_by_day = _grouped(rows, day), _grouped(actions, day)
+    rows_by_member, actions_by_member = _grouped(rows, member), _grouped(actions, member)
     return UsageSummary(
         days=days,
         time_zone=tz.key,
-        total=_totals(rows),
-        by_day=[_day(by_day[day], day) for day in sorted(by_day, reverse=True)],
-        by_feature=[FeatureUsage(feature=feature, **_totals(group).model_dump()) for feature, group in by_feature.items()],
-        by_member=[MemberUsage(user_id=user_id, **_totals(group).model_dump()) for user_id, group in by_member.items()],
+        total=_totals(rows, actions),
+        by_day=[
+            DailyUsage(day=d, **_totals(rows_by_day[d], actions_by_day[d]).model_dump())
+            for d in sorted(rows_by_day.keys() | actions_by_day.keys(), reverse=True)
+        ],
+        by_member=[
+            MemberUsage(user_id=user_id, **_totals(rows_by_member[user_id], actions_by_member[user_id]).model_dump())
+            for user_id in rows_by_member.keys() | actions_by_member.keys()
+        ],
     )
 
 
 async def limits(workspace_id: str, user_id: str) -> UsageLimits:
-    """Each limit's count as it stands, read from the same counters the limits take from (UTC hours and days)."""
+    """Each limit's count as it stands, read from the same counters the limits take from (UTC hours, days and months)."""
     settings = get_settings()
     now = utcnow()
     next_day = datetime.combine(now.date() + timedelta(days=1), time(), now.tzinfo)
     next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     counters = [
+        (UsageLimitKind.AI_ACTIONS, allowance.monthly_key(workspace_id, now),
+         settings.ai_workspace_monthly_limit, allowance.next_month(now)),
         (UsageLimitKind.CHAT_QUESTIONS, chat_limits.workspace_daily_key(workspace_id, now),
          settings.chat_workspace_daily_limit, next_day),
         (UsageLimitKind.MEMBER_CHAT_QUESTIONS, chat_limits.member_hourly_key(workspace_id, user_id, now),
