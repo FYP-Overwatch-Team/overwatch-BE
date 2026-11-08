@@ -20,3 +20,6 @@ htmlcov/
 /data/
 /repos/
 /uploads/
+
+# Local notes
+/CO_CHANGE.md

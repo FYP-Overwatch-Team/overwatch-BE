@@ -383,6 +383,7 @@ def nested_delta(repo: str = REPO) -> GraphDelta:
             file_node(repo, "api/services/store.py"),
             GraphNode(list_users, NodeLabel.SYMBOL, {
                 "name": "list_users", "kind": "function", "file_path": "api/routes/users.py",
+                "start_line": 3, "end_line": 9,
             }),
             GraphNode(fetch, NodeLabel.SYMBOL, {
                 "name": "fetch", "kind": "function", "file_path": "api/services/store.py",
@@ -422,6 +423,8 @@ async def test_view_children_reports_a_leaf_as_having_nothing_to_open(store):
 
     assert [node.name for node in symbols] == ["list_users"]
     assert symbols[0].child_count == 0
+    # what opening it at its lines needs
+    assert (symbols[0].path, symbols[0].start_line, symbols[0].end_line) == ("api/routes/users.py", 3, 9)
 
 
 async def test_view_children_never_crosses_into_another_repository(store):

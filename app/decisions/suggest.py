@@ -12,6 +12,7 @@ same text.
 import re
 from datetime import timedelta
 from pathlib import Path
+from string import Template
 
 import structlog
 from pydantic import BaseModel, Field
@@ -20,6 +21,7 @@ from app.core.config import get_settings
 from app.core.constants import DecisionOrigin, DecisionStatus, EmbeddingKind, EvidenceKind, UsageFeature
 from app.core.exceptions import ConflictError, ExternalServiceError, NotFoundError
 from app.core.time import utcnow
+from app.core.writing import WRITING_STYLE
 from app.db import mongo
 from app.decision_comments import service as decision_comments
 from app.realtime import topics
@@ -31,7 +33,9 @@ from app.embeddings import service as embeddings
 
 logger = structlog.get_logger("app.decisions")
 
-SYSTEM_INSTRUCTION = (Path(__file__).parent / "prompts" / "suggest.md").read_text(encoding="utf-8")
+SYSTEM_INSTRUCTION = Template((Path(__file__).parent / "prompts" / "suggest.md").read_text(encoding="utf-8")).substitute(
+    writing_style=WRITING_STYLE,
+)
 MAX_SUGGESTIONS = 5
 #: related sources read with the one asked about, and how much of each
 MAX_RELATED = 4
