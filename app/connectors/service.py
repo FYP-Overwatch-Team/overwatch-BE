@@ -1,10 +1,15 @@
 import secrets
 
+import structlog
+from pymongo.errors import DuplicateKeyError
+
 from app.connectors import registry, repository
-from app.core.constants import AuthBackendName, ConnectionStatus, Role
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.constants import AuthBackendName, ConnectionStatus, ConnectorCategory, Role
+from app.core.exceptions import AppError, ConflictError, NotFoundError
 from app.db import oauth_tokens
 from app.workspaces.service import require_member
+
+logger = structlog.get_logger("app.connectors")
 
 
 async def auth_status(conn: dict | None) -> str:
@@ -33,11 +38,13 @@ def outdated(conn: dict | None) -> bool:
 
 
 async def catalog(workspace_id: str) -> list[dict]:
-    """Every supported connector with this workspace's state for it."""
+    """Every connector this server offers, with this workspace's state for it."""
     connections = {c["provider"]: c for c in await repository.list_connections(workspace_id)}
     targets = await repository.list_targets(workspace_id)
     result = []
     for provider, connector in registry.CONNECTORS.items():
+        if not connector.configured:
+            continue
         conn = connections.get(provider)
         status = await auth_status(conn)
         result.append({
@@ -62,6 +69,8 @@ async def start_authorization(member: dict, provider: str, return_to: str) -> tu
     Confluence must not take Jira's scopes away.
     """
     connector = registry.get(provider)
+    if not connector.configured:
+        raise ConflictError(f"{provider} isn't set up on this server", error_code="connector_not_configured")
     scopes = list(connector.scopes)
     for sibling in registry.siblings(provider):
         if await repository.active_connection(member["workspace_id"], sibling):
@@ -78,29 +87,72 @@ async def complete_authorization(provider: str, workspace_id: str, user_id: str,
     tokens = await connector.flow.exchange_code(code)
     known_site = next((conn["external_account"]["id"] for conn in siblings if conn.get("external_account")), None)
     account = await connector.adapter.resolve_account(tokens["access_token"], known_site)
+    if connector.exclusive_account:
+        await _require_unclaimed(connector, account["id"], workspace_id)
     await oauth_tokens.save(workspace_id, connector.credential, tokens)
-    granted = tokens.get("scope", "").split() or [*connector.scopes, *(s for conn in siblings for s in registry.get(conn["provider"]).scopes)]
-    await repository.save_connection(
-        workspace_id, provider,
-        auth_backend=AuthBackendName.NATIVE_OAUTH,
-        scopes=granted,
-        external_account=account,
-        connected_by=user_id,
-    )
+    granted = connector.oauth.parse_scopes(tokens.get("scope", "")) or [*connector.scopes, *(s for conn in siblings for s in registry.get(conn["provider"]).scopes)]
+    try:
+        await repository.save_connection(
+            workspace_id, provider,
+            auth_backend=AuthBackendName.NATIVE_OAUTH,
+            scopes=granted,
+            external_account=account,
+            connected_by=user_id,
+        )
+    except DuplicateKeyError as exc:
+        # another workspace claimed the same account between the check and the save
+        await oauth_tokens.forget(workspace_id, connector.credential)
+        raise _claimed(connector) from exc
     # the new grant replaced the one they used
     for conn in siblings:
         await repository.set_scopes(workspace_id, conn["provider"], granted)
-    # a reconnect may grant what earlier syncs couldn't read (a board's columns), so the next one reads everything
-    await request_full_sync(workspace_id, provider)
+    # a reconnect may grant what earlier syncs couldn't read (a board's columns), so the next one reads everything;
+    # chat channels aren't synced
+    if connector.category != ConnectorCategory.CHAT:
+        await request_full_sync(workspace_id, provider)
+
+
+async def _require_unclaimed(connector, account_id: str, workspace_id: str) -> None:
+    taken = await repository.connection_for_account(connector.provider, account_id)
+    if taken and taken["workspace_id"] != workspace_id:
+        raise _claimed(connector)
+
+
+def _claimed(connector) -> ConflictError:
+    return ConflictError(
+        f"that {connector.name} workspace is already connected to another Bearings workspace",
+        error_code="account_already_connected",
+    )
 
 
 async def disconnect(workspace_id: str, provider: str) -> None:
     connector = registry.get(provider)
+    conn = await repository.active_connection(workspace_id, provider)
+    # marked disconnected before the revoke: the provider then reports the app removed (Slack sends
+    # tokens_revoked and app_uninstalled), and that must find nothing live left to wipe
     await repository.disconnect(workspace_id, provider)
+    if conn and connector.category == ConnectorCategory.CHAT:
+        try:
+            await connector.adapter.revoke(registry.auth_for(conn), conn)
+        except AppError as exc:
+            # the token may already be gone (the app was removed on the provider's side): forget it anyway
+            logger.warning("connector_revoke_failed", provider=provider, error_code=exc.error_code)
+    if connector.on_disconnect is not None:
+        await connector.on_disconnect(workspace_id)
     # a shared token stays while another product still uses it
     if not any([await repository.active_connection(workspace_id, p) for p in registry.siblings(provider)]):
-        await oauth_tokens.set_status(workspace_id, connector.credential, ConnectionStatus.DISCONNECTED)
+        if connector.category == ConnectorCategory.CHAT:
+            await oauth_tokens.forget(workspace_id, connector.credential)
+        else:
+            await oauth_tokens.set_status(workspace_id, connector.credential, ConnectionStatus.DISCONNECTED)
 
+
+async def disconnect_chat(workspace_id: str) -> None:
+    """Disconnect the workspace's chat connections (when the workspace is deleted): the token is revoked and
+    the chat dropped, and the chat workspace is free to connect to another Bearings workspace."""
+    for provider, connector in registry.CONNECTORS.items():
+        if connector.category == ConnectorCategory.CHAT and await repository.active_connection(workspace_id, provider):
+            await disconnect(workspace_id, provider)
 
 async def require_connection(workspace_id: str, provider: str) -> dict:
     registry.get(provider)
@@ -121,9 +173,18 @@ async def list_assignees(workspace_id: str, provider: str, key: str) -> list[dic
 
 
 async def add_target(workspace_id: str, provider: str, key: str, name: str | None) -> dict:
-    await require_connection(workspace_id, provider)
+    conn = await require_connection(workspace_id, provider)
     if await repository.find_target(workspace_id, provider, key):
         raise ConflictError("already connected", error_code="target_already_connected")
+    if registry.get(provider).category == ConnectorCategory.CHAT:
+        # a channel is watched only if the app can really hear it there, never one picked by id alone
+        offered = {t["key"]: t for t in await registry.get(provider).adapter.list_targets(registry.auth_for(conn), conn)}
+        channel = offered.get(key)
+        if channel is None:
+            raise NotFoundError("that channel isn't one the app can see", error_code="target_not_available")
+        if channel.get("hint"):
+            raise ConflictError(f"{channel['name']}: {channel['hint']}", error_code="channel_not_joined")
+        name = channel["name"]
     return await repository.add_target(workspace_id, provider, key, name)
 
 
@@ -134,6 +195,8 @@ async def remove_target(workspace_id: str, provider: str, key: str) -> None:
 
 async def request_full_sync(workspace_id: str, provider: str) -> list[str]:
     """Targets to resync now, each made to run in full (so deletions show up too)."""
+    if registry.get(provider).category == ConnectorCategory.CHAT:
+        raise ConflictError(f"{provider} sends messages as they're posted; there's nothing to sync", error_code="nothing_to_sync")
     await require_connection(workspace_id, provider)
     targets = await repository.list_targets(workspace_id, provider)
     for target in targets:

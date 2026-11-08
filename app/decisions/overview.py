@@ -25,6 +25,8 @@ def _link_text(text: str) -> str:
 def _source_href(evidence: dict) -> str:
     if evidence["kind"] == EvidenceKind.DOCUMENT:
         return document_href(evidence["ref_id"])
+    if evidence["kind"] == EvidenceKind.CHAT_THREAD:
+        return evidence.get("external_url") or ""
     return work_item_href(evidence.get("board_id"), evidence.get("item_key"))
 
 

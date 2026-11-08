@@ -21,6 +21,8 @@ class Target(BaseModel):
     key: str
     name: str | None
     id: str | None
+    #: why it can't be added yet, e.g. a chat channel the app hasn't been invited to; null when it can
+    hint: str | None = None
 
 
 class AddTargetRequest(BaseModel):

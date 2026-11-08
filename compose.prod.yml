@@ -27,6 +27,9 @@ services:
       - --timeout-graceful-shutdown
       - "10"
     restart: unless-stopped
+    # uvicorn waits up to 10 s for open requests, then the app writes its buffered Slack messages; Docker's
+    # default 10 s before SIGKILL would cut that off
+    stop_grace_period: 30s
     # journald keeps logs across deploys (a container's own log goes with it); size is capped on the host
     logging:
       driver: journald
