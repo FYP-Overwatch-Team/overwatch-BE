@@ -1,12 +1,14 @@
-"""How often a workspace may use the AI on decisions; every call also counts against the AI's daily budget."""
+"""How often a workspace may use the AI on decisions; every call also counts against its month and the AI's daily budget."""
 
 from datetime import datetime, timedelta
 
 from app.chat.limits import daily_budget
 from app.core.config import get_settings
+from app.core.constants import UsageFeature
 from app.core.exceptions import AppError
-from app.core.rate_limit import Window, take_all
+from app.core.rate_limit import Window
 from app.core.time import utcnow
+from app.usage.allowance import take_action
 
 
 def suggestion_key(workspace_id: str, now: datetime) -> str:
@@ -17,9 +19,9 @@ def check_key(workspace_id: str, now: datetime) -> str:
     return f"decisions:check:{workspace_id}:{now.strftime('%Y%m%d')}"
 
 
-async def take_suggestion(workspace_id: str) -> None:
+async def take_suggestion(workspace_id: str, user_id: str) -> None:
     now = utcnow()
-    await take_all([
+    await take_action(workspace_id, user_id, UsageFeature.DECISION_SUGGEST, [
         Window(
             suggestion_key(workspace_id, now),
             get_settings().decision_suggest_workspace_daily_limit, now + timedelta(days=2),
@@ -29,10 +31,10 @@ async def take_suggestion(workspace_id: str) -> None:
     ])
 
 
-async def take_check(workspace_id: str) -> None:
+async def take_check(workspace_id: str, user_id: str) -> None:
     """One source read by a decision check, whether automatic or asked for."""
     now = utcnow()
-    await take_all([
+    await take_action(workspace_id, user_id, UsageFeature.DECISION_CHECK, [
         Window(
             check_key(workspace_id, now),
             get_settings().decision_check_workspace_daily_limit, now + timedelta(days=2),

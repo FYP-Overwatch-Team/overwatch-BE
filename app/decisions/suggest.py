@@ -81,7 +81,7 @@ OnReply = Callable[[Reply, str], Awaitable[None]]
 
 async def suggest(
     member: dict, kind: EvidenceKind, ref_id: str, *,
-    system: str = SYSTEM_INSTRUCTION, take_limit: Callable[[str], Awaitable[None]] = limits.take_suggestion,
+    system: str = SYSTEM_INSTRUCTION, take_limit: Callable[[str, str], Awaitable[None]] = limits.take_suggestion,
     on_reply: OnReply | None = None,
 ) -> list[dict]:
     """Draft the decisions one board item, page or chat conversation states, as `proposed` decisions quoting it.
@@ -161,7 +161,7 @@ async def _known(workspace_id: str, ref_ids: list[str]) -> set[tuple[str, str]]:
 
 
 async def _suggest(
-    member: dict, kind: EvidenceKind, ref_id: str, source: dict, system: str, take_limit: Callable[[str], Awaitable[None]],
+    member: dict, kind: EvidenceKind, ref_id: str, source: dict, system: str, take_limit: Callable[[str, str], Awaitable[None]],
     on_reply: OnReply | None,
 ) -> list[dict]:
     workspace_id = member["workspace_id"]
@@ -170,7 +170,7 @@ async def _suggest(
     if scan.get("fingerprint") == fingerprint:
         raise ConflictError("Nothing has changed here since it was last checked", error_code="source_unchanged")
 
-    await take_limit(workspace_id)
+    await take_limit(workspace_id, member["user_id"])
     related = await _related(workspace_id, member["user_id"], (kind, ref_id), source["text"])
     found = await service.sources(workspace_id, related) if related else {}
     # S1 is the source asked about; the related ones follow in order

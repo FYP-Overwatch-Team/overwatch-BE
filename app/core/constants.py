@@ -257,6 +257,8 @@ class UsageFeature(StrEnum):
 class UsageLimitKind(StrEnum):
     """A limit on how much the AI may be used, as the usage page shows it."""
 
+    #: AI actions (questions, suggestion runs, sources checked), per workspace per month
+    AI_ACTIONS = "ai_actions"
     #: questions to the AI chat, per workspace per day
     CHAT_QUESTIONS = "chat_questions"
     #: questions to the AI chat, per member per hour

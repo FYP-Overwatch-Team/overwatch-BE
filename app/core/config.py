@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # loop looks for workspaces due a check (each workspace picks its own interval)
     decision_check_workspace_daily_limit: int = 20
     decision_check_tick_seconds: int = 300
+    # AI actions a workspace may take a month (a chat question, a suggestion run, a source a check reads);
+    # a question's extra lookups and embeddings are free. 0 turns the AI off
+    ai_workspace_monthly_limit: int = 1000
     # embeddings, for finding related items, pages and decisions by meaning; an empty model turns them off.
     # The adapter is the API shape ("openai_compatible": OpenRouter, OpenAI...); key and base URL are the model's.
     embedding_adapter: str = "openai_compatible"
