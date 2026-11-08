@@ -3,8 +3,8 @@
 Every few minutes, the messages waiting in `channel_messages` are grouped into conversations: a
 thread (its first message and the replies), or messages outside threads that follow each other with
 no gap longer than `WINDOW_GAP_SECONDS`. A conversation is read once it has gone quiet for
-`QUIET_SECONDS`, is a real discussion (`MIN_MESSAGES` from at least `MIN_PEOPLE`), and has messages
-not read yet: each message read is marked with its conversation's id, so a conversation is only read
+`QUIET_SECONDS` (or has waited `MAX_WAIT_SECONDS`), is a real discussion (`MIN_MESSAGES`, or `MIN_THREAD_MESSAGES` in a thread, from at
+least `MIN_PEOPLE`), and has messages not read yet: each message read is marked with its conversation's id, so a conversation is only read
 again when something new is said in it, never because older messages expired.
 
 A conversation keeps one id for its whole life: a thread is named by its first message (which
@@ -32,13 +32,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import structlog
+from pymongo import UpdateMany
 
 from app.chat.limits import daily_budget
 from app.connectors.repository import ACTIVE
 from app.core.config import get_settings
 from app.core.constants import EvidenceKind, Provider
 from app.core.exceptions import AppError, ConflictError, ExternalServiceError
-from app.core.rate_limit import Window, take_all
+from app.core.rate_limit import Window, count, take_all
 from app.core.time import utcnow
 from app.db import mongo
 from app.decisions import chat_sources, quotes, suggest
@@ -52,7 +53,13 @@ CHAT_PROMPT = (Path(__file__).parent.parent / "decisions" / "prompts" / "chat.md
 QUIET_SECONDS = 15 * 60
 WINDOW_GAP_SECONDS = 10 * 60
 MIN_MESSAGES = 3
+# a thread is one topic already, so a question and someone's answer are enough
+MIN_THREAD_MESSAGES = 2
 MIN_PEOPLE = 2
+# a conversation that never goes quiet is read anyway, with an hour to spare before its messages expire
+MAX_WAIT_SECONDS = 2 * 3600
+# background reads stop here, so people asking the AI something always have the rest of the daily budget
+SLACK_BUDGET_SHARE = 0.6
 # a workspace's messages read per scan, newest first; they only live a few hours, so this is a guard
 MAX_MESSAGES = 5000
 # the AI is unavailable for everyone: stop until the next tick, and give the read back
@@ -87,11 +94,29 @@ class Conversation:
     def first_ts(self) -> str:
         return self.messages[0].ts
 
+    @property
+    def is_discussion(self) -> bool:
+        min_messages = MIN_THREAD_MESSAGES if self.is_thread else MIN_MESSAGES
+        return len(self.messages) >= min_messages and len({m.user for m in self.messages}) >= MIN_PEOPLE
+
+    def _is_quiet(self, now: float) -> bool:
+        return now - float(self.messages[-1].ts) >= QUIET_SECONDS
+
     def is_ready(self, now: float) -> bool:
-        """Quiet long enough, a discussion rather than one person talking, and something in it not read yet."""
-        quiet = now - float(self.messages[-1].ts) >= QUIET_SECONDS
-        discussion = len(self.messages) >= MIN_MESSAGES and len({m.user for m in self.messages}) >= MIN_PEOPLE
-        return quiet and discussion and any(m.read_ref is None for m in self.messages)
+        """A discussion with something unread, that's gone quiet or has waited as long as it can."""
+        unread = [float(m.ts) for m in self.messages if m.read_ref is None]
+        if not unread or not self.is_discussion:
+            return False
+        return self._is_quiet(now) or now - min(unread) >= MAX_WAIT_SECONDS
+
+
+def settled_without_a_read(conversation: Conversation, now: float) -> bool:
+    """Quiet, unread and not a discussion: nothing to read, so it needn't be looked at again."""
+    return (
+        not conversation.is_discussion
+        and conversation._is_quiet(now)
+        and any(m.read_ref is None for m in conversation.messages)
+    )
 
 
 def conversations(channel: str, messages: list[Message]) -> list[Conversation]:
@@ -132,18 +157,30 @@ def permalink(workspace_url: str | None, channel: str, ts: str) -> str | None:
 
 
 def _scan_windows(workspace_id: str, now: datetime) -> list[Window]:
+    budget = daily_budget(now)
     return [
         Window(
             f"decisions:slack:{workspace_id}:{now.strftime('%Y%m%d')}",
             get_settings().slack_decision_scans_per_day, now + timedelta(days=2),
             AppError("This workspace has used today's Slack decision reads", error_code="rate_limited", status_code=429),
         ),
-        daily_budget(now),
+        budget._replace(limit=int(budget.limit * SLACK_BUDGET_SHARE)),
     ]
 
 
-async def take_scan(workspace_id: str) -> None:
-    """One conversation read, against the workspace's daily Slack limit and the AI's daily budget."""
+async def _at_limit(workspace_id: str) -> bool:
+    """Whether this workspace has no reads left today; a spent AI budget stops every workspace."""
+    workspace_reads, budget = _scan_windows(workspace_id, utcnow())
+    if await count(budget.key) >= budget.limit:
+        raise AIUnavailable
+    return await count(workspace_reads.key) >= workspace_reads.limit
+
+
+async def take_scan(workspace_id: str, _user_id: str) -> None:
+    """One conversation read, against the workspace's daily Slack limit and Slack's share of the AI's daily budget.
+
+    Not an action from the monthly allowance: nobody chose to spend it.
+    """
     await take_all(_scan_windows(workspace_id, utcnow()))
 
 
@@ -174,18 +211,26 @@ async def scan_workspace(workspace_id: str, workspace_url: str | None = None) ->
 
     Raises `AIUnavailable` when the model is down, so the caller can stop every workspace.
     """
+    if await _at_limit(workspace_id):
+        return 0
     names = {
         target["key"]: target.get("name") or target["key"]
         async for target in mongo.sync_targets().find({"workspace_id": workspace_id, "provider": Provider.SLACK, **ACTIVE})
     }
-    by_channel: dict[str, list[Message]] = defaultdict(list)
     query = {"workspace_id": workspace_id, "channel": {"$in": list(names)}}
+    # a conversation can only be ready, or be settled, with an unread message at least this old
+    oldest_allowed = f"{utcnow().timestamp() - QUIET_SECONDS:.6f}"
+    if not await mongo.channel_messages().find_one({**query, "read_ref": None, "ts": {"$lte": oldest_allowed}}, {"_id": 1}):
+        return 0
+    by_channel: dict[str, list[Message]] = defaultdict(list)
     fields = {"channel": 1, "ts": 1, "user": 1, "text": 1, "thread_ts": 1, "read_ref": 1}
     async for doc in mongo.channel_messages().find(query, fields).sort("ts", -1).limit(MAX_MESSAGES):
         by_channel[doc["channel"]].append(Message(doc["ts"], doc["user"], doc["text"], doc.get("thread_ts"), doc.get("read_ref")))
 
     now = utcnow()
-    ready = [c for channel, messages in by_channel.items() for c in conversations(channel, messages) if c.is_ready(now.timestamp())]
+    found = [c for channel, messages in by_channel.items() for c in conversations(channel, messages)]
+    await _mark_settled(workspace_id, [c for c in found if settled_without_a_read(c, now.timestamp())])
+    ready = [c for c in found if c.is_ready(now.timestamp())]
     if not ready:
         return 0
     by_ref = {thread_id(workspace_id, c): c for c in ready}
@@ -252,6 +297,18 @@ async def _read(
     await _mark_read(workspace_id, conversation, ref_id)
     logger.info("slack_decisions_suggested", workspace_id=workspace_id, channel=conversation.channel, count=len(created))
     return len(created)
+
+
+async def _mark_settled(workspace_id: str, settled: list[Conversation]) -> None:
+    if not settled:
+        return
+    await mongo.channel_messages().bulk_write([
+        UpdateMany(
+            {"workspace_id": workspace_id, "channel": c.channel, "ts": {"$in": [m.ts for m in c.messages]}},
+            {"$set": {"read_ref": thread_id(workspace_id, c)}},
+        )
+        for c in settled
+    ], ordered=False)
 
 
 async def _mark_read(workspace_id: str, conversation: Conversation, ref_id: str) -> None:

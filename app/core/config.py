@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     slack_signing_secret: str = ""
     # Slack conversations a workspace's decision finder may read a day (each one model call, also counted
     # against chat_daily_budget), and how often it looks for conversations that went quiet
-    slack_decision_scans_per_day: int = 20
+    slack_decision_scans_per_day: int = 100
     slack_decision_tick_seconds: int = 300
     # how long a question raised in Slack but not settled waits for someone to act on it, and how often the
     # daily digests (each workspace picks its own time) are looked for

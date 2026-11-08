@@ -5,12 +5,16 @@ import time
 
 import pytest
 
+from app.chat import limits
+from app.chat.limits import daily_budget
 from app.connectors import repository as connections
+from app.core import rate_limit
 from app.core.config import get_settings
 from app.core.time import utcnow
 from app.db import mongo
 from app.slack import decisions as slack_decisions
 from app.slack.decisions import Conversation, Message, conversations
+from app.usage.allowance import monthly_key
 from tests.integration.test_work_items_api import signed_in
 
 CHANNEL = "C0GENERAL"
@@ -83,6 +87,183 @@ def test_only_quiet_discussions_are_read(rows, age, ready):
     messages = tuple(Message(f"{now - age + i:.1f}", user, text, None) for i, (user, text) in enumerate(rows))
 
     assert Conversation(CHANNEL, messages, messages[0].ts, is_thread=False).is_ready(now) is ready
+
+
+@pytest.mark.parametrize(("users", "ready"), [
+    (["A", "B"], True),  # a question and someone's answer
+    (["A", "A"], False),  # one person
+    (["A"], False),
+])
+def test_a_short_thread_is_read_once_two_people_are_in_it(users, ready):
+    now = 10_000.0
+    root = f"{now - 20 * 60:.1f}"
+    messages = tuple(Message(f"{now - 20 * 60 + i:.1f}", user, "text", root if i else None) for i, user in enumerate(users))
+
+    assert Conversation(CHANNEL, messages, root, is_thread=True).is_ready(now) is ready
+
+
+def test_a_discussion_that_never_goes_quiet_is_read_before_it_can_expire():
+    now = 100_000.0
+    busy = tuple(Message(f"{now - 2.5 * 3600 + i * 600:.1f}", "AB"[i % 2], "text", None) for i in range(15))
+    assert now - float(busy[-1].ts) < slack_decisions.QUIET_SECONDS
+
+    assert Conversation(CHANNEL, busy, busy[0].ts, is_thread=False).is_ready(now) is True
+    young = tuple(Message(f"{now - 1800 + i * 300:.1f}", "AB"[i % 2], "text", None) for i in range(5))
+    assert Conversation(CHANNEL, young, young[0].ts, is_thread=False).is_ready(now) is False
+
+
+async def test_nothing_is_loaded_or_read_at_the_daily_limit(fake_llm, workspace, monkeypatch):
+    await post(workspace["X-Workspace-Id"], SETTLED)
+    [window, *_] = slack_decisions._scan_windows(workspace["X-Workspace-Id"], utcnow())
+    await mongo.usage_counters().insert_one({"_id": window.key, "count": window.limit})
+    loaded = []
+    real = mongo.channel_messages
+
+    def spy():
+        loaded.append(True)
+        return real()
+
+    monkeypatch.setattr(mongo, "channel_messages", spy)
+
+    assert await slack_decisions.scan_workspace(workspace["X-Workspace-Id"]) == 0
+    assert (loaded, fake_llm.calls, await mongo.chat_threads().count_documents({})) == ([], [], 0)
+
+
+async def test_scanning_resumes_once_a_read_is_given_back(fake_llm, workspace):
+    workspace_id = workspace["X-Workspace-Id"]
+    await post(workspace_id, SETTLED)
+    [window, *_] = slack_decisions._scan_windows(workspace_id, utcnow())
+    await mongo.usage_counters().insert_one({"_id": window.key, "count": window.limit})
+    assert await slack_decisions.scan_workspace(workspace_id) == 0
+    fake_llm.stream_response = reply(("Sessions last 7 days", "OK, 7 days then"))
+
+    await slack_decisions._give_back_scan(workspace_id)
+
+    assert await slack_decisions.scan_workspace(workspace_id) == 1
+
+
+class CountsLoads:
+    """The messages collection, counting how often they're loaded rather than just asked about."""
+
+    def __init__(self, real):
+        self.real = real
+        self.loads = 0
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+    def find(self, *args, **kwargs):
+        self.loads += 1
+        return self.real.find(*args, **kwargs)
+
+
+def stored(workspace_id: str, stamp: float, user: str = "U0ALICE", **fields) -> dict:
+    return {"workspace_id": workspace_id, "channel": CHANNEL, "ts": f"{stamp:.6f}", "user": user, "text": "x", "thread_ts": None, "received_at": utcnow(), **fields}
+
+
+@pytest.mark.parametrize(("age", "fields"), [
+    (60, {}),  # unread, but too new to be ready or settled
+    (40 * 60, {"read_ref": "seen"}),  # old, but already read
+])
+async def test_messages_are_not_loaded_when_nothing_unread_is_old_enough(fake_llm, workspace, monkeypatch, age, fields):
+    workspace_id = workspace["X-Workspace-Id"]
+    now = time.time() - age
+    await mongo.channel_messages().insert_many([stored(workspace_id, now + i, "AB"[i % 2], **fields) for i in range(3)])
+    collection = CountsLoads(mongo.channel_messages())
+    monkeypatch.setattr(mongo, "channel_messages", lambda: collection)
+
+    assert await slack_decisions.scan_workspace(workspace_id) == 0
+
+    assert (collection.loads, fake_llm.calls) == (0, [])
+
+
+async def test_only_a_quiet_message_is_settled(fake_llm, workspace):
+    workspace_id = workspace["X-Workspace-Id"]
+    old, young = time.time() - 40 * 60, time.time() - 60
+    await mongo.channel_messages().insert_many([stored(workspace_id, old), stored(workspace_id, young)])
+
+    await slack_decisions.scan_workspace(workspace_id)
+
+    assert (await mongo.channel_messages().find_one({"ts": f"{old:.6f}"})).get("read_ref")
+    assert (await mongo.channel_messages().find_one({"ts": f"{young:.6f}"})).get("read_ref") is None
+
+
+@pytest.mark.parametrize(("used", "reads"), [(5, 1), (6, 0)])
+async def test_slack_leaves_people_their_share_of_the_ai_budget(fake_llm, workspace, monkeypatch, used, reads):
+    monkeypatch.setenv("CHAT_DAILY_BUDGET", "10")
+    get_settings.cache_clear()
+    workspace_id = workspace["X-Workspace-Id"]
+    await post(workspace_id, SETTLED)
+    await mongo.usage_counters().insert_one({"_id": daily_budget(utcnow()).key, "count": used})
+    fake_llm.stream_response = json.dumps({"decisions": []})
+
+    if reads:
+        await slack_decisions.scan_workspace(workspace_id)
+    else:
+        with pytest.raises(slack_decisions.AIUnavailable):
+            await slack_decisions.scan_workspace(workspace_id)
+
+    assert len(fake_llm.calls) == reads
+    assert await limits.take_model_call() is True
+
+
+async def test_a_slack_read_does_not_spend_the_monthly_allowance(fake_llm, workspace):
+    workspace_id = workspace["X-Workspace-Id"]
+    await post(workspace_id, SETTLED)
+    fake_llm.stream_response = json.dumps({"decisions": []})
+
+    await slack_decisions.scan_workspace(workspace_id)
+
+    assert len(fake_llm.calls) == 1
+    assert await mongo.ai_actions().count_documents({"workspace_id": workspace_id}) == 0
+    assert await rate_limit.count(monthly_key(workspace_id, utcnow())) == 0
+
+
+async def test_a_lone_thread_is_settled_then_a_later_reply_gets_it_read(fake_llm, workspace):
+    workspace_id = workspace["X-Workspace-Id"]
+    [root] = await post(workspace_id, [("U0ALICE", "Should sessions last 7 days or 30?", None)])
+
+    await slack_decisions.scan_workspace(workspace_id)
+
+    assert fake_llm.calls == []
+    stored = await mongo.channel_messages().find_one({"ts": root})
+    assert stored["read_ref"]
+
+    fake_llm.stream_response = reply(("Sessions last 7 days", "7 days, agreed"))
+    await mongo.channel_messages().insert_one({
+        "workspace_id": workspace_id, "channel": CHANNEL, "ts": ts(1), "user": "U0BOB", "text": "7 days, agreed", "thread_ts": root, "received_at": utcnow(),
+    })
+
+    assert await slack_decisions.scan_workspace(workspace_id) == 1
+    assert len(fake_llm.calls) == 1
+    assert await mongo.channel_messages().count_documents({"read_ref": {"$type": "string"}}) == 2
+
+
+async def test_a_forced_read_keeps_its_id_when_the_discussion_is_read_again(fake_llm, workspace, monkeypatch):
+    workspace_id = workspace["X-Workspace-Id"]
+    start = time.time() - 2.5 * 3600
+    stamps = [f"{start + i * 600:.6f}" for i in range(15)]
+    await mongo.channel_messages().insert_many([
+        {"workspace_id": workspace_id, "channel": CHANNEL, "ts": s, "user": "AB"[i % 2], "text": f"point {i}", "thread_ts": None, "received_at": utcnow()}
+        for i, s in enumerate(stamps)
+    ])
+    fake_llm.stream_response = reply(("First call", "point 3"))
+    assert await slack_decisions.scan_workspace(workspace_id) == 1
+    [first_ref] = await mongo.channel_messages().distinct("read_ref")
+    # the run's first message expires, so only the id it was read under can say which conversation this is
+    await mongo.channel_messages().delete_one({"ts": stamps[0]})
+
+    await mongo.channel_messages().insert_one({
+        "workspace_id": workspace_id, "channel": CHANNEL, "ts": f"{start + 9000:.6f}", "user": "A", "text": "point 15", "thread_ts": None, "received_at": utcnow(),
+    })
+    monkeypatch.setattr(slack_decisions, "QUIET_SECONDS", 0)
+    fake_llm.stream_response = json.dumps({"decisions": []})
+
+    await slack_decisions.scan_workspace(workspace_id)
+
+    assert len(fake_llm.calls) == 2
+    assert await mongo.channel_messages().distinct("read_ref") == [first_ref]
+    assert await mongo.decisions().count_documents({"workspace_id": workspace_id}) == 1
 
 
 def test_the_link_opens_the_conversation_in_slack():

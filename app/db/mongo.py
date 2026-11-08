@@ -386,6 +386,8 @@ async def ensure_indexes() -> None:
     # a message is stored once however often Slack redelivers it; chat text is kept only briefly
     await channel_messages().create_index([("workspace_id", 1), ("channel", 1), ("ts", 1)], unique=True)
     await channel_messages().create_index("received_at", expireAfterSeconds=CHANNEL_MESSAGE_TTL_SECONDS)
+    # a scan first asks whether anything unread is old enough to matter
+    await channel_messages().create_index([("workspace_id", 1), ("read_ref", 1), ("ts", 1)])
     # an edit or delete in Slack finds the kept conversations its message is in
     await chat_threads().create_index([("workspace_id", 1), ("channel", 1), ("messages.ts", 1)])
     # a question is stored once per conversation however often the conversation is reread
