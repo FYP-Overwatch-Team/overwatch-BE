@@ -170,6 +170,11 @@ def chat_conversations():
     return get_db()["chat_conversations"]
 
 
+def chat_proposals():
+    """Tickets, pages and decisions the AI chat drafted, created only once the member who asked approves them."""
+    return get_db()["chat_proposals"]
+
+
 def decisions():
     """What a workspace decided, with the quoted passages it rests on and its status history."""
     return get_db()["decisions"]
@@ -346,6 +351,8 @@ async def ensure_indexes() -> None:
     # Webhook dedup: looked up on every delivery, expired 30 days after receipt.
     await chat_conversations().create_index([("workspace_id", 1), ("user_id", 1), ("repo_full_name", 1), ("updated_at", -1)])
     await chat_conversations().create_index("expires_at", expireAfterSeconds=0)
+    await chat_proposals().create_index("conversation_id")
+    await chat_proposals().create_index("purge_at", expireAfterSeconds=0)
     await usage_counters().create_index("expires_at", expireAfterSeconds=0)
     # the Decisions inbox, newest change first, and the decisions quoting one item or page
     await decisions().create_index([("workspace_id", 1), ("status", 1), ("updated_at", -1)])

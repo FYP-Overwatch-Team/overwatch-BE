@@ -19,7 +19,7 @@ MAX_HEADER_CHARS = 4_000
 
 HEADER_INSTRUCTION = (
     "Reply format: start with exactly these three lines, then the answer.\n"
-    "ANSWERABLE: yes (or no, only when nothing in the context is relevant)\n"
+    "ANSWERABLE: yes (or no, only when nothing in the context or your lookups is relevant)\n"
     "RELATIONS: every relationship the answer states, as [n1] calls [n2], "
     "separated by semicolons, or none\n"
     "---"

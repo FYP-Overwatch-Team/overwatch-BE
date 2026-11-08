@@ -4,10 +4,9 @@ It's built from the decisions, not written by the AI, so it says only what was a
 ordinary page that can be read, moved and shared like any other; each update replaces its content.
 """
 
-from urllib.parse import urlencode
-
 from app.connectors.adf import adf_to_editor, markdown_to_adf
 from app.core.constants import DecisionStatus, DocumentKind, EvidenceKind, EvidenceStance
+from app.core.links import decision_href, document_href, work_item_href
 from app.core.time import utcnow
 from app.db import mongo
 from app.documents import service as documents
@@ -24,11 +23,9 @@ def _link_text(text: str) -> str:
 
 
 def _source_href(evidence: dict) -> str:
-    # where the app opens a page, and a board item on its board
     if evidence["kind"] == EvidenceKind.DOCUMENT:
-        return f"/documents/{evidence['ref_id']}"
-    params = {"board": evidence.get("board_id"), "item": evidence.get("item_key")}
-    return f"/board?{urlencode({key: value for key, value in params.items() if value})}"
+        return document_href(evidence["ref_id"])
+    return work_item_href(evidence.get("board_id"), evidence.get("item_key"))
 
 
 def markdown(decisions: list[dict], day: str) -> str:
@@ -45,7 +42,7 @@ def markdown(decisions: list[dict], day: str) -> str:
     for area in sorted(by_area, key=lambda name: (name == OTHER_AREA, name.casefold())):
         lines += ["", f"## {area}", ""]
         for decision in by_area[area]:
-            line = f"- **[{_link_text(decision['title'])}](/decisions/{decision['_id']})**: {decision['statement']}"
+            line = f"- **[{_link_text(decision['title'])}]({decision_href(decision['_id'])})**: {decision['statement']}"
             sources = [
                 f"[{_link_text(e['title'])}]({_source_href(e)})"
                 for e in decision["evidence"] if e["stance"] == EvidenceStance.SUPPORTS
