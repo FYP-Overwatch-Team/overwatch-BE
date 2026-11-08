@@ -27,6 +27,9 @@ Rules:
   Where the sources don't say, write "Not stated in the sources." instead of guessing.
 - Report at most 5 decisions, the most important first. Report none when there are none.
 
+How to write the statement, background, meaning, example, pros and cons:
+$writing_style
+
 Reply with JSON only, no other text, in exactly this shape:
 {"decisions": [{"title": "...", "statement": "...", "background": "...", "meaning": "...",
 "example": "...", "pros": ["..."], "cons": ["..."], "quotes": [{"source": "S1", "text": "..."}]}]}

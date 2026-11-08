@@ -29,7 +29,7 @@ async def get(workspace_id: str, user_id: str, conversation_id: str, *, last_mes
     return await mongo.chat_conversations().find_one(_owned(workspace_id, user_id, conversation_id), projection)
 
 
-async def list_for(workspace_id: str, user_id: str, repo_full_name: str) -> list[dict]:
+async def list_for(workspace_id: str, user_id: str, repo_full_name: str | None) -> list[dict]:
     cursor = (
         mongo.chat_conversations()
         .find({"workspace_id": workspace_id, "user_id": user_id, "repo_full_name": repo_full_name}, {"messages": 0})
@@ -39,7 +39,7 @@ async def list_for(workspace_id: str, user_id: str, repo_full_name: str) -> list
     return [doc async for doc in cursor]
 
 
-async def create(workspace_id: str, user_id: str, repo_full_name: str, title: str, messages: list[dict]) -> dict:
+async def create(workspace_id: str, user_id: str, repo_full_name: str | None, title: str, messages: list[dict]) -> dict:
     now = utcnow()
     doc = {
         "_id": uuid.uuid4().hex,

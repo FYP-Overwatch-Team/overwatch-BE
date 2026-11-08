@@ -94,6 +94,8 @@ def _serialise(view: ViewGraph) -> dict:
                 "label": str(node.label),
                 "kind": node.kind,
                 "path": node.path,
+                "start_line": node.start_line,
+                "end_line": node.end_line,
                 "depth": node.depth,
                 "file_count": node.file_count,
                 "definition_count": node.definition_count,

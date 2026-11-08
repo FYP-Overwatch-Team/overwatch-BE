@@ -1,6 +1,8 @@
 """AI chat: private conversations, grounded answers, history, mentions and limits."""
 
+import asyncio
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -13,13 +15,31 @@ from app.knowledge_graph.build.ids import module_id
 from app.knowledge_graph.build.model import EdgeType, GraphDelta, GraphEdge, GraphNode, NodeLabel
 from app.query.grounding import CANNOT_DETERMINE
 from app.query.service import ANSWER_NOW, ANSWER_WITHOUT_ASKING, LOOKUPS_RAN_OUT
-from app.query.tools import READ_CODE, RELATED, SEARCH_GRAPH
+from app.integrations.embeddings import use_embedder
+from app.query.tools import READ_CODE, RELATED, SEARCH_GRAPH, SEARCH_MEANING
+from app.query.workspace_tools import (
+    DRAFTED,
+    FIND_DECISIONS,
+    FIND_DOCS,
+    FIND_TICKETS,
+    MAX_DRAFTS,
+    OPEN_RECORD,
+    PROPOSE_DECISION,
+    PROPOSE_DOC,
+    PROPOSE_TICKET,
+    READ_CHARS,
+    WORKSPACE_INFO,
+    WORKSPACE_TOOLS,
+)
 from tests.fakes import written
 from tests.unit.test_llm_client import WRITTEN_CALLS
-from tests.integration.test_workspaces import in_workspace, user
+from tests.integration.test_workspaces import in_workspace, join, user
 from tests.git_fixtures import commit_all
 from tests.graph_fixtures import GraphSeed
 from tests.integration.test_auth_flow import auth_headers, login
+from tests.integration.test_decisions_api import decide, page
+from tests.integration.test_work_items_api import board_id, seed_jira
+from tests.integration.test_work_items_api import create as create_item
 
 REPO = "octocat/hello-world"
 
@@ -231,15 +251,14 @@ async def test_questions_are_bounded(client, owner, fake_llm):
     assert fake_llm.calls == []
 
 
-async def test_no_graph_yet_is_a_clear_error(client, owner, fake_llm):
+async def test_before_the_graph_is_built_only_the_workspace_can_be_looked_up(client, owner, fake_llm):
     await get_knowledge_graph_store().delete_repository(REPO)
+    fake_llm.json_response = {"answer": "No tickets mention it."}
 
     resp = await ask(client, owner)
 
-    assert resp.status_code == 404
-    assert resp.json()["meta"]["error_code"] == "graph_not_ready"
-    # nothing was asked of the model, so nothing counts against the limits
-    assert await mongo.usage_counters().count_documents({}) == 0
+    assert resp.status_code == 200
+    assert fake_llm.calls[0]["tools"] == WORKSPACE_TOOLS
 
 
 async def test_open_folders_reach_the_context(client, owner, fake_llm):
@@ -608,6 +627,22 @@ async def test_without_lookups_no_tools_are_offered(client, owner, fake_llm, lim
     assert fake_llm.calls[0]["tools"] == []
 
 
+def offered(call: dict) -> list[str]:
+    return [tool["function"]["name"] for tool in call["tools"]]
+
+
+async def test_searching_code_by_meaning_is_offered_only_with_embeddings(client, owner, fake_llm, fake_embedder):
+    fake_llm.json_response = GROUNDED
+
+    await ask(client, owner)
+    use_embedder(None)
+    await ask(client, owner)
+
+    with_embeddings, without = fake_llm.calls
+    assert SEARCH_MEANING in offered(with_embeddings)
+    assert SEARCH_MEANING not in offered(without) and SEARCH_GRAPH in offered(without)
+
+
 async def test_calls_a_model_writes_as_text_are_run_as_lookups(client, owner, fake_llm):
     fake_llm.replies = [WRITTEN_CALLS, written(GROUNDED)]
 
@@ -698,3 +733,356 @@ async def test_once_lookups_have_no_room_left_the_model_must_answer(client, owne
     await ask(client, owner)
 
     assert [call["tool_choice"] for call in fake_llm.calls] == ["none"]
+
+
+async def test_tickets_from_every_tracker_are_found_and_only_those_found_are_cited(client, owner, fake_llm):
+    workspace = owner["X-Workspace-Id"]
+    await seed_jira(workspace)
+    await mongo.work_items().update_one({"key": "OVR-1"}, {"$set": {"title": "Rate limit the public API"}})
+    native = await create_item(client, owner, title="Rate limit login attempts", description="Five tries a minute.")
+    fake_llm.json_response = {"answer": "Two do: [r1] and [r2]. Not [r9]."}
+    fake_llm.lookups = [[lookup(FIND_TICKETS, query="rate limit")]]
+
+    events = events_of((await ask_streaming(client, owner, "any tickets about rate limits?")).text)
+
+    assert [d["text"] for e, d in events if e == "status"] == ["Searching tickets for “rate limit”"]
+    (found,) = fake_llm.calls[-1]["rounds"][0].results
+    assert found.startswith("<workspace_data>\nTrackers connected: Jira.")
+    answer = events[-1][1]["answer"]
+    # the stream sends what's saved as it is, so every field the app reads must be there
+    assert events[-1][1]["question"]["proposals"] == answer["proposals"] == []
+    assert answer["text"] == "Two do: [r1] and [r2]. Not."
+    assert answer["actions"] == []
+    hrefs = {record["key"]: record["href"] for record in answer["records"]}
+    assert set(hrefs) == {"OVR-1", native["key"]}
+    assert hrefs[native["key"]] == f"/board?board={await board_id(client, owner)}&item={native['key']}"
+
+    # a follow-up gets the tickets back by key, since refs only mean something within one answer
+    conversation = events[-1][1]["conversation"]["id"]
+    await ask(client, owner, "and which is done?", conversation_id=conversation)
+    assert "(OVR-1)" in fake_llm.calls[-1]["history"][-1].text
+
+
+async def test_with_no_tracker_and_no_tickets_the_answer_offers_to_connect_or_create(client, owner, fake_llm):
+    fake_llm.json_response = {"answer": "There are no tickets yet."}
+    fake_llm.lookups = [[lookup(FIND_TICKETS, sprint="current")]]
+
+    answer = (await ask(client, owner, "what's in the current sprint?")).json()["data"]["answer"]
+
+    assert fake_llm.calls[-1]["rounds"][0].results == (
+        "<workspace_data>\nNo tracker is connected; only the app's own board was searched.\nNo tickets matched.\n</workspace_data>",
+    )
+    assert answer["actions"] == [
+        {"kind": "connect_tracker", "label": "Connect a tracker", "href": "/settings/integrations"},
+        {"kind": "create_ticket", "label": "Create a ticket", "href": "/board?new=1"},
+    ]
+
+
+async def test_the_current_sprint_holds_only_its_tickets(client, owner, fake_llm):
+    native = await board_id(client, owner)
+    sprint = (await client.post(f"/boards/{native}/sprints", json={}, headers=owner)).json()["data"]
+    await client.post(f"/sprints/{sprint['id']}/start", json={}, headers=owner)
+    planned = await create_item(client, owner, title="In the sprint")
+    await create_item(client, owner, title="In the backlog")
+    await mongo.work_items().update_one({"_id": planned["id"]}, {"$set": {"sprint_id": sprint["id"]}})
+    fake_llm.json_response = {"answer": "One."}
+    fake_llm.lookups = [[lookup(FIND_TICKETS, sprint="current", status="open")]]
+
+    await ask(client, owner, "what's in the current sprint?")
+
+    (found,) = fake_llm.calls[-1]["rounds"][0].results
+    assert "In the sprint" in found and "In the backlog" not in found
+
+
+async def test_another_workspaces_tickets_docs_and_decisions_are_never_found(client, owner, fake_llm):
+    other = await user(client, "someone-else")
+    await create_item(client, other, title="Export rules")
+    await page(client, other, md="Export rules.")
+    await decide(client, other, title="Export rules")
+    fake_llm.json_response = {"answer": "None."}
+    fake_llm.lookups = [[
+        lookup(FIND_TICKETS, query="export"), lookup(FIND_DOCS, query="export"), lookup(FIND_DECISIONS, query="export"),
+    ]]
+
+    await ask(client, owner, "anything about export?")
+
+    tickets, docs, decisions = fake_llm.calls[-1]["rounds"][0].results
+    assert "No tickets matched." in tickets and "No docs pages matched." in docs and "No decisions matched." in decisions
+
+
+async def test_a_long_ticket_is_read_whole_in_parts(client, owner, fake_llm):
+    item = await create_item(client, owner, title="Spec")
+    description = "".join(f"line {n} of the spec\n" for n in range(2_500))
+    await mongo.work_items().update_one({"_id": item["id"]}, {"$set": {"description_md": description}})
+    fake_llm.json_response = {"answer": "Read it: [r1]."}
+    fake_llm.lookups = [
+        [lookup(FIND_TICKETS, query="spec")],
+        [lookup(OPEN_RECORD, ref="r1"), lookup(OPEN_RECORD, ref="r9")],
+        [lookup(OPEN_RECORD, ref="r1", offset=READ_CHARS)],
+        [lookup(OPEN_RECORD, ref="r1", offset=2 * READ_CHARS)],
+    ]
+
+    await ask(client, owner, "what does the spec say?")
+
+    rounds = fake_llm.calls[-1]["rounds"]
+    first, unknown = rounds[1].results
+    assert first.endswith(f"read on with offset {READ_CHARS}")
+    assert unknown == "error: unknown ref; use one a lookup gave, like r1"
+    last = rounds[3].results[0]
+    assert last.endswith("</workspace_data>")
+    parts = [result.split("\n</workspace_data>")[0].removeprefix("<workspace_data>\n") for result in (first, rounds[2].results[0], last)]
+    assert "".join(parts).endswith(f"\n\n{description}")
+
+
+async def test_a_question_without_a_repository_is_answered_from_the_workspace(client, fake_llm):
+    headers = await authed(client)
+    fake_llm.json_response = {"answer": "No tickets yet."}
+
+    resp = await client.post("/chat/ask", json={"question": "any tickets?"}, headers=headers)
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["conversation"]["repo_full_name"] is None
+    assert fake_llm.calls[0]["tools"] == WORKSPACE_TOOLS
+    listed = (await client.get("/chat/conversations", headers=headers)).json()["data"]
+    assert [c["id"] for c in listed] == [resp.json()["data"]["conversation"]["id"]]
+
+
+async def test_create_is_offered_only_when_no_search_found_a_ticket(client, owner, fake_llm):
+    await create_item(client, owner, title="Rate limit login attempts")
+    fake_llm.json_response = {"answer": "Found it on the second try."}
+    fake_llm.lookups = [[lookup(FIND_TICKETS, query="throttle")], [lookup(FIND_TICKETS, query="rate limit")]]
+
+    answer = (await ask(client, owner, "anything about throttling?")).json()["data"]["answer"]
+
+    # no tracker is connected, so that's still offered
+    assert [action["kind"] for action in answer["actions"]] == ["connect_tracker"]
+
+
+async def test_docs_are_found_and_read_whole_but_archived_ones_never(client, owner, fake_llm):
+    live = await page(client, owner, md="Guests can export reports as PDF.")
+    archived = await page(client, owner, md="Guests can export everything.")
+    await mongo.documents().update_one({"_id": archived["id"]}, {"$set": {"archived_at": archived["created_at"]}})
+    fake_llm.json_response = {"answer": "The Export PRD [r1] says so."}
+    fake_llm.lookups = [[lookup(FIND_DOCS, query="guests export")], [lookup(OPEN_RECORD, ref="r1")]]
+
+    answer = (await ask(client, owner, "can guests export?")).json()["data"]["answer"]
+
+    found, read = (round_.results[0] for round_ in fake_llm.calls[-1]["rounds"])
+    assert found.count("[r") == 1
+    assert read.startswith("<workspace_data>\nExport PRD\nSource: the app") and "Guests can export reports as PDF." in read
+    assert [(r["kind"], r["href"]) for r in answer["records"]] == [("document", f"/documents/{live['id']}")]
+    # pages found, but no ticket searched for: nothing to offer
+    assert answer["actions"] == []
+
+
+async def test_decisions_are_found_by_status_and_read_with_their_evidence(client, owner, fake_llm):
+    prd = await page(client, owner, md="Guests can export reports as PDF.")
+    agreed = await decide(
+        client, owner, title="PDF export for guests", statement="Guests export as PDF only.",
+        evidence=[{"kind": "document", "ref_id": prd["id"], "quote": "Guests can export reports as PDF."}],
+    )
+    await decide(client, owner, title="CSV export", statement="Maybe CSV later.")
+    await client.post(f"/decisions/{agreed['id']}/status", json={"status": "accepted"}, headers=owner)
+    fake_llm.json_response = {"answer": "Yes: [r1]."}
+    fake_llm.lookups = [[lookup(FIND_DECISIONS, query="export", status="accepted")], [lookup(OPEN_RECORD, ref="r1")]]
+
+    answer = (await ask(client, owner, "what did we decide about export?")).json()["data"]["answer"]
+
+    found, read = (round_.results[0] for round_ in fake_llm.calls[-1]["rounds"])
+    assert "PDF export for guests" in found and "CSV export" not in found
+    assert 'supports "Guests can export reports as PDF." from Export PRD' in read
+    assert answer["records"][0]["href"] == f"/decisions/{agreed['id']}"
+
+
+async def test_workspace_info_says_who_is_asking_and_what_is_connected(client, owner, fake_llm):
+    fake_llm.json_response = {"answer": "You're the owner."}
+    fake_llm.lookups = [[lookup(WORKSPACE_INFO)]]
+
+    await ask(client, owner, "what's my role here?")
+
+    (info,) = fake_llm.calls[-1]["rounds"][0].results
+    assert "You: Octo Cat (owner)" in info
+    assert f"- {REPO} · indexing done" in info
+    assert "Connections: none" in info
+
+
+
+async def drafted(client, headers, fake_llm, *calls: ToolCall) -> dict:
+    """An answer whose lookups drafted `calls`."""
+    fake_llm.json_response = {"answer": "I drafted it below for you to check."}
+    fake_llm.lookups = [list(calls)]
+    return (await ask(client, headers, "draft it")).json()["data"]
+
+
+async def approve(client, headers, proposal: dict, **edits):
+    return await client.post(f"/chat/proposals/{proposal['id']}/apply", json={**proposal["fields"], **edits}, headers=headers)
+
+
+async def test_a_drafted_ticket_is_created_only_once_approved_with_the_askers_edits(client, owner, fake_llm):
+    data = await drafted(client, owner, fake_llm, lookup(PROPOSE_TICKET, title="Fix login", description="It **fails**."))
+    (proposal,) = data["answer"]["proposals"]
+    assert fake_llm.calls[-1]["rounds"][0].results == (DRAFTED,)
+    assert (proposal["kind"], proposal["status"]) == ("work_item", "pending")
+    native = await board_id(client, owner)
+    assert proposal["boards"][0]["id"] == proposal["fields"]["board_id"] == native
+    assert await mongo.work_items().count_documents({}) == 0
+
+    resp = await approve(client, owner, proposal, title="Fix login on Safari")
+
+    assert resp.status_code == 200, resp.json()
+    applied = resp.json()["data"]
+    assert applied["status"] == "applied"
+    item = await mongo.work_items().find_one({})
+    asker = (await mongo.chat_proposals().find_one({"_id": proposal["id"]}))["user_id"]
+    # made as the member who asked, by the board's own create
+    assert (item["title"], item["description"], item["created_by"]) == ("Fix login on Safari", "It **fails**.", asker)
+    assert applied["result"]["href"] == f"/board?board={native}&item={item['key']}"
+    # approving again returns what was made, and makes nothing more
+    again = await approve(client, owner, proposal)
+    assert again.json()["data"]["result"] == applied["result"]
+    assert await mongo.work_items().count_documents({}) == 1
+    full = await client.get(f"/chat/conversations/{data['conversation']['id']}", headers=owner)
+    assert full.json()["data"]["messages"][-1]["proposals"][0]["status"] == "applied"
+
+
+async def test_pages_and_decisions_are_drafted_and_a_decision_starts_open(client, owner, fake_llm):
+    data = await drafted(
+        client, owner, fake_llm, lookup(PROPOSE_DOC, title="Login runbook", content="# Steps\n\nRestart it."),
+        lookup(PROPOSE_DECISION, title="OAuth only", statement="We sign in with OAuth only.", background="Passwords leak."),
+    )
+    page, decision = data["answer"]["proposals"]
+
+    made_page = (await approve(client, owner, page)).json()["data"]["result"]
+    made_decision = (await approve(client, owner, decision)).json()["data"]["result"]
+
+    stored = await mongo.documents().find_one({"_id": made_page["id"]})
+    assert (stored["title"], stored["content_md"]) == ("Login runbook", "# Steps\n\nRestart it.")
+    stored = await mongo.decisions().find_one({"_id": made_decision["id"]})
+    assert (stored["status"], stored["statement"], stored["context_md"]) == ("open", "We sign in with OAuth only.", "Passwords leak.")
+    assert made_decision["href"] == f"/decisions/{made_decision['id']}"
+
+
+async def test_only_the_member_who_asked_can_approve_or_cancel(client, owner, fake_llm):
+    (proposal,) = (await drafted(client, owner, fake_llm, lookup(PROPOSE_TICKET, title="Fix login")))["answer"]["proposals"]
+    teammate = await user(client, "teammate")
+    await join(client, owner, teammate, owner["X-Workspace-Id"])
+    teammate = in_workspace(teammate, owner["X-Workspace-Id"])
+
+    assert (await approve(client, teammate, proposal)).status_code == 404
+    assert (await client.post(f"/chat/proposals/{proposal['id']}/cancel", headers=teammate)).status_code == 404
+    assert await mongo.work_items().count_documents({}) == 0
+
+
+async def test_a_cancelled_or_expired_draft_cant_be_approved(client, owner, fake_llm):
+    cancelled, expired = (await drafted(
+        client, owner, fake_llm, lookup(PROPOSE_TICKET, title="One"), lookup(PROPOSE_TICKET, title="Two"),
+    ))["answer"]["proposals"]
+    assert (await client.post(f"/chat/proposals/{cancelled['id']}/cancel", headers=owner)).json()["data"]["status"] == "cancelled"
+    await mongo.chat_proposals().update_one({"_id": expired["id"]}, {"$set": {"expires_at": datetime(2020, 1, 1, tzinfo=UTC)}})
+
+    for proposal, status in ((cancelled, "cancelled"), (expired, "expired")):
+        resp = await approve(client, owner, proposal)
+        assert resp.status_code == 409 and resp.json()["meta"]["error_code"] == "proposal_not_pending"
+        assert status in resp.json()["meta"]["message"]
+    assert await mongo.work_items().count_documents({}) == 0
+
+
+async def test_a_failed_approval_can_be_tried_again(client, owner, fake_llm):
+    (proposal,) = (await drafted(client, owner, fake_llm, lookup(PROPOSE_TICKET, title="Fix login")))["answer"]["proposals"]
+
+    assert (await approve(client, owner, proposal, board_id="no-such-board")).status_code == 404
+    assert (await approve(client, owner, proposal)).json()["data"]["status"] == "applied"
+
+
+async def test_two_approvals_at_once_create_it_once(client, owner, fake_llm):
+    (proposal,) = (await drafted(client, owner, fake_llm, lookup(PROPOSE_TICKET, title="Fix login")))["answer"]["proposals"]
+
+    responses = await asyncio.gather(approve(client, owner, proposal), approve(client, owner, proposal))
+
+    assert sorted(r.status_code for r in responses) in ([200, 200], [200, 409])
+    assert await mongo.work_items().count_documents({}) == 1
+
+
+async def test_an_answer_drafts_at_most_a_few_and_a_decision_needs_a_statement(client, owner, fake_llm):
+    tickets = [lookup(PROPOSE_TICKET, title=f"Ticket {n}") for n in range(MAX_DRAFTS + 1)]
+    data = await drafted(client, owner, fake_llm, lookup(PROPOSE_DECISION, title="No statement"), *tickets)
+
+    results = fake_llm.calls[-1]["rounds"][0].results
+    assert results[0] == "error: give it a title and a statement"
+    assert results[-1] == f"error: at most {MAX_DRAFTS} drafts per answer"
+    assert len(data["answer"]["proposals"]) == MAX_DRAFTS
+
+
+async def test_a_secret_in_the_code_never_reaches_the_model_but_its_citation_shows_the_file(
+    client, owner, fake_llm, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("REPOS_DIR", str(tmp_path / "repos"))
+    get_settings.cache_clear()
+    sha = await with_checkout(tmp_path, {"api/keys.py": 'def keys():\n    return "AKIAABCDEFGHIJKLMNOP"\n'})
+    node = f"{REPO}:api/keys.py#keys"
+    await get_knowledge_graph_store().apply(GraphDelta(
+        repo_full_name=REPO, version=sha,
+        upserted_nodes=(GraphNode(node, NodeLabel.SYMBOL, {
+            "name": "keys", "kind": "function", "file_path": "api/keys.py", "start_line": 1, "end_line": 2,
+        }),),
+    ))
+    fake_llm.json_response = {"answer": "It returns a key [s1:2].", "answerable": True, "relations": []}
+
+    resp = await ask(client, owner, "what does keys return?", focused_node_id=node)
+
+    prompt = fake_llm.calls[-1]["prompt"]
+    assert "AKIAABCDEFGHIJKLMNOP" not in prompt
+    assert '      2 |     return "[REDACTED]"' in prompt
+    assert resp.json()["data"]["answer"]["citations"][0]["code"] == '    return "AKIAABCDEFGHIJKLMNOP"'
+    get_settings.cache_clear()
+
+
+async def test_lookup_results_come_back_fenced_as_data(client, owner, fake_llm):
+    fake_llm.json_response = GROUNDED
+    fake_llm.lookups = [[lookup(SEARCH_GRAPH, query="services")]]
+
+    await ask_streaming(client, owner)
+
+    (result,) = fake_llm.calls[-1]["rounds"][0].results
+    assert result.startswith("<graph_context>\n") and result.endswith("\n</graph_context>")
+
+
+async def test_a_tool_that_wasnt_offered_never_runs(client, owner, fake_llm):
+    fake_llm.json_response = GROUNDED
+    # without embeddings, searching by meaning isn't offered
+    fake_llm.lookups = [[lookup(SEARCH_MEANING, query="where a guest exports a report")]]
+
+    await ask_streaming(client, owner)
+
+    assert fake_llm.calls[-1]["rounds"][0].results == (f"error: there is no tool called {SEARCH_MEANING}",)
+
+
+async def test_a_rate_limited_question_never_pays_for_a_meaning_search(client, owner, fake_llm, fake_embedder, limits):
+    limits(chat_user_hourly_limit=1)
+    await mongo.repos().update_many({"repo_full_name": REPO}, {"$set": {"graph_version": "a" * 40}})
+    fake_llm.json_response = GROUNDED
+    assert (await ask(client, owner)).status_code == 200
+    assert fake_embedder.calls
+    fake_embedder.calls.clear()
+
+    resp = await ask(client, owner)
+
+    assert resp.status_code == 429
+    assert fake_embedder.calls == []
+
+
+async def test_before_the_graph_is_built_nothing_is_searched_by_meaning(client, owner, fake_llm, fake_embedder):
+    fake_llm.json_response = GROUNDED
+
+    await ask(client, owner)
+
+    assert fake_embedder.calls == []
+
+
+async def test_a_drafts_links_and_images_are_stripped_before_it_is_kept(client, owner, fake_llm):
+    body = "See [the docs](https://attacker.test/?d=1) and ![x](https://attacker.test/p.png)."
+    data = await drafted(client, owner, fake_llm, lookup(PROPOSE_DECISION, title="Use X", statement=body, background=body))
+
+    (proposal,) = data["answer"]["proposals"]
+    assert "attacker.test" not in json.dumps(proposal["fields"])
+    assert "See the docs and x." in json.dumps(proposal["fields"])

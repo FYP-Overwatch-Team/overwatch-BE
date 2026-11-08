@@ -1,4 +1,4 @@
-"""The AI chat: saved conversations about one repository, answered from its graph.
+"""The AI chat: saved conversations about one repository and the workspace, answered from its graph and tickets.
 
 A question is only stored together with its answer, so a failed call leaves
 nothing behind and the client can simply resend.
@@ -8,9 +8,10 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import asdict
 
-from app.chat import limits, repository
+from app.chat import limits, proposals, repository
 from app.chat.schemas import AskRequest
-from app.core.constants import UsageFeature
+from app.core import links
+from app.core.constants import ChatActionKind, UsageFeature
 from app.core.exceptions import AppError, ConflictError, NotFoundError
 from app.core.time import utcnow
 from app.github.repository import get_readable
@@ -25,6 +26,7 @@ from app.query.grounding import (
     plain_text,
     steps_markdown,
 )
+from app.query.workspace_tools import Workspace
 from app.usage import service as usage
 
 #: Earlier messages sent with a question, oldest first.
@@ -32,6 +34,11 @@ HISTORY_MESSAGES = 6
 #: Code ranges the previous answer cited, shown again so a follow-up can build on them.
 MAX_EARLIER_RANGES = 4
 TITLE_CHARS = 80
+#: each button's label and where it goes
+ACTIONS = {
+    ChatActionKind.CONNECT_TRACKER: ("Connect a tracker", links.INTEGRATIONS),
+    ChatActionKind.CREATE_TICKET: ("Create a ticket", links.NEW_WORK_ITEM),
+}
 
 
 def to_summary(doc: dict) -> dict:
@@ -54,7 +61,7 @@ async def ask_stream(member: dict, body: AskRequest) -> AsyncIterator[tuple[str,
     returns, saved; text streamed before it is a draft that `done` replaces.
     """
     workspace_id, user_id = member["workspace_id"], member["user_id"]
-    repo = await get_readable(workspace_id, body.repo_full_name)
+    repo = await get_readable(workspace_id, body.repo_full_name) if body.repo_full_name else {}
 
     conversation = None
     if body.conversation_id:
@@ -66,6 +73,9 @@ async def ask_stream(member: dict, body: AskRequest) -> AsyncIterator[tuple[str,
 
     earlier = conversation["messages"] if conversation else []
     last_answer = next((m for m in reversed(earlier) if m["role"] == "assistant"), None)
+    # before any work that costs, such as embedding the question; `take` still counts it at the model call
+    await limits.check(workspace_id, user_id)
+    workspace = Workspace(workspace_id, user_id)
     events = query.answer_stream(
         body.repo_full_name,
         body.question,
@@ -90,6 +100,7 @@ async def ask_stream(member: dict, body: AskRequest) -> AsyncIterator[tuple[str,
         on_usage=usage.recorder(workspace_id, user_id, UsageFeature.CHAT),
         # never two questions back in a row
         may_ask=not (last_answer or {}).get("ask"),
+        workspace=workspace,
     )
     result = None
     async for event in events:
@@ -115,6 +126,8 @@ async def ask_stream(member: dict, body: AskRequest) -> AsyncIterator[tuple[str,
     answer["steps"] = [asdict(step) for step in result.steps]
     answer["follow_ups"] = list(result.follow_ups)
     answer["ask"] = asdict(result.ask) if result.ask else None
+    answer["records"] = list(result.records)
+    answer["actions"] = [{"kind": kind, "label": ACTIONS[kind][0], "href": ACTIONS[kind][1]} for kind in workspace.actions]
     if conversation is None:
         saved = await repository.create(
             workspace_id, user_id, body.repo_full_name, body.question[:TITLE_CHARS], [question, answer],
@@ -123,10 +136,12 @@ async def ask_stream(member: dict, body: AskRequest) -> AsyncIterator[tuple[str,
         saved = await repository.append(workspace_id, user_id, conversation["_id"], [question, answer])
         if saved is None:  # filled up, or deleted, while the answer was being written
             raise ConflictError("this conversation is full; start a new one", error_code="conversation_full")
+    # kept beside the conversation, so approving one is a single update of its own
+    answer["proposals"] = await proposals.save(member, saved["_id"], answer["id"], workspace.drafts)
     yield "done", {"conversation": to_summary(saved), "question": question, "answer": answer}
 
 
-async def list_conversations(member: dict, repo_full_name: str) -> list[dict]:
+async def list_conversations(member: dict, repo_full_name: str | None) -> list[dict]:
     return [to_summary(doc) for doc in await repository.list_for(member["workspace_id"], member["user_id"], repo_full_name)]
 
 
@@ -134,6 +149,9 @@ async def get_conversation(member: dict, conversation_id: str) -> dict:
     doc = await repository.get(member["workspace_id"], member["user_id"], conversation_id)
     if doc is None:
         raise NotFoundError("conversation not found", error_code="conversation_not_found")
+    drafted = await proposals.by_message(member, conversation_id)
+    for message in doc["messages"]:
+        message["proposals"] = drafted.get(message["id"], [])
     return to_summary(doc)
 
 
@@ -145,7 +163,7 @@ async def delete_conversation(member: dict, conversation_id: str) -> None:
 def _message(role: str, text: str, nodes: list[dict], grounded: bool, created_at) -> dict:
     return {
         "id": uuid.uuid4().hex, "role": role, "text": text, "nodes": nodes, "steps": [], "follow_ups": [], "ask": None,
-        "grounded": grounded, "created_at": created_at,
+        "records": [], "actions": [], "proposals": [], "grounded": grounded, "created_at": created_at,
     }
 
 
@@ -159,4 +177,4 @@ def _turn(message: dict) -> Turn:
         text = f"{text}\n\n{steps_markdown(steps)}"
     if ask := message.get("ask"):  # so a picked option reads as the answer to it
         text = f"{text}\n\n{ask_markdown(ClarifyingQuestion(ask['question'], tuple(ask['options'])))}"
-    return Turn("model", plain_text(text, citations, code_citations))
+    return Turn("model", plain_text(text, citations, code_citations, message.get("records", [])))

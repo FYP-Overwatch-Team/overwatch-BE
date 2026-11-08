@@ -28,6 +28,7 @@ from app.core.constants import (
     EmbeddingKind,
     EvidenceKind,
     EvidenceStance,
+    SYSTEM_USER,
     UsageFeature,
 )
 from app.core.exceptions import AppError, ConflictError, ExternalServiceError, FieldValidationError
@@ -40,8 +41,6 @@ from app.embeddings import service as embeddings
 logger = structlog.get_logger("app.decisions")
 
 SYSTEM_INSTRUCTION = (Path(__file__).parent / "prompts" / "check.md").read_text(encoding="utf-8")
-#: who the automatic checks act as, in usage and on the evidence they add
-SYSTEM_USER = "system"
 #: decisions read with one source; the most strongly related, then the most recently changed
 MAX_DECISIONS_PER_SOURCE = 8
 #: longer than a whole check can take: a day's cap of model calls, each with its retries

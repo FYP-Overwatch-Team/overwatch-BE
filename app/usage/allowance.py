@@ -23,15 +23,18 @@ def monthly_key(workspace_id: str, now: datetime) -> str:
     return f"ai:month:{workspace_id}:{now.strftime('%Y%m')}"
 
 
-async def take_action(workspace_id: str, user_id: str, feature: UsageFeature, windows: list[Window]) -> None:
-    """Count one action against the month and every other window, or raise without counting any."""
-    now = utcnow()
-    month = Window(
+def month_window(workspace_id: str, now: datetime) -> Window:
+    return Window(
         monthly_key(workspace_id, now), get_settings().ai_workspace_monthly_limit, next_month(now) + timedelta(days=1),
         AppError("This workspace has used this month's AI allowance", error_code="ai_allowance_used_up", status_code=429),
     )
+
+
+async def take_action(workspace_id: str, user_id: str, feature: UsageFeature, windows: list[Window]) -> None:
+    """Count one action against the month and every other window, or raise without counting any."""
+    now = utcnow()
     # the month first: once it's used up, that's the limit worth telling people about
-    await take_all([month, *windows])
+    await take_all([month_window(workspace_id, now), *windows])
     await mongo.ai_actions().insert_one({
         "workspace_id": workspace_id, "user_id": user_id, "feature": feature, "created_at": now,
     })

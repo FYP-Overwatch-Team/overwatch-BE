@@ -350,6 +350,37 @@ class SearchResultKind(StrEnum):
     DOCUMENT = "document"
 
 
+class ChatRecordKind(StrEnum):
+    """What an AI answer cites from the workspace with `[rN]`."""
+
+    WORK_ITEM = "work_item"
+    DOCUMENT = "document"
+    DECISION = "decision"
+    #: a repository's files and functions; kept per repository, not per workspace
+    CODE = "code"
+
+
+class ChatActionKind(StrEnum):
+    """A button under an AI answer, added by the server from what the lookups found, never by the model."""
+
+    #: no tracker is connected
+    CONNECT_TRACKER = "connect_tracker"
+    #: no ticket matched
+    CREATE_TICKET = "create_ticket"
+
+
+class ProposalStatus(StrEnum):
+    """Where a ticket, page or decision the AI chat drafted stands; only the person who asked moves it."""
+
+    PENDING = "pending"
+    #: being created right now
+    APPLYING = "applying"
+    APPLIED = "applied"
+    CANCELLED = "cancelled"
+    #: still pending past its expiry; worked out when read, never stored
+    EXPIRED = "expired"
+
+
 class CheckMatch(StrEnum):
     """Why a decision check read a source against a decision, strongest first."""
 
@@ -363,12 +394,18 @@ class CheckMatch(StrEnum):
     SIMILAR = "similar"
 
 
+#: who background work (decision checks, indexing) acts as, in usage and on what it adds
+SYSTEM_USER = "system"
+
+
 class EmbeddingKind(StrEnum):
     """What an embedding was made from."""
 
     WORK_ITEM = "work_item"
     DOCUMENT = "document"
     DECISION = "decision"
+    #: a repository's files and functions; kept per repository, not per workspace
+    CODE = "code"
 
 
 class EmbedPurpose(StrEnum):
@@ -376,6 +413,8 @@ class EmbedPurpose(StrEnum):
 
     DOCUMENT = "document"
     QUERY = "query"
+    #: a question or ticket, searched with for the code it's about
+    CODE_QUERY = "code_query"
 
 
 class VectorSearch(StrEnum):

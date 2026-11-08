@@ -11,6 +11,7 @@ from app.core.exceptions import ExternalServiceError
 from app.core.time import utcnow
 from app.db import mongo
 from app.decisions import checks
+from app.embeddings import service as embeddings
 from tests.integration.test_decisions_api import PRD, decide, page, quoting
 from tests.integration.test_work_items_api import create as create_item
 from tests.integration.test_work_items_api import signed_in
@@ -241,7 +242,11 @@ async def test_embeddings_are_made_once_per_version_and_recorded_as_usage(client
 
     assert sum(len(call["texts"]) for call in fake_embedder.calls) == embedded
     stored = await mongo.embeddings().find_one({"ref_id": item["id"]})
-    assert (stored["kind"], stored["model"], len(stored["vector"])) == ("work_item", "fake/embedder", len(fake_embedder.vocabulary))
+    # packed as float32, a third of the size of a list of doubles
+    assert isinstance(stored["vector"], bytes)
+    assert (stored["kind"], stored["model"], len(embeddings.decode(stored["vector"]))) == (
+        "work_item", "fake/embedder", len(fake_embedder.vocabulary),
+    )
     assert await mongo.llm_usage().count_documents({"feature": "embeddings"}) >= 1
 
 

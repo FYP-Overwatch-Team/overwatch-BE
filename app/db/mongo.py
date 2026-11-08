@@ -173,6 +173,11 @@ def chat_conversations():
     return get_db()["chat_conversations"]
 
 
+def chat_proposals():
+    """Tickets, pages and decisions the AI chat drafted, created only once the member who asked approves them."""
+    return get_db()["chat_proposals"]
+
+
 def decisions():
     """What a workspace decided, with the quoted passages it rests on and its status history."""
     return get_db()["decisions"]
@@ -356,6 +361,8 @@ async def ensure_indexes() -> None:
     await work_items().create_index([("workspace_id", 1), ("key", 1)])
     await documents().create_index([("workspace_id", 1), ("updated_at", -1)])
     await embeddings().create_index([("workspace_id", 1), ("kind", 1), ("ref_id", 1)], unique=True)
+    # a repository's code vectors, kept current on every index and dropped with the repository
+    await embeddings().create_index([("repo", 1), ("kind", 1), ("model", 1)])
 
     # Extraction cache: read on every sync to decide what changed, and always
     # scoped to one repository.
@@ -364,6 +371,8 @@ async def ensure_indexes() -> None:
     # Webhook dedup: looked up on every delivery, expired 30 days after receipt.
     await chat_conversations().create_index([("workspace_id", 1), ("user_id", 1), ("repo_full_name", 1), ("updated_at", -1)])
     await chat_conversations().create_index("expires_at", expireAfterSeconds=0)
+    await chat_proposals().create_index("conversation_id")
+    await chat_proposals().create_index("purge_at", expireAfterSeconds=0)
     await usage_counters().create_index("expires_at", expireAfterSeconds=0)
     # the Decisions inbox, newest change first, and the decisions quoting one item or page
     await decisions().create_index([("workspace_id", 1), ("status", 1), ("updated_at", -1)])
@@ -405,10 +414,14 @@ VECTOR_INDEX = "embeddings_vector"
 
 
 async def _ensure_vector_index() -> None:
-    """Atlas Vector Search over embeddings, filtered by workspace, kind and model; updated when the size changes."""
+    """Atlas Vector Search over embeddings, filtered by workspace (or repository, for code), kind and model.
+
+    Updated when the definition changes, which Atlas answers by rebuilding the index.
+    """
     definition = {"fields": [
         {"type": "vector", "path": "vector", "numDimensions": get_settings().embedding_dimensions, "similarity": "cosine"},
         {"type": "filter", "path": "workspace_id"},
+        {"type": "filter", "path": "repo"},
         {"type": "filter", "path": "kind"},
         {"type": "filter", "path": "model"},
     ]}

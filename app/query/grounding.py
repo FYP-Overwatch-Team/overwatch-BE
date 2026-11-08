@@ -30,9 +30,10 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 
+from app.knowledge_graph.search_text import identifier_words
 from app.query.context import GroundingContext, Relation, clean
 
-CANNOT_DETERMINE = "This can't be determined from the repository's graph."
+CANNOT_DETERMINE = "This can't be determined from the repository's graph or the workspace."
 #: Where chat attachments are served from; the only place an answer's image may load from.
 ATTACHMENT_PATH = "/chat/attachments/"
 
@@ -61,10 +62,26 @@ _REPEATED_CITATION_RE = re.compile(r"(\[c\d+\])(?:\s*\1)+")
 _CITATION_RE = re.compile(r"([ \t]*)\[(c\d+)\]")
 # a reference with the space before it, so removing one leaves no gap
 _SPACED_REF_RE = re.compile(r"[ \t]*\[(n\d+)\]")
+#: How close (in characters) a `code` name must be to a node reference to be the thing it names.
+_NAMED_WITHIN = 40
+_CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
+#: Words are compared by their first letters, so `features` names a node `feature`.
+_NAME_PREFIX = 4
+# a workspace record, `[r1]`, as loosely as models write it
+_RECORD_REF_RE = re.compile(r"([ \t]*)[\[【]\s*(r\d+)\s*[\]】]")
+# a dash between words, which reads as machine-written; an unspaced en dash is a range (42–58) and stays
+_DASH_RE = re.compile(r"[ \t]*—[ \t]*|[ \t]+–[ \t]+")
+_INLINE_CODE_RE = re.compile(r"(`[^`\n]*`)")
 _FENCE_RE = re.compile(r"(```[\s\S]*?(?:```|$))")
-_IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]\(\s*<?([^)\s>]*)>?(?:\s+[\"'][^\"'\n]*[\"'])?\s*\)")
-_LINK_RE = re.compile(r"(?<!!)\[([^\]\n]+)\]\([^)\n]*\)")
-_REFERENCE_DEFINITION_RE = re.compile(r"^[ \t]*\[[^\]\n]+\]:[ \t]*\S.*$", re.MULTILINE)
+# an inline destination however it's written: on the next line, `<with spaces>`, with a "title" or (title)
+_DESTINATION = r"\(((?:[^()]|\([^()]*\))*)\)"
+_IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]" + _DESTINATION)
+_LINK_RE = re.compile(r"(?<!!)\[([^\]\n]+)\]" + _DESTINATION)
+# also inside a quote, and with its URL on the next line
+_REFERENCE_DEFINITION_RE = re.compile(
+    r"^[ \t]*(?:>[ \t]*)*\[[^\]\n]+\]:[ \t]*(?:\n[ \t]*(?:>[ \t]*)*)?\S.*$", re.MULTILINE,
+)
+_AUTOLINK_RE = re.compile(r"<((?:https?|ftp|mailto):[^<>\s]*)>", re.IGNORECASE)
 _INLINE_IMAGE_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$")
 # `STEPS:`, or as models dress it up, `**Steps:**` or `### Steps:`
 _STEPS_LINE_RE = re.compile(rf"^[ \t*_#]*{STEPS_MARKER}[ \t*_]*:[ \t*_]*$", re.IGNORECASE | re.MULTILINE)
@@ -153,6 +170,8 @@ class GroundedAnswer:
     grounded: bool = True
     #: The question's @-mentions that exist in the graph.
     mentions: tuple[Citation, ...] = ()
+    #: The workspace records (tickets, pages, decisions) the answer cites as `[rN]`, as the lookups gave them.
+    records: tuple[dict, ...] = ()
     #: What was thrown away, for logging.
     dropped_refs: tuple[str, ...] = field(default=(), compare=False)
     dropped_code_refs: tuple[str, ...] = field(default=(), compare=False)
@@ -172,7 +191,7 @@ def ground(
     `relations` are those the reply says the answer relies on; `may_ask` is False right
     after a question back: another one is written into the text instead.
     """
-    text = _outside_code(safe_markdown(answer.strip()), _canonical_refs)
+    text = _outside_code(safe_markdown(answer.strip()), lambda part: _canonical_refs(_no_dashes(part)))
     text, follow_ups, ask = _split_trailing(text)
     if ask and not may_ask:
         text, ask = f"{text}\n\n{ask.question}\n\n" + "\n".join(f"- {option}" for option in ask.options), None
@@ -188,8 +207,9 @@ def ground(
         return GroundedAnswer(CANNOT_DETERMINE, grounded=False, unsupported=unsupported)
 
     cited = list(dict.fromkeys(REF_RE.findall(text)))
-    known = [ref for ref in cited if ref in context.nodes]
-    text = _SPACED_REF_RE.sub(lambda match: match[0] if match[1] in context.nodes else "", text)
+    text = _SPACED_REF_RE.sub(lambda match: match[0] if _names_its_node(context, match) else "", text)
+    kept = set(REF_RE.findall(text))
+    known = [ref for ref in cited if ref in kept]
     text, code_citations, dropped_code = _cite_code(context, text)
     if ask:  # a question back walks through nothing yet
         text, steps = _outside_code(text, lambda part: _EXACT_STEPS_LINE_RE.sub("", part)), ()
@@ -202,9 +222,47 @@ def ground(
         steps,
         follow_ups,
         ask,
-        dropped_refs=tuple(ref for ref in cited if ref not in context.nodes),
+        dropped_refs=tuple(ref for ref in cited if ref not in kept),
         dropped_code_refs=dropped_code,
     )
+
+
+def _names_its_node(context: GroundingContext, match: re.Match) -> bool:
+    """Whether a reference was given out and isn't written beside a `code` name for something else.
+
+    "the migration plan [n1] (in `docs/plans/migration.md`)", n1 being a folder, would
+    highlight the wrong thing, so it's dropped like a made-up reference. Prose around a
+    reference ("the route [n1]") says nothing for sure, so it's trusted.
+    """
+    ref = match[1]
+    if ref not in context.nodes:
+        return False
+    text, start, end = match.string, match.start(), match.end()
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end < 0:
+        line_end = len(text)
+    beside = [
+        span[1] for span in _CODE_SPAN_RE.finditer(text, line_start, line_end)
+        if start - _NAMED_WITHIN <= span.end() <= start or end <= span.start() <= end + _NAMED_WITHIN
+    ]
+    if not beside:
+        return True
+    name = {word[:_NAME_PREFIX] for word in identifier_words(context.labels[ref]).split()}
+    return any(word[:_NAME_PREFIX] in name for word in identifier_words(*beside).split())
+
+
+def cite_records(answer: str, records: dict[str, dict]) -> tuple[str, tuple[dict, ...]]:
+    """Keep `[rN]` only where a lookup gave that record out, written `[rN]`; the records cited, in order."""
+    cited: dict[str, dict] = {}
+
+    def cite(match: re.Match) -> str:
+        if match[2] not in records:
+            return ""
+        cited.setdefault(match[2], records[match[2]])
+        return f"{match[1]}[{match[2]}]"
+
+    return _outside_code(answer, lambda part: _RECORD_REF_RE.sub(cite, part)), tuple(cited.values())
 
 
 def _cite_code(context: GroundingContext, text: str) -> tuple[str, tuple[CodeCitation, ...], tuple[str, ...]]:
@@ -424,19 +482,30 @@ def _canonical_code_refs(match: re.Match) -> str:
     return "".join(refs)
 
 
+def _no_dashes(text: str) -> str:
+    """Em dashes, and en dashes between words, as commas; inline code is left alone."""
+    return "".join(
+        part if index % 2 else _DASH_RE.sub(", ", part) for index, part in enumerate(_INLINE_CODE_RE.split(text))
+    )
+
+
 def _outside_code(text: str, change: Callable[[str], str]) -> str:
     """Apply `change` to the text outside fenced code blocks."""
     return "".join(part if index % 2 else change(part) for index, part in enumerate(_FENCE_RE.split(text)))
 
 
-def plain_text(text: str, citations: Sequence[Citation], code_citations: Sequence[CodeCitation] = ()) -> str:
-    """An answer with its references spelled out as names, and its code citations as `(path:L42-58)`.
+def plain_text(
+    text: str, citations: Sequence[Citation], code_citations: Sequence[CodeCitation] = (), records: Sequence[dict] = (),
+) -> str:
+    """An answer with its references spelled out as names, its code citations as `(path:L42-58)` and its records as keys.
 
     References are only meaningful inside the context they came from, so an
     earlier answer goes back to the model as names, never as `[nX]` or `[cN]`.
     """
     where = {c.ref: clean(f"{c.path}:L{c.start_line}-{c.end_line}", 240) for c in code_citations}
     text = _CITATION_RE.sub(lambda match: f"{match[1]}({where[match[2]]})" if match[2] in where else "", text)
+    keys = {record["ref"]: clean(record["key"] or record["title"]) for record in records}
+    text = _RECORD_REF_RE.sub(lambda match: f"{match[1]}({keys[match[2]]})" if match[2] in keys else "", text)
     # names go back to the model, so they're escaped like anything else from the repo
     names = {citation.ref: clean(citation.name) for citation in citations}
 
@@ -454,12 +523,14 @@ def safe_markdown(text: str) -> str:
     """Images only from chat attachments or inline data; links reduced to their text. Code is left alone."""
 
     def image(match: re.Match) -> str:
-        alt, url = match[1], match[2]
+        alt, destination = match[1], match[2].strip()
+        url = destination[1:].partition(">")[0] if destination.startswith("<") else (destination.split() or [""])[0]
         return match[0] if url.startswith(ATTACHMENT_PATH) or _INLINE_IMAGE_RE.match(url) else alt
 
     def outside_code(part: str) -> str:
         part = _IMAGE_RE.sub(image, part)
         part = _LINK_RE.sub(lambda match: match[1], part)
+        part = _AUTOLINK_RE.sub(r"\1", part)
         return _REFERENCE_DEFINITION_RE.sub("", part)
 
     return _outside_code(text, outside_code)

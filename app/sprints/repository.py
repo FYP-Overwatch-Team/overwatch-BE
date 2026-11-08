@@ -48,6 +48,11 @@ async def active(board_id: str) -> dict | None:
     return await mongo.sprints().find_one({"board_id": board_id, "state": SprintState.ACTIVE}, sort=[("start_at", 1)])
 
 
+async def active_ids(workspace_id: str) -> list[str]:
+    """The sprint running now on each of the workspace's boards."""
+    return await mongo.sprints().distinct("_id", {"workspace_id": workspace_id, "state": SprintState.ACTIVE})
+
+
 async def count(board_id: str) -> int:
     return await mongo.sprints().count_documents({"board_id": board_id})
 
