@@ -1,5 +1,6 @@
 import secrets
 
+import structlog
 from fastapi import BackgroundTasks, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 
@@ -22,6 +23,7 @@ from app.core.responses import api_router
 from app.workers import jobs
 
 router = api_router(prefix="/connections", tags=["connections"])
+logger = structlog.get_logger("app.connectors")
 
 LANDING = {"onboarding": "/onboarding/{provider}", "settings": "/settings/integrations"}
 
@@ -41,7 +43,8 @@ def set_state_cookie(response: Response, provider: str, state: str) -> None:
 
 
 async def oauth_callback(credential: str, request: Request, state: str, code: str | None, error: str | None) -> RedirectResponse:
-    """Lands back where the flow started with ?{provider}=connected|denied|error.
+    """Lands back where the flow started with ?{provider}=connected|denied|taken|error; `taken` means the
+    account is already connected to another Bearings workspace.
 
     One callback per OAuth app; the state says which of its products was being connected.
     """
@@ -51,18 +54,22 @@ async def oauth_callback(credential: str, request: Request, state: str, code: st
     if provider not in products:
         provider, expected_state = products[0], None
     if not expected_state or not secrets.compare_digest(state, expected_state):
+        # the state cookie didn't come back (cookie policy, another browser, or a stale tab) or doesn't match
+        logger.warning("oauth_callback_state_mismatch", provider=provider, has_cookie=bool(expected_state))
         outcome = "error"
     elif error or not code:
+        logger.info("oauth_callback_denied", provider=provider, provider_error=error)
         outcome = "denied"
     else:
         try:
             await service.complete_authorization(provider, workspace_id, user_id, code)
             outcome = "connected"
-        except AppError:
-            outcome = "error"
+        except AppError as exc:
+            logger.warning("oauth_callback_failed", provider=provider, workspace_id=workspace_id, error_code=exc.error_code, reason=str(exc))
+            outcome = "taken" if exc.error_code == "account_already_connected" else "error"
 
     landing = LANDING.get(return_to, LANDING["onboarding"]).format(provider=provider)
-    query = f"{provider}={outcome}" + (f"&w={workspace_id}" if outcome != "error" else "")
+    query = f"{provider}={outcome}" + (f"&w={workspace_id}" if outcome in ("connected", "denied") else "")
     response = RedirectResponse(f"{get_settings().frontend_origin}{landing}?{query}")
     response.delete_cookie(_state_cookie(credential), path=registry.get(provider).oauth.redirect_path)
     return response

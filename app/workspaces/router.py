@@ -5,6 +5,7 @@ from fastapi import BackgroundTasks, Depends
 from app.api.deps import client_ip, get_current_user, get_current_user_id, workspace_member_by_path
 from app.core.constants import Role
 from app.core.rate_limit import Limit, take
+from app.connectors import service as connectors
 from app.core.responses import api_router
 from app.workspaces import service
 from app.workspaces.schemas import (
@@ -51,6 +52,8 @@ async def rename_workspace(body: WorkspaceName, actor: dict = Depends(admin)) ->
 @router.delete("/workspaces/{workspace_id}")
 async def delete_workspace(actor: dict = Depends(owner)) -> None:
     await service.delete(actor)
+    # after the delete, which refuses a personal workspace; done here, as connectors already import workspaces
+    await connectors.disconnect_chat(actor["workspace_id"])
 
 
 @router.get("/workspaces/{workspace_id}/members")

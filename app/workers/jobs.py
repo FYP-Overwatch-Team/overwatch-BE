@@ -133,8 +133,14 @@ async def _take_pending(repo_full_name: str) -> bool | None:
 
 
 async def run_connector_sync(workspace_id: str, provider: str, target_key: str) -> None:
-    """Sync one target: a tracker project into work_items, or a docs space into documents."""
-    if registry.get(provider).category == ConnectorCategory.DOCUMENTS:
+    """Sync one target: a tracker project into work_items, or a docs space into documents.
+
+    A chat channel has nothing to sync: its messages are pushed to us as they're posted.
+    """
+    category = registry.get(provider).category
+    if category == ConnectorCategory.CHAT:
+        return
+    if category == ConnectorCategory.DOCUMENTS:
         await doc_sync.run_document_sync(workspace_id, provider, target_key)
     else:
         await sync.run_work_item_sync(workspace_id, provider, target_key)
