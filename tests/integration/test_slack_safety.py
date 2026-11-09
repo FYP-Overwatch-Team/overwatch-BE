@@ -158,6 +158,8 @@ async def test_one_workspaces_failure_doesnt_stop_the_others(monkeypatch):
 
     monkeypatch.setattr(slack_connections, "serving", serving)
     monkeypatch.setattr(digest, "send", send)
+    # after the default digest time, so both workspaces are due whenever this runs
+    monkeypatch.setattr(digest, "utcnow", lambda: datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc))
 
     await digest.run_due()
 
