@@ -162,6 +162,14 @@ class ChangeStatus(BaseModel):
     superseded_by: str | None = None
 
 
+class DismissMany(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=50)
+
+
+class Dismissed(BaseModel):
+    dismissed: int
+
+
 class SuggestRequest(BaseModel):
     kind: EvidenceKind
     ref_id: str

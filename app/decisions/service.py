@@ -238,6 +238,7 @@ def _review_by(fields: dict) -> dict:
 
 async def list_decisions(
     member: dict, *, tab: InboxTab | None, today: date, q: str | None, ref_id: str | None, offset: int, limit: int,
+    origin: DecisionOrigin | None = None,
 ) -> tuple[list[dict], int]:
     """Newest change first; `ref_id` is a board item or page the decision quotes, `today` the viewer's date."""
     query: dict = {"workspace_id": member["workspace_id"]}
@@ -245,6 +246,8 @@ async def list_decisions(
         query |= _tab_query(tab, member["user_id"], today)
     if ref_id:
         query["evidence.ref_id"] = ref_id
+    if origin:
+        query["origin"] = origin
     if q:
         pattern = {"$regex": re.escape(q), "$options": "i"}
         query = {"$and": [query, {"$or": [{"title": pattern}, {"statement": pattern}, {"area": pattern}]}]}

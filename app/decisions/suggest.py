@@ -235,9 +235,22 @@ async def _suggest(
     return created
 
 
-async def dismiss(member: dict, decision_id: str) -> None:
+async def dismiss_many(member: dict, decision_ids: list[str]) -> int:
+    """`dismiss` for each; returns how many were still waiting for review and are now gone."""
+    dismissed = 0
+    for decision_id in decision_ids:
+        try:
+            await dismiss(member, decision_id)
+        except NotFoundError:
+            continue
+        dismissed += 1
+    return dismissed
+
+
+async def dismiss(member: dict, decision_id: str, *, remember: bool = True) -> None:
     """"Not a decision": the suggestion goes, and its quote isn't suggested from that source again.
-    One an AI tool recorded goes the same way, and that tool isn't let record it again."""
+    One an AI tool recorded goes the same way, and that tool isn't let record it again, unless `remember` is off
+    (its recorder took it back to correct it)."""
     workspace_id = member["workspace_id"]
     decision = await mongo.decisions().find_one_and_delete({
         "_id": decision_id, "workspace_id": workspace_id,
@@ -250,7 +263,7 @@ async def dismiss(member: dict, decision_id: str) -> None:
     topic = topics.name("decision", decision_id)
     get_hub().publish(topic, EventName.DECISION_DELETED, {"id": decision_id})
     get_hub().close_topic(topic, UnsubscribeReason.GONE)
-    if decision.get("capture"):
+    if decision.get("capture") and remember:
         await mongo.decision_scans().update_one(
             {"workspace_id": workspace_id, "ref_id": CAPTURE_REF},
             {"$addToSet": {"dismissed_quotes": decision["capture"]["fingerprint"]}}, upsert=True,
