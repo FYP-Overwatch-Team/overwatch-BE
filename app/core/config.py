@@ -167,6 +167,9 @@ class Settings(BaseSettings):
     mcp_max_connections_per_user: int = 20
     # lookups one connected tool may make a minute
     mcp_reads_per_connection_minute: int = 60
+    # decisions and questions one connected tool may record an hour, and all of a workspace's tools a day
+    mcp_writes_per_connection_hourly: int = 20
+    mcp_writes_per_workspace_daily: int = 200
 
     @property
     def mcp_url(self) -> str:

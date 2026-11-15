@@ -9,6 +9,8 @@ import secrets
 import uuid
 from datetime import timedelta
 
+from pymongo import ReturnDocument
+
 from app.core.config import get_settings
 from app.core.constants import MCP_TOKEN_PREFIX, McpGrantKind, McpScope
 from app.core.exceptions import ConflictError, NotFoundError
@@ -22,7 +24,7 @@ SHOWN_PREFIX = len(MCP_TOKEN_PREFIX) + 4
 LIVE = {"revoked_at": None}
 
 
-async def create_token(member: dict, label: str, *, read_only: bool, days: int | None) -> tuple[dict, str]:
+async def create_token(member: dict, label: str, *, read_only: bool, ask_first: bool, days: int | None) -> tuple[dict, str]:
     """A personal token for the member's current workspace; the raw token is returned once and never stored."""
     settings = get_settings()
     user_id = member["user_id"]
@@ -32,7 +34,7 @@ async def create_token(member: dict, label: str, *, read_only: bool, days: int |
     raw = MCP_TOKEN_PREFIX + secrets.token_urlsafe(32)
     grant = {
         "_id": uuid.uuid4().hex, "user_id": user_id, "workspace_id": member["workspace_id"],
-        "kind": McpGrantKind.TOKEN, "label": label,
+        "kind": McpGrantKind.TOKEN, "label": label, "ask_first": ask_first,
         "scopes": [McpScope.READ] if read_only else [McpScope.READ, McpScope.RECORD],
         "token_prefix": raw[:SHOWN_PREFIX], "created_at": now, "last_used_at": None, "records_count": 0,
         "expires_at": now + timedelta(days=days or settings.mcp_token_default_days), "revoked_at": None,
@@ -54,6 +56,18 @@ async def list_for_user(user_id: str) -> list[dict]:
     """The member's connected AI tools in every workspace, newest first; revoked ones are left out."""
     cursor = mongo.mcp_grants().find({"user_id": user_id, **LIVE}).sort([("created_at", -1), ("_id", 1)])
     return await _with_workspace([grant async for grant in cursor])
+
+
+async def change(user_id: str, grant_id: str, fields: dict) -> dict:
+    """Rename a connected tool, or change whether it asks before recording."""
+    mine = {"_id": grant_id, "user_id": user_id, **LIVE}
+    if fields:
+        grant = await mongo.mcp_grants().find_one_and_update(mine, {"$set": fields}, return_document=ReturnDocument.AFTER)
+    else:
+        grant = await mongo.mcp_grants().find_one(mine)
+    if grant is None:
+        raise NotFoundError("connection not found", error_code="connection_not_found")
+    return (await _with_workspace([grant]))[0]
 
 
 async def _revoke(query: dict) -> int:

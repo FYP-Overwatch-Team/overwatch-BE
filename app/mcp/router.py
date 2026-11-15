@@ -5,7 +5,7 @@ from app.core.config import get_settings
 from app.core.exceptions import FieldValidationError
 from app.core.responses import api_router
 from app.mcp import grants
-from app.mcp.schemas import AiTool, AiToolCreated, AiToolSetup, CreateToken
+from app.mcp.schemas import AiTool, AiToolCreated, AiToolSetup, ChangeAiTool, CreateToken
 
 # a member manages their own connected AI tools; each one is tied to the workspace it was made in
 router = api_router(prefix="/ai-tools", tags=["ai-tools"])
@@ -28,8 +28,15 @@ async def create_token(body: CreateToken, member: dict = Depends(workspace_membe
     settings = get_settings()
     if body.expires_in_days and body.expires_in_days > settings.mcp_token_max_days:
         raise FieldValidationError({"expires_in_days": f"A token lasts {settings.mcp_token_max_days} days at most."})
-    grant, token = await grants.create_token(member, body.label.strip(), read_only=body.read_only, days=body.expires_in_days)
+    grant, token = await grants.create_token(
+        member, body.label.strip(), read_only=body.read_only, ask_first=body.ask_first, days=body.expires_in_days,
+    )
     return AiToolCreated(**grant, token=token, url=settings.mcp_url)
+
+
+@router.patch("/{tool_id}")
+async def change(tool_id: str, body: ChangeAiTool, user_id: str = Depends(get_current_user_id)) -> AiTool:
+    return await grants.change(user_id, tool_id, body.model_dump(exclude_none=True))
 
 
 @router.delete("/{tool_id}")

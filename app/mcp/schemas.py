@@ -14,6 +14,8 @@ class AiTool(BaseModel):
     workspace_id: str
     workspace_name: str
     scopes: list[McpScope]
+    #: it asks the person before recording anything, unless they asked for it
+    ask_first: bool = True
     #: the start of its token, to tell it from the others; the rest is never stored
     token_prefix: str | None
     created_at: datetime
@@ -32,8 +34,16 @@ class AiToolCreated(AiTool):
 class CreateToken(BaseModel):
     label: str = Field(min_length=1, max_length=60)
     read_only: bool = False
+    ask_first: bool = True
     #: the default life when not sent; the server's longest is refused above
     expires_in_days: int | None = Field(default=None, ge=1)
+
+
+class ChangeAiTool(BaseModel):
+    """Only the fields sent are changed."""
+
+    label: str | None = Field(default=None, min_length=1, max_length=60)
+    ask_first: bool | None = None
 
 
 class AiToolSetup(BaseModel):

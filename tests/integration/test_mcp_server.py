@@ -6,7 +6,8 @@ import json
 import pytest
 
 from tests.integration.test_ai_tools_api import token
-from tests.integration.test_decisions_api import decide
+from app.db import mongo
+from tests.integration.test_decisions_api import decide, page, quoting
 from tests.integration.test_workspaces import bearer, in_workspace, team, user
 
 HEADERS = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18"}
@@ -151,3 +152,134 @@ async def test_lookups_are_limited_per_tool(client, monkeypatch):
     again = await call(client, raw, "search_decisions")
 
     assert "rate_limited" in again["error"]
+
+
+LOCKS = {"title": "Import locking", "statement": "Imports take a Postgres advisory lock per workspace."}
+
+
+async def inbox(client, headers: dict, tab: str = "needs_you") -> list[dict]:
+    return (await client.get("/decisions", params={"tab": tab}, headers=headers)).json()["data"]
+
+
+async def test_a_tool_asks_before_recording_unless_the_person_asked_for_it(client):
+    headers, raw = await connected(client)
+
+    asked = await call(client, raw, "record_decision", **LOCKS)
+    assert asked["result"] == "confirmation_needed" and await inbox(client, headers) == []
+
+    recorded = await call(client, raw, "record_decision", **LOCKS, user_approved=True, user_words="yes, lock per workspace")
+
+    [proposal] = await inbox(client, headers)
+    assert (recorded["result"], recorded["decision"]["key"], recorded["decision"]["unreviewed"]) == ("recorded", "D-1", True)
+    assert (proposal["status"], proposal["origin"], proposal["created_by"]) == ("proposed", "agent", "id-alice")
+    assert (proposal["capture"]["client"], proposal["capture"]["user_words"]) == ("Claude Code", "yes, lock per workspace")
+    [tool] = (await client.get("/ai-tools", headers=bearer(headers))).json()["data"]
+    assert tool["records_count"] == 1 and tool["last_used_at"]
+
+
+async def test_a_tool_set_to_record_on_its_own_does_not_ask(client):
+    headers, raw = await connected(client, ask_first=False)
+
+    recorded = await call(client, raw, "record_decision", **LOCKS)
+
+    assert recorded["result"] == "recorded"
+    [proposal] = await inbox(client, headers)
+    assert proposal["capture"]["user_approved"] is False
+
+
+async def test_an_open_question_is_the_persons_to_settle(client):
+    headers, raw = await connected(client)
+
+    await call(client, raw, "record_decision", title="Retries", statement="How often do imports retry?", kind="open_question", user_approved=True)
+
+    [question] = await inbox(client, headers)
+    assert (question["status"], question["owner_id"]) == ("open", "id-alice")
+
+
+async def test_the_same_wording_is_recorded_once_whoever_sends_it(client):
+    headers, raw = await connected(client)
+    second = (await token(client, headers, label="Codex"))["token"]
+
+    first = await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+    retried = await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+    other = await call(client, second, "record_decision", title="import locking", statement="Imports take a Postgres  advisory lock per workspace.", user_approved=True)
+
+    assert [first["result"], retried["result"], other["result"]] == ["recorded", "already_recorded", "already_recorded"]
+    assert retried["decision"]["key"] == other["decision"]["key"] == "D-1" and len(await inbox(client, headers)) == 1
+
+
+async def test_a_similar_decision_stops_a_record_until_the_person_insists(client):
+    headers, raw = await connected(client)
+    await decide(client, headers, title="Locks", statement="Imports take a Postgres advisory lock per workspace, always.", status="accepted")
+
+    held = await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+    forced = await call(client, raw, "record_decision", **LOCKS, user_approved=True, force=True)
+
+    assert (held["result"], [d["key"] for d in held["similar"]]) == ("similar_exists", ["D-1"])
+    assert forced["result"] == "recorded"
+
+
+async def test_a_dismissed_record_is_not_recorded_again(client):
+    headers, raw = await connected(client)
+    recorded = await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+    [proposal] = await inbox(client, headers)
+
+    dismissed = await client.post(f"/decisions/{proposal['id']}/dismiss", headers=headers)
+    again = await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+
+    assert recorded["result"] == "recorded" and dismissed.status_code == 200
+    assert again["result"] == "previously_dismissed" and await inbox(client, headers) == []
+
+
+async def test_a_record_holding_a_credential_is_refused_without_repeating_it(client):
+    headers, raw = await connected(client)
+    key = "ghp_" + "a1B2" * 9
+
+    refused = await call(client, raw, "record_decision", **LOCKS, rationale=f"deploy with {key}", user_approved=True)
+
+    assert "secret_detected" in refused["error"] and "`rationale`" in refused["error"] and key not in refused["error"]
+    assert await mongo.decisions().count_documents({}) == 0
+
+
+async def test_evidence_must_be_a_passage_really_in_a_page_of_the_workspace(client):
+    headers, raw = await connected(client)
+    prd = await page(client, headers)
+    [found] = (await call(client, raw, "search_workspace", query="Export PRD"))["results"]
+
+    misquoted = await call(client, raw, "record_decision", **LOCKS, user_approved=True, evidence=[{"kind": "page", "id": found["id"], "quote": "Guests export everything."}])
+    unknown = await call(client, raw, "record_decision", **LOCKS, user_approved=True, evidence=[{"kind": "page", "id": "nope", "quote": "x"}])
+    quoted = await call(client, raw, "record_decision", **LOCKS, user_approved=True, evidence=[{"kind": "page", "id": found["id"], "quote": "Guests can't export reports."}])
+
+    assert "quote_not_in_source" in misquoted["error"] and "evidence_not_found" in unknown["error"]
+    assert (found["id"], quoted["result"]) == (prd["id"], "recorded")
+    [proposal] = await inbox(client, headers)
+    assert [e["title"] for e in proposal["evidence"]] == ["Export PRD"]
+
+
+async def test_a_read_only_tool_cannot_record(client):
+    headers, raw = await connected(client, read_only=True)
+
+    refused = await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+
+    assert "read_only" in refused["error"] and await inbox(client, headers) == []
+
+
+async def test_records_are_limited_per_tool(client, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "mcp_writes_per_connection_hourly", 1)
+    headers, raw = await connected(client)
+
+    await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+    over = await call(client, raw, "record_decision", title="Retries", statement="Imports retry three times.", user_approved=True)
+
+    assert "rate_limited" in over["error"] and len(await inbox(client, headers)) == 1
+
+
+async def test_a_tools_owner_can_rename_it_and_change_whether_it_asks(client):
+    headers, _ = await connected(client)
+    [tool] = (await client.get("/ai-tools", headers=bearer(headers))).json()["data"]
+
+    changed = await client.patch(f"/ai-tools/{tool['id']}", json={"label": "Laptop", "ask_first": False}, headers=bearer(headers))
+
+    assert (changed.json()["data"]["label"], changed.json()["data"]["ask_first"]) == ("Laptop", False)
