@@ -34,8 +34,8 @@ before recording unless they asked you to; then pass user_approved=true and thei
 - Never put passwords, keys, tokens or personal data in a record.
 """
 
-#: what answers on the MCP hostname: the server, where a tool learns how to sign in, and the health check
-PATHS = ("/mcp", "/.well-known/", "/health")
+#: what answers on the MCP hostname: the server, where a tool learns how to sign in and does, and the health check
+PATHS = ("/mcp", "/.well-known/", "/oauth/", "/health")
 #: the largest request body read, far above any tool's arguments
 MAX_BODY_BYTES = 256 * 1024
 
@@ -75,6 +75,7 @@ def build() -> MCPServer:
         "Bearings", instructions=INSTRUCTIONS, token_verifier=GrantVerifier(),
         auth=AuthSettings(
             issuer_url=settings.mcp_url.removesuffix("/mcp"), resource_server_url=settings.mcp_url,
+            # the consent page decides whether a tool may also record, whatever it asked for
             required_scopes=[McpScope.READ],
             # the verifier only returns tokens of our own grants, made for this address
             validate_token_resource=False,
