@@ -1,4 +1,4 @@
-"""Finding board items and docs pages by key, title or the text inside them, for the ⌘K menu.
+"""Finding board items, docs pages and decisions by key, title or the text inside them, for the ⌘K menu.
 
 Items from every connected tracker and pages from every docs source are searched alike, by what
 the workspace can see: native items plus those of connected targets, and pages not archived. The
@@ -10,8 +10,9 @@ within each.
 import re
 
 from app.boards import repository as boards
-from app.core.constants import DocumentKind, SearchResultKind
+from app.core.constants import DECISION_KEY_PREFIX, NATIVE_SOURCE, DocumentKind, SearchResultKind
 from app.db import mongo
+from app.decisions import service as decisions
 from app.work_items import service as work_items
 
 #: matches read per kind before ranking, title and body separately
@@ -21,6 +22,7 @@ SNIPPET_RADIUS = 60
 _LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _MARKS = re.compile(r"[*_`~#>|]+")
 _SPACE = re.compile(r"\s+")
+_DECISION_KEY = re.compile(rf"{re.escape(DECISION_KEY_PREFIX)}(\d+)", re.IGNORECASE)
 
 
 def snippet(text: str, query: str) -> str | None:
@@ -44,7 +46,7 @@ def _rank(query: str, key: str | None, title: str) -> int:
 
 async def _matches(collection, scope: dict, matches: list[dict], body_field: str) -> list[dict]:
     """Docs for each of `matches` in turn, up to `CANDIDATES` each, newest first, none twice."""
-    fields = {"key": 1, "title": 1, body_field: 1, "source": 1, "target_key": 1, "updated_at": 1}
+    fields = {"key": 1, "number": 1, "title": 1, body_field: 1, "source": 1, "target_key": 1, "updated_at": 1}
     found: list[dict] = []
     for match in matches:
         # $and, not a merge: the scope can hold its own $or (which trackers are visible)
@@ -54,7 +56,7 @@ async def _matches(collection, scope: dict, matches: list[dict], body_field: str
 
 
 async def search(workspace_id: str, query: str, limit: int) -> list[dict]:
-    """Up to `limit` board items, then up to `limit` pages, best match first."""
+    """Up to `limit` board items, then up to `limit` pages, then up to `limit` decisions, best match first."""
     pattern = {"$regex": re.escape(query), "$options": "i"}
     items = await _matches(
         mongo.work_items(), {"workspace_id": workspace_id, **await work_items.visibility(workspace_id)},
@@ -70,9 +72,16 @@ async def search(workspace_id: str, query: str, limit: int) -> list[dict]:
         mongo.documents(), {"workspace_id": workspace_id, "kind": DocumentKind.PAGE, "archived_at": None},
         [{"title": pattern}, {"content_md": pattern}], "content_md",
     )
+    numbered = _DECISION_KEY.fullmatch(query)
+    decided = await _matches(
+        mongo.decisions(), {"workspace_id": workspace_id},
+        [*([{"number": int(numbered.group(1))}] if numbered else []), {"title": pattern}, {"statement": pattern}],
+        "statement",
+    )
     # sorted is stable: within a rank, the newest stays first
     items = sorted(items, key=lambda doc: _rank(query, doc["key"], doc["title"]))[:limit]
     pages = sorted(pages, key=lambda doc: _rank(query, None, doc["title"]))[:limit]
+    decided = sorted(decided, key=lambda doc: _rank(query, decisions.key_of(doc), doc["title"]))[:limit]
 
     board_ids: dict[tuple[str, str | None], str | None] = {}
     for item in items:
@@ -94,5 +103,13 @@ async def search(workspace_id: str, query: str, limit: int) -> list[dict]:
             "snippet": snippet(page.get("content_md") or "", query) if _rank(query, None, page["title"]) == 3 else None,
         }
         for page in pages
+    ]
+    results += [
+        {
+            "kind": SearchResultKind.DECISION, "id": decision["_id"], "title": decision["title"], "source": NATIVE_SOURCE,
+            "key": decisions.key_of(decision),
+            "snippet": snippet(decision["statement"], query) if _rank(query, decisions.key_of(decision), decision["title"]) == 3 else None,
+        }
+        for decision in decided
     ]
     return results

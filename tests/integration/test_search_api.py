@@ -1,10 +1,10 @@
-"""⌘K search: board items by key, title or description, and docs pages by title or text."""
+"""⌘K search: board items by key, title or description, docs pages by title or text, and decisions."""
 
 from app.connectors.jira import JiraAdapter
 from app.db import mongo
 from app.search.service import snippet
 from app.work_items import repository as work_items
-from tests.integration.test_decisions_api import page
+from tests.integration.test_decisions_api import decide, page
 from tests.integration.test_work_item_sync import ISSUES
 from tests.integration.test_work_items_api import CONN, board_id, seed_jira, signed_in
 from tests.integration.test_work_items_api import create as create_item
@@ -89,3 +89,19 @@ def test_a_snippet_is_cut_around_the_match():
 
     assert cut.startswith("…") and cut.endswith("…") and "needle" in cut
     assert snippet("nothing here", "needle") is None
+
+
+async def test_a_decision_is_found_by_its_short_id_title_or_statement(client):
+    headers = await signed_in(client)
+    await decide(client, headers, title="Other", statement="Nothing to do with it.")
+    made = await decide(client, headers, title="Guest export", statement="Guests can't export reports; only admins can.")
+
+    by_key = await search(client, headers, "d-2")
+    by_title = await search(client, headers, "guest exp")
+    by_statement = await search(client, headers, "only admins")
+
+    assert [(r["kind"], r["id"], r["key"], r["source"]) for r in by_key] == [("decision", made["id"], "D-2", "native")]
+    assert [(r["id"], r["snippet"]) for r in by_title] == [(made["id"], None)]
+    assert [(r["id"], r["snippet"]) for r in by_statement] == [(made["id"], "Guests can't export reports; only admins can.")]
+    # another workspace's decisions stay out
+    assert await search(client, await user(client, "elsewhere"), "guest exp") == []

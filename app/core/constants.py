@@ -346,10 +346,11 @@ class EvidenceState(StrEnum):
 
 
 class SearchResultKind(StrEnum):
-    """What a ⌘K search result opens: a board item, or a docs page."""
+    """What a ⌘K search result opens: a board item, a docs page, or a decision."""
 
     WORK_ITEM = "work_item"
     DOCUMENT = "document"
+    DECISION = "decision"
 
 
 class ChatRecordKind(StrEnum):
