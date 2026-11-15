@@ -9,6 +9,10 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
+# git points hooks at this repository (GIT_DIR and friends); in a linked worktree that breaks the tests
+# that run git on repositories of their own
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
+
 echo "pre-push: running backend tests"
 uv run pytest
 
