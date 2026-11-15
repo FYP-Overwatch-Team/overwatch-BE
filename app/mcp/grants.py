@@ -119,6 +119,18 @@ async def change(user_id: str, grant_id: str, fields: dict) -> dict:
     return (await _with_workspace([grant]))[0]
 
 
+async def list_for_workspace(workspace_id: str) -> list[dict]:
+    """Every member's connected AI tools in a workspace, for its admins, newest first."""
+    cursor = mongo.mcp_grants().find({"workspace_id": workspace_id, **LIVE}).sort([("created_at", -1), ("_id", 1)])
+    return await _with_workspace([grant async for grant in cursor])
+
+
+async def revoke_in_workspace(workspace_id: str, grant_id: str) -> None:
+    """An admin disconnects a member's tool from their workspace."""
+    if not await _revoke({"_id": grant_id, "workspace_id": workspace_id}):
+        raise NotFoundError("connection not found", error_code="connection_not_found")
+
+
 async def _revoke(query: dict) -> int:
     """Revoked grants are kept, for the record of what a tool did; their tokens go."""
     ids = [grant["_id"] async for grant in mongo.mcp_grants().find({**query, **LIVE}, {"_id": 1})]

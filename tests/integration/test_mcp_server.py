@@ -11,7 +11,8 @@ from app.core.config import get_settings
 from app.db import mongo
 from app.main import create_app
 from tests.integration.test_decisions_api import decide, page, quoting
-from tests.integration.test_workspaces import bearer, in_workspace, team, user
+from app.mcp import grants
+from tests.integration.test_workspaces import bearer, in_workspace, join, team, user
 
 # the server only answers on the address it was given, which in tests is the API's default one
 HEADERS = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18", "Host": "localhost:8000"}
@@ -71,7 +72,8 @@ async def test_a_tool_is_given_the_rules_and_only_read_tools_change_nothing(clie
 
     assert "start_task" in hello.json()["result"]["instructions"]
     assert {tool["name"] for tool in listed} >= {"start_task", "search_decisions", "get_decision", "search_workspace"}
-    assert all(tool["annotations"]["readOnlyHint"] for tool in listed if tool["name"] != "record_decision")
+    writes = {tool["name"] for tool in listed if not tool["annotations"]["readOnlyHint"]}
+    assert writes == {"record_decision", "withdraw_decision"}
 
 
 async def test_only_a_post_is_answered_and_other_paths_keep_the_apis_own_errors(client):
@@ -297,3 +299,115 @@ async def test_the_mcp_hostname_serves_only_the_mcp_server(monkeypatch):
 
     # 401s, not 404s, are the API and the server answering: both ask who's calling
     assert [api.status_code, health.status_code, unsigned.status_code, on_api_host.status_code] == [404, 200, 401, 401]
+
+
+async def test_a_record_saying_the_same_in_other_words_is_held_as_a_likely_duplicate(client, fake_embedder):
+    headers, raw = await connected(client)
+
+    first = await call(client, raw, "record_decision", title="Guest export", statement="Guests cannot export any report.", user_approved=True)
+    reworded = await call(client, raw, "record_decision", title="Exports", statement="No report export for a guest.", user_approved=True)
+    unrelated = await call(client, raw, "record_decision", title="Theme", statement="Dark mode ships with billing.", user_approved=True)
+
+    assert (first["result"], unrelated["result"]) == ("recorded", "recorded")
+    assert (reworded["result"], [d["key"] for d in reworded["similar"]]) == ("similar_exists", ["D-1"])
+    assert len(await inbox(client, headers)) == 2
+
+
+async def test_recording_goes_on_when_the_embedding_service_is_down(client, fake_embedder, monkeypatch):
+    from app.core.exceptions import ExternalServiceError
+
+    async def down(*args, **kwargs):
+        raise ExternalServiceError("embeddings unavailable")
+
+    monkeypatch.setattr(fake_embedder, "embed", down)
+    _, raw = await connected(client)
+
+    assert (await call(client, raw, "record_decision", **LOCKS, user_approved=True))["result"] == "recorded"
+
+
+async def test_a_tool_can_take_back_its_persons_unsettled_record_and_record_it_again(client):
+    headers, raw = await connected(client)
+    await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+
+    withdrawn = await call(client, raw, "withdraw_decision", key="D-1")
+    again = await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+
+    assert withdrawn["result"] == "withdrawn"
+    # taken back to correct it, not dismissed by the team: it can be recorded again
+    assert (again["result"], again["decision"]["key"]) == ("recorded", "D-2")
+
+
+async def test_a_tool_cannot_take_back_what_people_wrote_settled_or_someone_else_recorded(client):
+    headers, raw = await connected(client)
+    await decide(client, headers, title="By hand", statement="Written by a person.", status="proposed")
+    await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+    [recorded] = [d for d in await inbox(client, headers) if d["origin"] == "agent"]
+    await client.post(f"/decisions/{recorded['id']}/status", json={"status": "accepted"}, headers=headers)
+    bob = await user(client, "bob")
+    await join(client, headers, bob, headers["X-Workspace-Id"])
+    bobs = (await token(client, in_workspace(bob, headers["X-Workspace-Id"]), label="Bob's"))["token"]
+    await call(client, bobs, "record_decision", title="Bob's", statement="Bob recorded this one.", user_approved=True)
+
+    results = [await call(client, raw, "withdraw_decision", key=key) for key in ("D-1", "D-2", "D-3", "D-9")]
+
+    assert ["not_withdrawable" in r["error"] for r in results[:3]] == [True] * 3 and "decision_not_found" in results[3]["error"]
+    assert await mongo.decisions().count_documents({}) == 3
+
+
+async def test_an_admin_can_turn_recording_off_for_the_workspace_and_reading_still_works(client):
+    headers, raw = await connected(client)
+    bob = await user(client, "bob")
+    await join(client, headers, bob, headers["X-Workspace-Id"])
+
+    by_member = await client.put("/ai-tools/recording", json={"recording_enabled": False}, headers=in_workspace(bob, headers["X-Workspace-Id"]))
+    by_admin = await client.put("/ai-tools/recording", json={"recording_enabled": False}, headers=headers)
+    refused = await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+    started = await call(client, raw, "start_task")
+
+    assert (by_member.status_code, by_admin.status_code) == (403, 200)
+    assert "recording_disabled" in refused["error"] and started["can_record"] is False
+    assert (await client.get("/ai-tools/recording", headers=headers)).json()["data"] == {"recording_enabled": False}
+
+
+async def test_an_admin_sees_and_disconnects_members_tools_in_their_workspace(client):
+    headers, _ = await connected(client)
+    acme = headers["X-Workspace-Id"]
+    bob = await user(client, "bob")
+    await join(client, headers, bob, acme)
+    bobs = await token(client, in_workspace(bob, acme), label="Bob's Codex")
+    elsewhere = await token(client, bob, label="Bob's own")
+
+    listed = (await client.get("/ai-tools/workspace", headers=headers)).json()["data"]
+    as_member = await client.get("/ai-tools/workspace", headers=in_workspace(bob, acme))
+    other_workspace = await client.delete(f"/ai-tools/workspace/{elsewhere['id']}", headers=headers)
+    removed = await client.delete(f"/ai-tools/workspace/{bobs['id']}", headers=headers)
+
+    assert sorted((tool["label"], tool["user_id"]) for tool in listed) == [("Bob's Codex", "id-bob"), ("Claude Code", "id-alice")]
+    assert (as_member.status_code, other_workspace.status_code, removed.status_code) == (403, 404, 200)
+    assert await grants.authenticate(bobs["token"]) is None and await grants.authenticate(elsewhere["token"]) is not None
+
+
+async def test_the_inbox_can_show_only_what_ai_tools_recorded_and_dismiss_several_at_once(client):
+    headers, raw = await connected(client)
+    await decide(client, headers, title="By hand", statement="Written by a person.", status="proposed")
+    await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+    await call(client, raw, "record_decision", title="Retries", statement="Imports retry three times.", user_approved=True)
+
+    from_tools = (await client.get("/decisions", params={"origin": "agent"}, headers=headers)).json()["data"]
+    by_hand = next(d for d in await inbox(client, headers) if d["origin"] == "manual")
+    gone = await client.post("/decisions/dismiss", json={"ids": [d["id"] for d in from_tools] + [by_hand["id"], "nope"]}, headers=headers)
+
+    assert sorted(d["title"] for d in from_tools) == ["Import locking", "Retries"]
+    # a person's own proposal isn't an AI draft, so it stays
+    assert gone.json()["data"] == {"dismissed": 2}
+    assert [d["title"] for d in await inbox(client, headers)] == ["By hand"]
+
+
+async def test_the_server_offers_prompts_to_check_decisions_first_and_to_wrap_a_session_up(client):
+    _, raw = await connected(client)
+
+    offered = (await rpc(client, raw, "prompts/list")).json()["result"]["prompts"]
+    wrap_up = (await rpc(client, raw, "prompts/get", {"name": "wrap_up"})).json()["result"]
+
+    assert {prompt["name"] for prompt in offered} == {"before_coding", "wrap_up"}
+    assert "record_decision" in wrap_up["messages"][0]["content"]["text"]

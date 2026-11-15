@@ -118,7 +118,7 @@ def register(server: MCPServer) -> None:
         return _result(
             grant,
             your_role=grant["role"],
-            can_record=McpScope.RECORD in grant["scopes"],
+            can_record=McpScope.RECORD in grant["scopes"] and record.recording_enabled(grant["workspace"]),
             about_topic=await _find(grant, {"status": {"$in": ACTIVE}, **matching}, MAX_OPEN) if matching else [],
             accepted=await _find(grant, {"status": DecisionStatus.ACCEPTED}, MAX_ACCEPTED),
             open_questions=await _find(grant, {"status": DecisionStatus.OPEN}, MAX_OPEN),
@@ -234,4 +234,36 @@ def register(server: MCPServer) -> None:
             grant, result=result, message=message,
             **({"decision": _summary(grant, decision)} if decision else {}),
             **({"similar": [_summary(grant, doc) for doc in outcome["similar"]]} if outcome.get("similar") else {}),
+        )
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False))
+    async def withdraw_decision(key: Annotated[str, Field(max_length=20, description='The record\'s short id, like "D-12".')]) -> dict:
+        """Take back a record you made by mistake, or to record a corrected one. Only works on a proposal this
+        user's AI tools recorded in the last few days that nobody has settled yet. Use it when the user asks."""
+        grant = current_grant()
+        if McpScope.RECORD not in grant["scopes"]:
+            raise ToolError("read_only: this connection can read but not record or withdraw.")
+        try:
+            withdrawn = await record.withdraw(grant, key)
+        except record.Refused as refused:
+            raise ToolError(str(refused))
+        name = decisions.key_of(withdrawn)
+        return _result(grant, result="withdrawn", message=f"{name} was withdrawn from {grant['workspace']['name']}.")
+
+    @server.prompt()
+    def before_coding(task: str) -> str:
+        """Check the team's decisions before starting a task."""
+        return (
+            f"Before working on this task, call the start_task tool with its topic and follow the accepted decisions "
+            f"it returns. Tell me briefly which ones apply, and which open questions touch it.\n\nTask: {task}"
+        )
+
+    @server.prompt()
+    def wrap_up() -> str:
+        """Record what this session settled, and what it left open."""
+        return (
+            "Look back over this session. List every decision we settled that others on the team should know about, "
+            "and every question we left open. For each, check search_decisions so nothing is recorded twice, show me "
+            "the list, and ask which ones to post. Then call record_decision for the ones I approve, with "
+            "user_approved=true and my own words. Don't record anything I haven't approved."
         )

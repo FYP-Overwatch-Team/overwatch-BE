@@ -46,6 +46,18 @@ class ChangeAiTool(BaseModel):
     ask_first: bool | None = None
 
 
+class WorkspaceAiTool(AiTool):
+    """A member's connected tool, as the workspace's admins see it."""
+
+    user_id: str
+
+
+class RecordingSettings(BaseModel):
+    """Whether AI tools may record decisions and questions in the workspace; reading is always allowed."""
+
+    recording_enabled: bool
+
+
 class AiToolSetup(BaseModel):
     """What the setup instructions need: where a tool connects."""
 
