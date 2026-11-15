@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "pre-push: uv is required but was not found on PATH" >&2
+  exit 1
+fi
+
+echo "pre-push: running backend tests"
+uv run pytest
+
+echo "pre-push: backend checks passed"

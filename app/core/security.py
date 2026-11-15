@@ -1,0 +1,77 @@
+import base64
+import hashlib
+import secrets
+from datetime import UTC, datetime, timedelta
+
+import jwt
+from cryptography.fernet import Fernet, InvalidToken
+
+from app.core.config import get_settings
+from app.core.time import utcnow
+
+ACCESS_TOKEN_TTL = timedelta(minutes=15)
+JWT_ALGORITHM = "HS256"
+
+
+class TokenError(Exception):
+    """Raised when a JWT is invalid or expired."""
+
+
+def issue_access_token(user_id: str, *, ttl: timedelta = ACCESS_TOKEN_TTL) -> str:
+    now = utcnow()
+    payload = {"sub": user_id, "iat": now, "exp": now + ttl, "type": "access"}
+    return jwt.encode(payload, get_settings().jwt_secret_key, algorithm=JWT_ALGORITHM)
+
+
+def read_access_token(token: str) -> tuple[str, datetime]:
+    """The user id and expiry of a valid access JWT; TokenError otherwise."""
+    try:
+        payload = jwt.decode(token, get_settings().jwt_secret_key, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError as exc:
+        raise TokenError(str(exc)) from exc
+    if payload.get("type") != "access" or "sub" not in payload:
+        raise TokenError("wrong token type")
+    return payload["sub"], datetime.fromtimestamp(payload["exp"], UTC)
+
+
+def verify_access_token(token: str) -> str:
+    """Return the user id from a valid access JWT, raise TokenError otherwise."""
+    return read_access_token(token)[0]
+
+
+def generate_refresh_token() -> str:
+    return secrets.token_urlsafe(48)
+
+
+def pkce_pair() -> tuple[str, str]:
+    """(code_verifier, S256 code_challenge) for an OAuth authorization request."""
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return verifier, base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def hash_token(raw: str) -> str:
+    """Opaque tokens are stored only as SHA-256 hashes; the raw value never touches Mongo."""
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def hash_refresh_token(raw: str) -> str:
+    return hash_token(raw)
+
+
+def _fernet() -> Fernet:
+    key = get_settings().fernet_key
+    if not key:
+        raise RuntimeError("FERNET_KEY is not configured")
+    return Fernet(key.encode() if isinstance(key, str) else key)
+
+
+def encrypt_secret(plaintext: str) -> str:
+    return _fernet().encrypt(plaintext.encode()).decode()
+
+
+def decrypt_secret(ciphertext: str) -> str:
+    try:
+        return _fernet().decrypt(ciphertext.encode()).decode()
+    except InvalidToken as exc:
+        raise TokenError("cannot decrypt stored secret") from exc

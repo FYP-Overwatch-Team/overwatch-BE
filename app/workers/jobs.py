@@ -1,0 +1,221 @@
+"""Background jobs: repository indexing, connector syncs, and pushing docs edits back to their source.
+
+Indexing runs under a per-repo lock held in Mongo (`index_locks`), shared by every
+workspace that connected the repo:
+- one index per repo at a time, so two runs never write conflicting graphs
+- a lock left by a crashed process is reclaimable after `parse_lock_stale_minutes`
+- a push that arrives mid-index is recorded and run before the lock is released
+
+The indexing itself lives in `app/knowledge_graph/pipeline.py`; this module
+owns when it runs and what happens if it fails.
+"""
+
+import asyncio
+from datetime import timedelta
+
+import structlog
+from pymongo.errors import DuplicateKeyError
+
+from app.connectors import doc_sync, registry, repository as connectors, sync
+from app.core.config import get_settings
+from app.core.constants import ConnectorCategory, JobStatus
+from app.core.exceptions import ExternalServiceError
+from app.core.time import utcnow
+from app.db import mongo
+from app.documents import service as documents
+from app.embeddings import code as code_embeddings
+from app.github import checkout, repository
+from app.integrations import git_cli
+from app.integrations.github_app import InstallationGone, get_github_app
+from app.knowledge_graph.build import GRAPH_BUILD_VERSION
+from app.knowledge_graph.pipeline import IndexingPipeline
+from app.services.facts_repository import get_facts_store
+from app.db.knowledge_graph_store import get_knowledge_graph_store
+
+logger = structlog.get_logger("app.jobs")
+
+# follow-up syncs one lock holder drains before releasing, so a push storm can't pin a worker
+MAX_FOLLOW_UP_SYNCS = 3
+
+
+async def run_index(repo_full_name: str, *, full: bool = False) -> None:
+    """Index a repo: `full` rebuilds from scratch, otherwise only changed files are re-read.
+
+    The graph is shared by every workspace that connected the repo, so this runs once per repo.
+    If another index holds the lock, the request is recorded and run by that holder.
+    """
+    if not await _claim(repo_full_name):
+        await _record_pending(repo_full_name, full)
+        logger.info("index_deferred_lock_held", repo=repo_full_name)
+        return
+
+    try:
+        await _index(repo_full_name, full=full)
+        for _ in range(MAX_FOLLOW_UP_SYNCS):
+            pending_full = await _take_pending(repo_full_name)
+            if pending_full is None:
+                break
+            logger.info("index_draining_pending", repo=repo_full_name, full=pending_full)
+            await _index(repo_full_name, full=pending_full)
+        else:
+            logger.warning("index_followups_exhausted", repo=repo_full_name)
+        await _release(repo_full_name, JobStatus.DONE)
+    except Exception as exc:
+        logger.exception("index_failed", repo=repo_full_name)
+        await _release(repo_full_name, JobStatus.FAILED, error=str(exc))
+
+
+async def _index(repo_full_name: str, *, full: bool) -> None:
+    repo = await repository.find_any(repo_full_name)
+    if repo is None:
+        return  # disconnected everywhere while queued
+
+    # a graph written by an older builder has a different shape that an incremental diff would keep
+    if repo.get("graph_build_version") != GRAPH_BUILD_VERSION and not full:
+        logger.info("graph_rebuild_forced", repo=repo_full_name, stored=repo.get("graph_build_version"))
+        full = True
+
+    try:
+        token = await get_github_app().installation_token(repo["installation_id"])
+    except InstallationGone:
+        await repository.update_all(repo_full_name, {"access_status": "revoked"}, installation_id=repo["installation_id"])
+        raise
+    workdir = await checkout.update(repo_full_name, token)
+    version = await git_cli.current_commit(workdir)
+
+    pipeline = IndexingPipeline(get_facts_store(), get_knowledge_graph_store())
+    result = await pipeline.index(repo_full_name, workdir, version, full=full)
+
+    await repository.update_all(repo_full_name, {
+        "graph_version": result.version,
+        "graph_build_version": result.build_version,
+        "graph_stats": result.as_stats_document(),
+        "indexed_at": utcnow(),
+    })
+    if code_embeddings.enabled():
+        await _embed_code(repo, result.version, include_symbols=result.stats.get("symbol_layer") == "included")
+
+
+async def _embed_code(repo: dict, version: str, *, include_symbols: bool) -> None:
+    """Keep the repo's code findable by meaning; the graph is already written, so failing here never fails the index."""
+    repo_full_name = repo["repo_full_name"]
+    facts = await get_facts_store().load_all(repo_full_name)
+    try:
+        counts = await code_embeddings.sync(
+            repo_full_name, version, facts, include_symbols=include_symbols, workspace_id=repo["workspace_id"],
+        )
+    except ExternalServiceError:
+        logger.warning("code_embeddings_unavailable", repo=repo_full_name)
+        return
+    except Exception:
+        # a full Atlas tier or a lost connection: the next index tries again
+        logger.exception("code_embeddings_failed", repo=repo_full_name)
+        return
+    # disconnected everywhere while it ran: the purge has been, so what this run wrote goes too
+    if await repository.find_any(repo_full_name) is None:
+        await code_embeddings.delete_repo(repo_full_name)
+        return
+    await repository.update_all(repo_full_name, {"graph_stats.embeddings": counts})
+
+
+async def _claim(repo_full_name: str) -> bool:
+    """Take the repo's indexing lock, reclaiming one abandoned by a crashed run."""
+    now = utcnow()
+    stale_before = now - timedelta(minutes=get_settings().parse_lock_stale_minutes)
+    try:
+        # a held lock doesn't match, so the upsert collides with it on _id
+        await mongo.index_locks().update_one(
+            {"_id": repo_full_name, "$or": [{"started_at": None}, {"started_at": {"$lt": stale_before}}]},
+            {"$set": {"started_at": now}},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        return False
+    await repository.update_all(repo_full_name, {"parse_status": JobStatus.IN_PROGRESS, "parse_started_at": now})
+    return True
+
+
+async def _release(repo_full_name: str, status: str, error: str | None = None) -> None:
+    await repository.update_all(repo_full_name, {
+        "parse_status": status, "parse_error": error, "parse_started_at": None,
+    })
+    await mongo.index_locks().update_one({"_id": repo_full_name}, {"$set": {"started_at": None}})
+
+
+async def _record_pending(repo_full_name: str, full: bool) -> None:
+    fields = {"sync_requested_at": utcnow()}
+    if full:
+        fields["pending_full"] = True  # never downgraded by a later incremental request
+    await mongo.index_locks().update_one({"_id": repo_full_name}, {"$set": fields})
+
+
+async def _take_pending(repo_full_name: str) -> bool | None:
+    """Atomically claim and clear queued work. Returns whether it's a full index, or None."""
+    doc = await mongo.index_locks().find_one_and_update(
+        {"_id": repo_full_name, "sync_requested_at": {"$ne": None}},
+        {"$set": {"sync_requested_at": None, "pending_full": False}},
+    )
+    return None if doc is None else bool(doc.get("pending_full"))
+
+
+async def run_connector_sync(workspace_id: str, provider: str, target_key: str) -> None:
+    """Sync one target: a tracker project into work_items, or a docs space into documents.
+
+    A chat channel has nothing to sync: its messages are pushed to us as they're posted.
+    """
+    category = registry.get(provider).category
+    if category == ConnectorCategory.CHAT:
+        return
+    if category == ConnectorCategory.DOCUMENTS:
+        await doc_sync.run_document_sync(workspace_id, provider, target_key)
+    else:
+        await sync.run_work_item_sync(workspace_id, provider, target_key)
+
+
+# targets synced at once by the polling loop, so one slow space or project doesn't hold up the rest
+RESYNC_CONCURRENCY = 4
+
+
+async def resync_all_targets() -> None:
+    """One polling pass over every connected target (polling, not webhooks: see app/connectors/sync.py)."""
+    limit = asyncio.Semaphore(RESYNC_CONCURRENCY)
+
+    async def one(target: dict) -> None:
+        async with limit:
+            await run_connector_sync(target["workspace_id"], target["provider"], target["key"])
+
+    await asyncio.gather(*[one(target) async for target in connectors.all_targets()], return_exceptions=True)
+
+
+async def resync_tracker_targets() -> None:
+    """One polling pass over work-item targets only (Jira etc.); runs on the tracker interval."""
+    limit = asyncio.Semaphore(RESYNC_CONCURRENCY)
+
+    async def one(target: dict) -> None:
+        if registry.has_work_items(target["provider"]):
+            async with limit:
+                await sync.run_work_item_sync(target["workspace_id"], target["provider"], target["key"])
+
+    await asyncio.gather(*[one(target) async for target in connectors.all_targets()], return_exceptions=True)
+
+
+async def resync_doc_targets() -> None:
+    """One polling pass over document targets only (Confluence etc.); runs on the doc-sync interval."""
+    limit = asyncio.Semaphore(RESYNC_CONCURRENCY)
+
+    async def one(target: dict) -> None:
+        if registry.get(target["provider"]).category == ConnectorCategory.DOCUMENTS:
+            async with limit:
+                await doc_sync.run_document_sync(target["workspace_id"], target["provider"], target["key"])
+
+    await asyncio.gather(*[one(target) async for target in connectors.all_targets()], return_exceptions=True)
+
+
+async def push_documents() -> None:
+    """Send settled edits of mirrored pages back to their source."""
+    await doc_sync.push_due()
+
+
+async def purge_archived_documents() -> None:
+    """Delete archived docs for good once they've been in the Archive past the retention period."""
+    await documents.purge_expired(timedelta(days=get_settings().doc_archive_retention_days))

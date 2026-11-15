@@ -1,0 +1,96 @@
+"""One OAuth2 authorization-code flow for every provider; each supplies an `OAuthConfig`."""
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+import httpx
+import structlog
+
+from app.core.config import get_settings
+from app.core.exceptions import ExternalServiceError, UnauthorizedError
+from app.integrations.http_log import log_call
+
+logger = structlog.get_logger("app.connectors")
+
+http = httpx.AsyncClient(timeout=15)
+
+
+@dataclass(frozen=True)
+class OAuthConfig:
+    provider: str
+    authorize_url: str
+    token_url: str
+    # always asked for, on top of the connecting product's own
+    scopes: tuple[str, ...]
+    client_id_setting: str
+    client_secret_setting: str
+    # must match the redirect URI registered with the provider
+    redirect_path: str
+    extra_authorize_params: dict[str, str] = field(default_factory=dict)
+    # how the provider joins scopes, both when asked for and in the token response: Slack uses commas
+    scope_separator: str = " "
+    # how the token request carries the app's credentials: in a JSON body (Atlassian), or as HTTP Basic auth
+    # with a form body, which Slack recommends and only reliably reads
+    client_auth: Literal["json_body", "basic_form"] = "json_body"
+
+    def parse_scopes(self, raw: str) -> list[str]:
+        """A token response's granted scopes, as a list."""
+        return [scope for scope in raw.split(self.scope_separator) if scope.strip()]
+
+
+class OAuth2Flow:
+    def __init__(self, config: OAuthConfig):
+        self.config = config
+
+    @property
+    def redirect_uri(self) -> str:
+        return f"{get_settings().app_base_url}{self.config.redirect_path}"
+
+    @property
+    def configured(self) -> bool:
+        """This server has the OAuth app's credentials; without them the provider can't be connected."""
+        return all(self._client())
+
+    def _client(self) -> tuple[str, str]:
+        settings = get_settings()
+        return getattr(settings, self.config.client_id_setting), getattr(settings, self.config.client_secret_setting)
+
+    def authorize_url(self, state: str, scopes: tuple[str, ...] = ()) -> str:
+        params = httpx.QueryParams(
+            client_id=self._client()[0],
+            scope=self.config.scope_separator.join(dict.fromkeys((*scopes, *self.config.scopes))),
+            redirect_uri=self.redirect_uri,
+            state=state,
+            response_type="code",
+            **self.config.extra_authorize_params,
+        )
+        return f"{self.config.authorize_url}?{params}"
+
+    async def exchange_code(self, code: str) -> dict:
+        return await self._token_request(
+            {"grant_type": "authorization_code", "code": code, "redirect_uri": self.redirect_uri},
+        )
+
+    async def refresh(self, refresh_token: str) -> dict:
+        return await self._token_request({"grant_type": "refresh_token", "refresh_token": refresh_token})
+
+    async def _token_request(self, payload: dict) -> dict:
+        client_id, client_secret = self._client()
+        if self.config.client_auth == "basic_form":
+            resp = await http.post(self.config.token_url, data=payload, auth=(client_id, client_secret))
+        else:
+            resp = await http.post(self.config.token_url, json={**payload, "client_id": client_id, "client_secret": client_secret})
+        log_call(logger, f"{self.config.provider}_api_call", "POST", "/oauth/token", resp)
+        if resp.status_code != 200:
+            if payload["grant_type"] == "refresh_token":
+                raise UnauthorizedError(
+                    f"{self.config.provider} refresh token rejected; re-authorization required",
+                    error_code=f"{self.config.provider}_needs_reauth",
+                )
+            raise ExternalServiceError(f"{self.config.provider} token exchange failed")
+        body = resp.json()
+        if "access_token" not in body:
+            # Slack refuses with HTTP 200 and {"ok": false, "error": ...}; the error name is safe to surface
+            reason = body.get("error") if isinstance(body.get("error"), str) else "no access_token in the response"
+            raise ExternalServiceError(f"{self.config.provider} token exchange failed: {reason[:100]}")
+        return body

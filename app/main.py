@@ -1,0 +1,277 @@
+import asyncio
+from contextlib import asynccontextmanager
+
+import structlog
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.accounts import merge as merge_engine
+from app.accounts.router import router as accounts_router
+from app.auth.router import router as auth_router
+from app.boards.router import router as boards_router
+from app.comments.router import router as comments_router
+from app.sprints.router import router as sprints_router
+from app.chat.router import router as chat_router
+from app.documents.attachments import router as attachments_router
+from app.decisions.router import router as decisions_router
+from app.search.router import router as search_router
+from app.decision_comments import attachments as decision_attachments
+from app.decision_comments.router import router as decision_comments_router
+from app.realtime.router import router as realtime_router
+from app.documents.router import router as documents_router
+from app.connectors.router import router as connections_router
+from app.github import checkout
+from app.github.router import router as github_router
+from app.github.webhooks import router as webhooks_router
+from app.graph.router import router as graph_router
+from app.jira.router import router as jira_router
+from app.slack import decisions as slack_decisions
+from app.slack import digest as slack_digest
+from app.slack import messages as slack_messages
+from app.slack.events import router as slack_events_router
+from app.slack.interactions import router as slack_interactions_router
+from app.slack.router import router as slack_router
+from app.link_previews.router import router as link_previews_router
+from app.onboarding.router import router as onboarding_router
+from app.mcp import server as mcp_server
+from app.mcp.router import router as ai_tools_router
+from app.usage.router import router as usage_router
+from app.waitlist.router import router as waitlist_router
+from app.work_item_types.router import router as work_item_types_router
+from app.work_items.router import router as work_items_router
+from app.workspaces.router import router as workspaces_router
+from app.decisions import checks as decision_checks
+from app.integrations import llm
+from app.workers import jobs
+from app.core.config import get_settings
+from app.core.exceptions import register_exception_handlers
+from app.core.responses import EnvelopeRoute
+from app.core.logging import RequestContextMiddleware, configure_logging
+from app.db import mongo
+from app.db.knowledge_graph_store import get_knowledge_graph_store
+
+
+async def _tracker_sync_loop(interval_seconds: int) -> None:
+    # a pass at once, so a restart doesn't leave boards a whole interval behind
+    while True:
+        try:
+            await jobs.resync_tracker_targets()
+        except Exception:
+            structlog.get_logger("app.jobs").exception("tracker_sync_loop_error")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _doc_sync_loop(interval_seconds: int) -> None:
+    """Poll document sources (Confluence etc.) on their own shorter interval."""
+    # a pass at once, so a restart doesn't leave spaces a whole interval behind
+    while True:
+        try:
+            await jobs.resync_doc_targets()
+        except Exception:
+            structlog.get_logger("app.jobs").exception("doc_sync_loop_error")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _decision_check_loop(tick_seconds: int) -> None:
+    """Check accepted decisions against what changed, in each workspace as often as it chose."""
+    while True:
+        await asyncio.sleep(tick_seconds)
+        try:
+            await decision_checks.run_due()
+        except Exception:
+            structlog.get_logger("app.decisions").exception("decision_check_loop_error")
+
+
+async def _merge_loop() -> None:
+    """Finish account merges a crash or restart interrupted: at once, then every few minutes."""
+    while True:
+        try:
+            await merge_engine.resume_stalled()
+        except Exception:
+            structlog.get_logger("app.accounts").exception("merge_loop_error")
+        await asyncio.sleep(merge_engine.STALL_AFTER.total_seconds())
+
+
+async def _docs_loop(push_seconds: int) -> None:
+    """Push settled docs edits every few seconds; about hourly, purge expired archives and unsent discussion uploads."""
+    purged_at = 0.0
+    while True:
+        await asyncio.sleep(push_seconds)
+        try:
+            await jobs.push_documents()
+            if asyncio.get_running_loop().time() - purged_at >= 3600:
+                await jobs.purge_archived_documents()
+                await decision_attachments.sweep()
+                purged_at = asyncio.get_running_loop().time()
+        except Exception:
+            structlog.get_logger("app.jobs").exception("docs_loop_error")
+
+
+async def _slack_messages_loop() -> None:
+    """Write buffered Slack messages to Mongo every few seconds, or sooner when many are waiting."""
+    while True:
+        await slack_messages.buffer.wait_until_due(slack_messages.FLUSH_SECONDS)
+        try:
+            if written := await slack_messages.buffer.flush():
+                structlog.get_logger("app.slack").info("slack_messages_flushed", count=written, waiting=len(slack_messages.buffer))
+        except Exception:
+            structlog.get_logger("app.slack").exception("slack_messages_flush_error")
+
+
+async def _slack_decisions_loop(tick_seconds: int) -> None:
+    """Read Slack conversations that went quiet for decisions, every few minutes."""
+    while True:
+        await asyncio.sleep(tick_seconds)
+        try:
+            await slack_decisions.run_due()
+        except Exception:
+            structlog.get_logger("app.slack").exception("slack_decisions_loop_error")
+
+
+async def _slack_digest_loop(tick_seconds: int) -> None:
+    """Expire unsettled Slack questions and post the daily digests whose time has come."""
+    while True:
+        await asyncio.sleep(tick_seconds)
+        try:
+            await slack_digest.run_due()
+        except Exception:
+            structlog.get_logger("app.slack").exception("slack_digest_loop_error")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    mongo.connect()
+    try:
+        await mongo.ensure_indexes()
+    except Exception:
+        # Index creation must never block boot — a running API with slow queries
+        # beats one that refuses to start.
+        structlog.get_logger("app.db").exception("ensure_indexes_failed")
+
+    try:
+        # Earlier versions cloned with the token inside the remote URL, which
+        # git persists in .git/config. Remove any that are still on disk.
+        cleaned = await checkout.sanitize_existing_checkouts()
+        if cleaned:
+            structlog.get_logger("app.repos").warning(
+                "checkout_credentials_scrubbed", checkouts=cleaned,
+            )
+    except Exception:
+        structlog.get_logger("app.repos").exception("checkout_sanitize_failed")
+
+    try:
+        store = get_knowledge_graph_store()
+        await store.ensure_schema()
+        if removed := await store.purge_legacy_nodes():
+            structlog.get_logger("app.knowledge_graph").warning(
+                "legacy_graph_nodes_removed", nodes=removed,
+            )
+        if filled := await store.backfill_search_properties():
+            structlog.get_logger("app.knowledge_graph").info("graph_search_properties_filled", nodes=filled)
+    except Exception:
+        # Constraints are an optimisation and a safety net, not a
+        # prerequisite: a database that is briefly unreachable at boot must
+        # not stop the API from serving.
+        structlog.get_logger("app.knowledge_graph").exception("ensure_schema_failed")
+
+    sync_task = asyncio.create_task(
+        _tracker_sync_loop(get_settings().ticket_sync_interval_seconds)
+    )
+    doc_sync_task = asyncio.create_task(
+        _doc_sync_loop(get_settings().doc_sync_interval_seconds)
+    )
+    docs_task = asyncio.create_task(_docs_loop(get_settings().doc_push_interval_seconds))
+    merge_task = asyncio.create_task(_merge_loop())
+    slack_messages_task = asyncio.create_task(_slack_messages_loop())
+    slack_decisions_task = asyncio.create_task(_slack_decisions_loop(get_settings().slack_decision_tick_seconds))
+    slack_digest_task = asyncio.create_task(_slack_digest_loop(get_settings().slack_digest_tick_seconds))
+    decision_check_task = asyncio.create_task(_decision_check_loop(get_settings().decision_check_tick_seconds))
+    # the MCP server's requests run in its own task group, open for as long as the API is up
+    async with app.state.mcp.session_manager.run():
+        yield
+    decision_check_task.cancel()
+    slack_messages_task.cancel()
+    slack_decisions_task.cancel()
+    slack_digest_task.cancel()
+    # a flush cancelled mid-write puts its batch back once it has stopped, so wait for that before the last one
+    await asyncio.gather(slack_messages_task, slack_decisions_task, slack_digest_task, return_exceptions=True)
+    try:
+        # what's still in memory would be lost with the process: Slack doesn't resend acknowledged events
+        await slack_messages.buffer.flush()
+    except Exception:
+        structlog.get_logger("app.slack").exception("slack_messages_flush_error")
+    # what calls stopped early were billed, while there's still time to record it
+    try:
+        await asyncio.wait_for(llm.settle_usage(), timeout=10)
+    except TimeoutError:
+        structlog.get_logger("app.llm").warning("llm_usage_lookups_unfinished")
+    sync_task.cancel()
+    doc_sync_task.cancel()
+    docs_task.cancel()
+    merge_task.cancel()
+    mongo.close()
+
+
+def create_app(manage_db: bool = True) -> FastAPI:
+    settings = get_settings()
+    configure_logging(json_logs=settings.app_env != "dev")
+
+    app = FastAPI(title="Overwatch Backend", version="0.1.0", lifespan=lifespan if manage_db else None)
+    app.state.settings = settings
+    app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(mcp_server.McpHostOnly)
+    # Locked to the configured frontend origin, never "*" — GitHub/Jira tokens
+    # flow through this API, so an open CORS policy is a real risk, not a lint warning.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[settings.frontend_origin],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    register_exception_handlers(app)
+
+    app.include_router(auth_router)
+    app.include_router(accounts_router)
+    app.include_router(github_router)
+    app.include_router(jira_router)
+    app.include_router(slack_router)
+    app.include_router(slack_events_router)
+    app.include_router(slack_interactions_router)
+    app.include_router(onboarding_router)
+    app.include_router(graph_router)
+    app.include_router(webhooks_router)
+    app.include_router(connections_router)
+    app.include_router(work_items_router)
+    app.include_router(work_item_types_router)
+    app.include_router(boards_router)
+    app.include_router(sprints_router)
+    app.include_router(comments_router)
+    app.include_router(documents_router)
+    app.include_router(decisions_router)
+    app.include_router(attachments_router)
+    app.include_router(link_previews_router)
+    app.include_router(chat_router)
+    app.include_router(usage_router)
+    app.include_router(ai_tools_router)
+    app.include_router(search_router)
+    app.include_router(decision_comments_router)
+    app.include_router(decision_attachments.router)
+    app.include_router(realtime_router)
+    app.include_router(workspaces_router)
+    app.include_router(waitlist_router)
+
+    # AI tools connect here; its routes answer in MCP's own shapes, not the envelope
+    app.state.mcp = mcp_server.build()
+    app.router.routes.extend(mcp_server.routes(app.state.mcp))
+
+    app.router.route_class = EnvelopeRoute  # app-level routes return the envelope too
+
+    @app.get("/health")
+    async def health() -> dict:
+        return {"env": settings.app_env}
+
+    return app
+
+
+app = create_app()
