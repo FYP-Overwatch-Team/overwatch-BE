@@ -10,8 +10,11 @@ import re
 import uuid
 from datetime import date, datetime
 
+from pymongo import ReturnDocument
+
 from app.boards import repository as boards
 from app.core.constants import (
+    DECISION_KEY_PREFIX,
     NATIVE_SOURCE,
     DecisionOrigin,
     DecisionStatus,
@@ -113,9 +116,24 @@ async def _to_decisions(workspace_id: str, docs: list[dict]) -> list[dict]:
         synced_at = synced.get((source["source"], source["target_key"])) if source else None
         return {**evidence, "state": _state(evidence, source), "source_synced_at": synced_at}
 
-    decisions = [{**doc, "id": doc["_id"], "evidence": [with_state(e) for e in doc["evidence"]]} for doc in docs]
+    decisions = [
+        {**doc, "id": doc["_id"], "key": key_of(doc), "evidence": [with_state(e) for e in doc["evidence"]]} for doc in docs
+    ]
     await _store_attention(decisions)
     return decisions
+
+
+def key_of(doc: dict) -> str | None:
+    """A decision's short id ("D-31"); None for one stored before decisions were numbered."""
+    return f"{DECISION_KEY_PREFIX}{doc['number']}" if doc.get("number") else None
+
+
+async def next_number(workspace_id: str) -> int:
+    """The next decision number in the workspace, counted like its board items' keys."""
+    doc = await mongo.workspaces().find_one_and_update(
+        {"_id": workspace_id}, {"$inc": {"decision_seq": 1}}, return_document=ReturnDocument.AFTER,
+    )
+    return doc["decision_seq"]
 
 
 def _needs_attention(decision: dict) -> bool:
@@ -253,7 +271,7 @@ async def create(
     now = utcnow()
     evidence = await _evidence(workspace_id, user_id, body.evidence)
     doc = {
-        "_id": uuid.uuid4().hex, "workspace_id": workspace_id,
+        "_id": uuid.uuid4().hex, "workspace_id": workspace_id, "number": await next_number(workspace_id),
         **_review_by(body.model_dump(exclude={"evidence"})),
         "origin": origin, "superseded_by": None,
         "evidence": evidence, "sources": with_sources(cited or [], evidence),

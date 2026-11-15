@@ -42,7 +42,7 @@ def place(board: dict, fields: dict) -> dict:
 
 
 async def offer_columns(board: dict, columns: list[dict]) -> dict:
-    """What a full sync found: followed on a board that uses the tracker's columns, else offered once.
+    """What a full sync found: the board takes the tracker's columns, unless an admin chose the category ones.
 
     Either way the statuses the tracker's board shows are kept, so items in any other status
     (Jira's unmapped ones, e.g. "Archived") stay off the board and backlog, as they do there.
@@ -60,9 +60,23 @@ async def offer_columns(board: dict, columns: list[dict]) -> dict:
             await repository.place_items(board)
         return board
     prompt = board["column_prompt"]
-    if prompt["status"] == ColumnPrompt.DISMISSED and prompt["hash"] == digest:
-        return board
-    return await repository.update(board["_id"], {"column_prompt": {"status": ColumnPrompt.PENDING, "columns": columns, "hash": digest}})
+    if prompt["status"] != ColumnPrompt.DISMISSED:
+        return await _adopt(board, columns)
+    # an admin chose the category columns: they stay, with the tracker's as they are now to switch back to
+    if prompt["hash"] != digest:
+        board = await repository.update(board["_id"], {"column_prompt": {**prompt, "columns": columns, "hash": digest}})
+    return board
+
+
+async def _adopt(board: dict, columns: list[dict]) -> dict:
+    """Put the board on the tracker's columns, and its items in them."""
+    digest = columns_hash(columns)
+    board = await repository.update(board["_id"], {
+        "column_mode": ColumnMode.TRACKER, "columns": columns, "columns_hash": digest,
+        "column_prompt": {"status": ColumnPrompt.NONE, "columns": columns, "hash": digest},
+    })
+    await repository.place_items(board)
+    return board
 
 
 def _arranged(board: dict) -> list[dict]:
@@ -135,16 +149,11 @@ async def use_tracker_columns(member: dict, board_id: str) -> dict:
     columns = board["column_prompt"]["columns"]
     if not columns:
         raise ConflictError("the tracker's columns haven't been read yet; sync first", error_code="no_tracker_columns")
-    board = await repository.update(board["_id"], {
-        "column_mode": ColumnMode.TRACKER, "columns": columns, "columns_hash": columns_hash(columns),
-        "column_prompt": {**board["column_prompt"], "status": ColumnPrompt.NONE},
-    })
-    await repository.place_items(board)
-    return await _board_for(board)
+    return await _board_for(await _adopt(board, columns))
 
 
 async def keep_default_columns(member: dict, board_id: str) -> dict:
-    """Decline the offer, or go back to the category columns; asked again only if the tracker's columns change."""
+    """Go back to the category columns; they stay until an admin picks the tracker's again."""
     board = await _admin_board(member, board_id)
     board = await repository.update(board["_id"], {
         "column_mode": ColumnMode.DEFAULT, "columns": DEFAULT_COLUMNS, "columns_hash": None,

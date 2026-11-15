@@ -40,6 +40,8 @@ class ConnectorCategory(StrEnum):
 
 # `work_items.source` for items created in Overwatch; tracker items carry their provider
 NATIVE_SOURCE = "native"
+# what a decision's short id starts with: D-1, D-2... per workspace
+DECISION_KEY_PREFIX = "D-"
 
 
 class AuthBackendName(StrEnum):
@@ -344,10 +346,11 @@ class EvidenceState(StrEnum):
 
 
 class SearchResultKind(StrEnum):
-    """What a ⌘K search result opens: a board item, or a docs page."""
+    """What a ⌘K search result opens: a board item, a docs page, or a decision."""
 
     WORK_ITEM = "work_item"
     DOCUMENT = "document"
+    DECISION = "decision"
 
 
 class ChatRecordKind(StrEnum):

@@ -88,16 +88,17 @@ async def test_choosing_columns_reports_a_read_only_board_as_read_only(client):
     assert resp.json()["data"]["editable"] is False
 
 
-async def test_a_full_sync_offers_the_trackers_columns(client):
+async def test_a_full_sync_puts_the_board_on_the_trackers_columns(client):
     headers = await signed_in_with_jira(client)
 
     await full_sync(headers["X-Workspace-Id"], {"id": "4", "name": "In Review", "statusCategory": {"key": "indeterminate"}})
 
     board = (await boards(client, headers))["jira"]
-    assert board["column_prompt"] == {"status": "pending", "columns": ["To Do", "In Progress", "In Review", "Done"]}
-    # nothing changes until an admin says so
-    assert board["column_mode"] == "default"
-    assert (await mongo.work_items().find_one({"key": "OVR-2"}))["column_id"] == "in_progress"
+    assert board["column_mode"] == "tracker"
+    assert [c["name"] for c in board["columns"]] == ["To Do", "In Progress", "In Review", "Done"]
+    # nobody is asked: the tracker's columns are kept to switch back to
+    assert board["column_prompt"] == {"status": "none", "columns": ["To Do", "In Progress", "In Review", "Done"]}
+    assert (await mongo.work_items().find_one({"key": "OVR-2"}))["column_id"] == column_id("In Progress")
 
 
 async def test_accepting_moves_items_into_the_trackers_columns(client):
@@ -138,19 +139,22 @@ async def test_once_accepted_later_tracker_changes_follow_and_unmapped_statuses_
     assert (await mongo.work_items().find_one({"key": "OVR-2"}))["column_id"] is None
 
 
-async def test_declining_keeps_the_defaults_until_the_trackers_columns_change(client):
+async def test_an_admins_choice_of_the_default_columns_outlasts_the_trackers_columns_changing(client):
     headers = await signed_in_with_jira(client)
     await full_sync(headers["X-Workspace-Id"])
     board = (await boards(client, headers))["jira"]
 
     resp = await client.post(f"/boards/{board['id']}/columns/default", headers=headers)
-    assert resp.json()["data"]["column_prompt"]["status"] == "dismissed"
-
-    await full_sync(headers["X-Workspace-Id"])
-    assert (await boards(client, headers))["jira"]["column_prompt"]["status"] == "dismissed"
+    assert (resp.json()["data"]["column_mode"], resp.json()["data"]["column_prompt"]["status"]) == ("default", "dismissed")
 
     await full_sync(headers["X-Workspace-Id"], {"id": "4", "name": "In Review", "statusCategory": {"key": "indeterminate"}})
-    assert (await boards(client, headers))["jira"]["column_prompt"]["status"] == "pending"
+    kept = (await boards(client, headers))["jira"]
+    assert [c["id"] for c in kept["columns"]] == ["todo", "in_progress", "done"]
+    # still theirs to switch to, as the tracker has them now
+    assert kept["column_prompt"] == {"status": "dismissed", "columns": ["To Do", "In Progress", "In Review", "Done"]}
+
+    back = await client.post(f"/boards/{board['id']}/columns/tracker", headers=headers)
+    assert [c["name"] for c in back.json()["data"]["columns"]] == ["To Do", "In Progress", "In Review", "Done"]
 
 
 async def test_only_admins_change_a_boards_columns(client):
@@ -176,7 +180,7 @@ async def test_a_board_of_a_removed_target_is_gone(client):
     assert resp.json()["meta"]["error_code"] == "board_not_found"
 
 
-async def test_with_jira_software_access_the_boards_own_columns_are_offered(client):
+async def test_with_jira_software_access_the_boards_own_columns_are_used(client):
     headers = auth_headers(await login(client))
     await connect_jira(headers["X-Workspace-Id"], scopes=[*WRITE_SCOPES, *AGILE_SCOPES])
     await mongo.sync_targets().update_many({}, {"$set": {"last_full_sync_at": None}})
@@ -197,7 +201,7 @@ async def test_with_jira_software_access_the_boards_own_columns_are_offered(clie
 
     assert config.called  # the scrum board, not the first one listed
     # a column with none of the project's statuses is left out
-    assert (await boards(client, headers))["jira"]["column_prompt"]["columns"] == ["Ready", "Working", "Shipped"]
+    assert [c["name"] for c in (await boards(client, headers))["jira"]["columns"]] == ["Ready", "Working", "Shipped"]
 
 
 async def test_moving_into_a_tracker_column_takes_a_transition_into_its_statuses(client):

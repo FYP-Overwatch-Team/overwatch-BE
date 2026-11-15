@@ -275,3 +275,30 @@ async def test_the_inbox_pages_through_decisions(client):
 
     assert [d["title"] for d in resp.json()["data"]] == ["D2", "D1"]
     assert resp.json()["meta"]["total"] == 5
+
+
+async def test_decisions_are_numbered_per_workspace(client):
+    headers = await signed_in(client)
+    other = await user(client, "numbering")
+
+    first, second = await decide(client, headers), await decide(client, headers)
+    theirs = await decide(client, other)
+
+    assert (first["key"], second["key"], theirs["key"]) == ("D-1", "D-2", "D-1")
+
+
+async def test_decisions_from_before_numbering_are_numbered_oldest_first_after_the_newer_ones(client):
+    from scripts.migrate_decision_numbers import migrate
+
+    headers = await signed_in(client)
+    older, newer, numbered = await decide(client, headers), await decide(client, headers), await decide(client, headers)
+    await mongo.decisions().update_many({"_id": {"$in": [older["id"], newer["id"]]}}, {"$unset": {"number": ""}})
+    assert (await client.get(f"/decisions/{older['id']}", headers=headers)).json()["data"]["key"] is None
+
+    assert await migrate(apply=False) == ["2 decisions numbered"]
+    await migrate(apply=True)
+
+    keys = {d["id"]: d["key"] for d in (await client.get("/decisions", headers=headers)).json()["data"]}
+    assert (keys[older["id"]], keys[newer["id"]], keys[numbered["id"]]) == ("D-4", "D-5", "D-3")
+    # nothing left to number
+    assert await migrate(apply=True) == ["0 decisions numbered"]

@@ -77,6 +77,8 @@ class DecisionSource(BaseModel):
 
 class Decision(BaseModel):
     id: str
+    #: its short id in the workspace ("D-31"); None until an older decision is numbered
+    key: str | None = None
     title: str
     statement: str
     context_md: str | None
