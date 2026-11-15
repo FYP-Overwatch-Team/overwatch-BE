@@ -388,6 +388,11 @@ async def ensure_indexes() -> None:
     await decisions().create_index([("workspace_id", 1), ("status", 1), ("updated_at", -1)])
     await decisions().create_index([("workspace_id", 1), ("updated_at", -1)])
     await decisions().create_index([("workspace_id", 1), ("evidence.ref_id", 1)])
+    # what an AI tool recorded, once: a retry or a second tool finds the first record
+    await decisions().create_index(
+        [("workspace_id", 1), ("capture.fingerprint", 1)], unique=True, name="one_capture_per_wording",
+        partialFilterExpression={"capture.fingerprint": {"$type": "string"}},
+    )
     # a decision by its short id (D-31)
     await decisions().create_index([("workspace_id", 1), ("number", 1)])
     await decision_scans().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)

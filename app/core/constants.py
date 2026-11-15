@@ -294,6 +294,19 @@ class InboxTab(StrEnum):
 class DecisionOrigin(StrEnum):
     MANUAL = "manual"
     SUGGESTED = "suggested"
+    #: recorded by an AI tool connected over MCP, for the person using it
+    AGENT = "agent"
+
+
+class CaptureKind(StrEnum):
+    """What an AI tool records: something settled (a proposal to review), or a question still open."""
+
+    DECISION = "decision"
+    OPEN_QUESTION = "open_question"
+
+
+# where dismissed AI-tool records are remembered in `decision_scans`, next to each source's dismissed quotes
+CAPTURE_REF = "agent"
 
 
 class EvidenceKind(StrEnum):

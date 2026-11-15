@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Annotated
 
 from pydantic import BaseModel, Field
 
@@ -75,6 +76,33 @@ class DecisionSource(BaseModel):
     title: str
 
 
+class CodeContext(BaseModel):
+    """Where in the code an AI tool was working when it recorded a decision, as the tool reported it."""
+
+    repo: str | None = Field(default=None, max_length=200)
+    branch: str | None = Field(default=None, max_length=200)
+    commit: str | None = Field(default=None, max_length=64)
+    files: list[Annotated[str, Field(max_length=300)]] = Field(default=[], max_length=20)
+    pr_url: str | None = Field(default=None, max_length=500)
+
+
+class Capture(BaseModel):
+    """How a decision recorded by an AI tool came about. The tool's name is the connection's; the rest is what it reported."""
+
+    #: the connected tool it came through, as its owner named it
+    client: str
+    #: the person asked for it to be recorded, or agreed when the tool asked
+    user_approved: bool
+    #: what the person said, as the tool reported it; not checked against anything
+    user_words: str | None
+    #: the model the tool said it runs on
+    agent_model: str | None
+    #: a ticket key the work was for
+    ticket: str | None
+    code: CodeContext | None
+    recorded_at: datetime
+
+
 class Decision(BaseModel):
     id: str
     #: its short id in the workspace ("D-31"); None until an older decision is numbered
@@ -98,6 +126,8 @@ class Decision(BaseModel):
     history: list[HistoryEntry]
     #: accepted, but its evidence broke or was contradicted since it was settled: it's in Needs you
     needs_attention: bool = False
+    #: set on a decision an AI tool recorded
+    capture: Capture | None = None
     created_by: str
     created_at: datetime
     updated_at: datetime

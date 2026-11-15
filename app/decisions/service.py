@@ -273,8 +273,10 @@ async def get(workspace_id: str, decision_id: str) -> dict:
 
 async def create(
     member: dict, body: CreateDecision, origin: DecisionOrigin = DecisionOrigin.MANUAL, *, cited: list[dict] | None = None,
+    capture: dict | None = None,
 ) -> dict:
-    """`cited` are sources the decision cites already (a suggestion's S1, S2...); its evidence's sources are added after."""
+    """`cited` are sources the decision cites already (a suggestion's S1, S2...); its evidence's sources are added after.
+    `capture` is how an AI tool came to record it."""
     workspace_id, user_id = member["workspace_id"], member["user_id"]
     if body.status == DecisionStatus.SUPERSEDED:
         raise FieldValidationError({"status": "A new decision can't start out replaced."})
@@ -284,7 +286,7 @@ async def create(
     doc = {
         "_id": uuid.uuid4().hex, "workspace_id": workspace_id, "number": await next_number(workspace_id),
         **_review_by(body.model_dump(exclude={"evidence"})),
-        "origin": origin, "superseded_by": None,
+        "origin": origin, "superseded_by": None, "capture": capture,
         "evidence": evidence, "sources": with_sources(cited or [], evidence),
         "history": [{"status": body.status, "by": user_id, "at": now, "note": None}],
         "created_by": user_id, "created_at": now, "updated_at": now,
