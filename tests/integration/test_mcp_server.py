@@ -3,14 +3,18 @@
 import asyncio
 import json
 
+import httpx
 import pytest
 
 from tests.integration.test_ai_tools_api import token
+from app.core.config import get_settings
 from app.db import mongo
+from app.main import create_app
 from tests.integration.test_decisions_api import decide, page, quoting
 from tests.integration.test_workspaces import bearer, in_workspace, team, user
 
-HEADERS = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18"}
+# the server only answers on the address it was given, which in tests is the API's default one
+HEADERS = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18", "Host": "localhost:8000"}
 
 
 @pytest.fixture(autouse=True)
@@ -143,8 +147,6 @@ async def test_a_revoked_tool_is_refused_on_its_next_call(client):
 
 
 async def test_lookups_are_limited_per_tool(client, monkeypatch):
-    from app.core.config import get_settings
-
     monkeypatch.setattr(get_settings(), "mcp_reads_per_connection_minute", 1)
     _, raw = await connected(client)
 
@@ -265,8 +267,6 @@ async def test_a_read_only_tool_cannot_record(client):
 
 
 async def test_records_are_limited_per_tool(client, monkeypatch):
-    from app.core.config import get_settings
-
     monkeypatch.setattr(get_settings(), "mcp_writes_per_connection_hourly", 1)
     headers, raw = await connected(client)
 
@@ -283,3 +283,17 @@ async def test_a_tools_owner_can_rename_it_and_change_whether_it_asks(client):
     changed = await client.patch(f"/ai-tools/{tool['id']}", json={"label": "Laptop", "ask_first": False}, headers=bearer(headers))
 
     assert (changed.json()["data"]["label"], changed.json()["data"]["ask_first"]) == ("Laptop", False)
+
+
+async def test_the_mcp_hostname_serves_only_the_mcp_server(monkeypatch):
+    monkeypatch.setenv("MCP_BASE_URL", "https://mcp.test")
+    get_settings.cache_clear()
+    transport = httpx.ASGITransport(app=create_app(manage_db=False), raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="https://mcp.test") as on_mcp_host:
+        api = await on_mcp_host.get("/workspaces")
+        health = await on_mcp_host.get("/health")
+        unsigned = await on_mcp_host.post("/mcp", json={}, headers=HEADERS | {"Host": "mcp.test"})
+        on_api_host = await on_mcp_host.get("/workspaces", headers={"Host": "localhost:8000"})
+
+    # 401s, not 404s, are the API and the server answering: both ask who's calling
+    assert [api.status_code, health.status_code, unsigned.status_code, on_api_host.status_code] == [404, 200, 401, 401]

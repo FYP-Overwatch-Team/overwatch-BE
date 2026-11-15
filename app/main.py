@@ -219,6 +219,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app = FastAPI(title="Overwatch Backend", version="0.1.0", lifespan=lifespan if manage_db else None)
     app.state.settings = settings
     app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(mcp_server.McpHostOnly)
     # Locked to the configured frontend origin, never "*" — GitHub/Jira tokens
     # flow through this API, so an open CORS policy is a real risk, not a lint warning.
     app.add_middleware(

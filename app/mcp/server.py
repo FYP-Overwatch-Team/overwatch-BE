@@ -11,7 +11,9 @@ from mcp.server import MCPServer
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.responses import PlainTextResponse
 from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.config import get_settings
 from app.core.constants import McpScope
@@ -32,6 +34,8 @@ before recording unless they asked you to; then pass user_approved=true and thei
 - Never put passwords, keys, tokens or personal data in a record.
 """
 
+#: what answers on the MCP hostname: the server, where a tool learns how to sign in, and the health check
+PATHS = ("/mcp", "/.well-known/", "/health")
 #: the largest request body read, far above any tool's arguments
 MAX_BODY_BYTES = 256 * 1024
 
@@ -46,6 +50,23 @@ class GrantVerifier(TokenVerifier):
             expires_at=int(grant["expires_at"].timestamp()) if grant["expires_at"] else None,
             resource=get_settings().mcp_url, claims={"grant": grant},
         )
+
+
+class McpHostOnly:
+    """On the MCP server's own hostname only its paths answer; the rest of the API stays on the API's hostname."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        settings = get_settings()
+        mcp_host, api_host = urlparse(settings.mcp_url).netloc, urlparse(settings.app_base_url).netloc
+        self.host = mcp_host.encode() if mcp_host != api_host else None
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self.host and scope["type"] == "http" and dict(scope["headers"]).get(b"host") == self.host:
+            if not scope["path"].startswith(PATHS):
+                await PlainTextResponse("Not Found", status_code=404)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 def build() -> MCPServer:
