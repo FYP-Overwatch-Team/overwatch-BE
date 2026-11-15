@@ -158,6 +158,19 @@ class Settings(BaseSettings):
     invite_email_daily_limit_workspace: int = 50
     invite_email_daily_limit_user: int = 100
 
+    # where AI tools reach the MCP server, when it isn't the API's own address (prod: https://mcp.usebearings.app)
+    mcp_base_url: str = ""
+    # a personal MCP token's life in days when none is asked for, and the longest one can ask for
+    mcp_token_default_days: int = 90
+    mcp_token_max_days: int = 365
+    # AI tools one person may have connected at a time, across their workspaces
+    mcp_max_connections_per_user: int = 20
+
+    @property
+    def mcp_url(self) -> str:
+        """The address an AI tool is given to connect to."""
+        return f"{(self.mcp_base_url or self.app_base_url).rstrip('/')}/mcp"
+
     @property
     def product(self) -> str:
         """The product name as users see it."""

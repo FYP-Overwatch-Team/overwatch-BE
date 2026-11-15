@@ -33,6 +33,7 @@ from app.slack.interactions import router as slack_interactions_router
 from app.slack.router import router as slack_router
 from app.link_previews.router import router as link_previews_router
 from app.onboarding.router import router as onboarding_router
+from app.mcp.router import router as ai_tools_router
 from app.usage.router import router as usage_router
 from app.waitlist.router import router as waitlist_router
 from app.work_item_types.router import router as work_item_types_router
@@ -248,6 +249,7 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(link_previews_router)
     app.include_router(chat_router)
     app.include_router(usage_router)
+    app.include_router(ai_tools_router)
     app.include_router(search_router)
     app.include_router(decision_comments_router)
     app.include_router(decision_attachments.router)

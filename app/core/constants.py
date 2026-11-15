@@ -427,6 +427,24 @@ class VectorSearch(StrEnum):
     LOCAL = "local"
 
 
+class McpScope(StrEnum):
+    """What an AI tool connected over MCP may do in its workspace."""
+
+    READ = "decisions:read"
+    RECORD = "decisions:record"
+
+
+class McpGrantKind(StrEnum):
+    """How an AI tool was connected: a personal token pasted into it, or its own OAuth sign-in."""
+
+    TOKEN = "token"
+    OAUTH = "oauth"
+
+
+# what a personal MCP token starts with, so one pasted somewhere public can be recognised
+MCP_TOKEN_PREFIX = "bwp_"
+
+
 class DecisionCheckInterval(IntEnum):
     """How often a workspace's accepted decisions are checked against what changed, in minutes."""
 

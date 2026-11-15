@@ -243,6 +243,16 @@ def file_facts():
     return get_db()["file_facts"]
 
 
+def mcp_grants():
+    """An AI tool a member connected over MCP: who, which one workspace, what it may do, and when it was last used."""
+    return get_db()["mcp_grants"]
+
+
+def mcp_tokens():
+    """The tokens a connected AI tool signs in with, by hash; each belongs to one grant."""
+    return get_db()["mcp_tokens"]
+
+
 async def ensure_indexes() -> None:
     """Create the indexes the hot paths depend on. Idempotent — safe on every boot.
 
@@ -380,6 +390,12 @@ async def ensure_indexes() -> None:
     await decisions().create_index([("workspace_id", 1), ("evidence.ref_id", 1)])
     await decision_scans().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
     await decision_checks().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
+    # a member's connected AI tools, a workspace's (to revoke when someone leaves), and the token lookup on every MCP call
+    await mcp_grants().create_index([("user_id", 1), ("created_at", -1)])
+    await mcp_grants().create_index([("workspace_id", 1), ("user_id", 1)])
+    await mcp_tokens().create_index("token_hash", unique=True)
+    await mcp_tokens().create_index("grant_id")
+    await mcp_tokens().create_index("expires_at", expireAfterSeconds=0)
     # a workspace's usage over a window, as Settings → Usage reads it
     await llm_usage().create_index([("workspace_id", 1), ("created_at", -1)])
     await ai_actions().create_index([("workspace_id", 1), ("created_at", -1)])
