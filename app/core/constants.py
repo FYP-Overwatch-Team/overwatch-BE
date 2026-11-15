@@ -40,6 +40,8 @@ class ConnectorCategory(StrEnum):
 
 # `work_items.source` for items created in Overwatch; tracker items carry their provider
 NATIVE_SOURCE = "native"
+# what a decision's short id starts with: D-1, D-2... per workspace
+DECISION_KEY_PREFIX = "D-"
 
 
 class AuthBackendName(StrEnum):
