@@ -454,6 +454,20 @@ class McpGrantKind(StrEnum):
     OAUTH = "oauth"
 
 
+class McpTokenKind(StrEnum):
+    """What a stored MCP token is for: calling the server, or getting the next access token."""
+
+    ACCESS = "access"
+    REFRESH = "refresh"
+
+
+class OAuthRegistration(StrEnum):
+    """How an AI tool's OAuth client is known: it registered itself, or it's a document at the client id's URL."""
+
+    DYNAMIC = "dynamic"
+    METADATA_DOCUMENT = "metadata_document"
+
+
 # what a personal MCP token starts with, so one pasted somewhere public can be recognised
 MCP_TOKEN_PREFIX = "bwp_"
 
