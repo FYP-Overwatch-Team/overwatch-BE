@@ -165,6 +165,8 @@ class Settings(BaseSettings):
     mcp_token_max_days: int = 365
     # AI tools one person may have connected at a time, across their workspaces
     mcp_max_connections_per_user: int = 20
+    # lookups one connected tool may make a minute
+    mcp_reads_per_connection_minute: int = 60
 
     @property
     def mcp_url(self) -> str:

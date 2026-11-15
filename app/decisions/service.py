@@ -33,6 +33,8 @@ from app.workspaces import repository as workspaces
 
 
 
+#: a decision's short id as people type it: "D-31", in any case
+KEY = re.compile(rf"{re.escape(DECISION_KEY_PREFIX)}(\d+)", re.IGNORECASE)
 DECIDED_STATUSES = [DecisionStatus.ACCEPTED, DecisionStatus.REJECTED, DecisionStatus.SUPERSEDED]
 #: evidence whose source no longer says what was quoted
 BROKEN_STATES = {EvidenceState.QUOTE_MISSING, EvidenceState.SOURCE_GONE}
@@ -170,6 +172,15 @@ def _tab_query(tab: InboxTab, user_id: str, today: date) -> dict:
 async def found(workspace_id: str, decision_id: str) -> dict:
     """The workspace's decision, as stored; 404 when it has none by that id."""
     doc = await mongo.decisions().find_one({"_id": decision_id, "workspace_id": workspace_id})
+    if doc is None:
+        raise NotFoundError("decision not found", error_code="decision_not_found")
+    return doc
+
+
+async def found_by_key(workspace_id: str, key: str) -> dict:
+    """The workspace's decision with that short id, as stored; 404 when it has none."""
+    numbered = KEY.fullmatch(key.strip())
+    doc = await mongo.decisions().find_one({"workspace_id": workspace_id, "number": int(numbered.group(1))}) if numbered else None
     if doc is None:
         raise NotFoundError("decision not found", error_code="decision_not_found")
     return doc

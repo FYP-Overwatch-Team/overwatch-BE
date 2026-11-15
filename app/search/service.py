@@ -10,7 +10,7 @@ within each.
 import re
 
 from app.boards import repository as boards
-from app.core.constants import DECISION_KEY_PREFIX, NATIVE_SOURCE, DocumentKind, SearchResultKind
+from app.core.constants import NATIVE_SOURCE, DocumentKind, SearchResultKind
 from app.db import mongo
 from app.decisions import service as decisions
 from app.work_items import service as work_items
@@ -22,7 +22,6 @@ SNIPPET_RADIUS = 60
 _LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _MARKS = re.compile(r"[*_`~#>|]+")
 _SPACE = re.compile(r"\s+")
-_DECISION_KEY = re.compile(rf"{re.escape(DECISION_KEY_PREFIX)}(\d+)", re.IGNORECASE)
 
 
 def snippet(text: str, query: str) -> str | None:
@@ -72,7 +71,7 @@ async def search(workspace_id: str, query: str, limit: int) -> list[dict]:
         mongo.documents(), {"workspace_id": workspace_id, "kind": DocumentKind.PAGE, "archived_at": None},
         [{"title": pattern}, {"content_md": pattern}], "content_md",
     )
-    numbered = _DECISION_KEY.fullmatch(query)
+    numbered = decisions.KEY.fullmatch(query)
     decided = await _matches(
         mongo.decisions(), {"workspace_id": workspace_id},
         [*([{"number": int(numbered.group(1))}] if numbered else []), {"title": pattern}, {"statement": pattern}],

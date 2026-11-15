@@ -49,6 +49,8 @@ def test_env(monkeypatch, github_app_key):
     monkeypatch.setenv("JIRA_CLIENT_ID", "test-jira-client-id")
     monkeypatch.setenv("JIRA_CLIENT_SECRET", "test-jira-client-secret")
     monkeypatch.setenv("HIBP_ENABLED", "false")
+    # the address the test client calls, which the MCP server checks requests against
+    monkeypatch.setenv("MCP_BASE_URL", "https://test")
     # no real embedding model in tests; `fake_embedder` stands in
     monkeypatch.setenv("EMBEDDING_MODEL", "")
     get_settings.cache_clear()

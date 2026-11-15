@@ -33,6 +33,7 @@ from app.slack.interactions import router as slack_interactions_router
 from app.slack.router import router as slack_router
 from app.link_previews.router import router as link_previews_router
 from app.onboarding.router import router as onboarding_router
+from app.mcp import server as mcp_server
 from app.mcp.router import router as ai_tools_router
 from app.usage.router import router as usage_router
 from app.waitlist.router import router as waitlist_router
@@ -185,7 +186,9 @@ async def lifespan(app: FastAPI):
     slack_decisions_task = asyncio.create_task(_slack_decisions_loop(get_settings().slack_decision_tick_seconds))
     slack_digest_task = asyncio.create_task(_slack_digest_loop(get_settings().slack_digest_tick_seconds))
     decision_check_task = asyncio.create_task(_decision_check_loop(get_settings().decision_check_tick_seconds))
-    yield
+    # the MCP server's requests run in its own task group, open for as long as the API is up
+    async with app.state.mcp.session_manager.run():
+        yield
     decision_check_task.cancel()
     slack_messages_task.cancel()
     slack_decisions_task.cancel()
@@ -256,6 +259,10 @@ def create_app(manage_db: bool = True) -> FastAPI:
     app.include_router(realtime_router)
     app.include_router(workspaces_router)
     app.include_router(waitlist_router)
+
+    # AI tools connect here; its routes answer in MCP's own shapes, not the envelope
+    app.state.mcp = mcp_server.build()
+    app.router.routes.extend(mcp_server.routes(app.state.mcp))
 
     app.router.route_class = EnvelopeRoute  # app-level routes return the envelope too
 

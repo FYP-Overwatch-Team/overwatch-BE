@@ -388,6 +388,8 @@ async def ensure_indexes() -> None:
     await decisions().create_index([("workspace_id", 1), ("status", 1), ("updated_at", -1)])
     await decisions().create_index([("workspace_id", 1), ("updated_at", -1)])
     await decisions().create_index([("workspace_id", 1), ("evidence.ref_id", 1)])
+    # a decision by its short id (D-31)
+    await decisions().create_index([("workspace_id", 1), ("number", 1)])
     await decision_scans().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
     await decision_checks().create_index([("workspace_id", 1), ("ref_id", 1)], unique=True)
     # a member's connected AI tools, a workspace's (to revoke when someone leaves), and the token lookup on every MCP call
