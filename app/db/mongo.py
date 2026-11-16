@@ -253,6 +253,16 @@ def mcp_tokens():
     return get_db()["mcp_tokens"]
 
 
+def oauth_clients():
+    """The AI tools that may ask a member to sign in: registered by the tool, or read from its metadata document."""
+    return get_db()["oauth_clients"]
+
+
+def oauth_requests():
+    """A sign-in an AI tool started, until the member answers and the tool trades its code; gone minutes later."""
+    return get_db()["oauth_requests"]
+
+
 async def ensure_indexes() -> None:
     """Create the indexes the hot paths depend on. Idempotent — safe on every boot.
 
@@ -403,6 +413,8 @@ async def ensure_indexes() -> None:
     await mcp_tokens().create_index("token_hash", unique=True)
     await mcp_tokens().create_index("grant_id")
     await mcp_tokens().create_index("expires_at", expireAfterSeconds=0)
+    await oauth_requests().create_index("code_hash")
+    await oauth_requests().create_index("expires_at", expireAfterSeconds=0)
     # a workspace's usage over a window, as Settings → Usage reads it
     await llm_usage().create_index([("workspace_id", 1), ("created_at", -1)])
     await ai_actions().create_index([("workspace_id", 1), ("created_at", -1)])

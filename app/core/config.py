@@ -165,6 +165,14 @@ class Settings(BaseSettings):
     mcp_token_max_days: int = 365
     # AI tools one person may have connected at a time, across their workspaces
     mcp_max_connections_per_user: int = 20
+    # an OAuth-connected tool's access token life in minutes, and how long it may go unused before signing in again
+    mcp_access_token_minutes: int = 60
+    mcp_refresh_token_days: int = 30
+    # hosts whose client metadata documents are fetched (an AI tool whose client id is a URL), comma-separated;
+    # any other tool registers itself. Fetching only named hosts keeps the server from being pointed at private addresses
+    mcp_client_document_hosts: str = "claude.ai,chatgpt.com"
+    # OAuth clients one address may register a day
+    mcp_registrations_per_ip_daily: int = 20
     # lookups one connected tool may make a minute
     mcp_reads_per_connection_minute: int = 60
     # decisions and questions one connected tool may record an hour, and all of a workspace's tools a day

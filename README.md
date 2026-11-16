@@ -107,6 +107,11 @@ member creates a personal token in Settings > AI tools; it is tied to that membe
 - In production set `MCP_BASE_URL=https://mcp.usebearings.app`. That hostname then serves only `/mcp`,
   `/.well-known/` and `/health`; it must be on the origin certificate (see the hosting runbook).
 - The server only answers requests whose `Host` is the MCP or API address, and only `POST /mcp`.
+- Tools that can't take a token (claude.ai, ChatGPT, Gemini) sign in over OAuth 2.1: they find
+  `/.well-known/oauth-authorization-server`, send the member to `/oauth/authorize`, and the member picks a
+  workspace on the frontend's `/connect/authorize` page. Only public clients with PKCE. A tool registers itself
+  at `/oauth/register`, or is described by a document at its client id's URL, fetched only from
+  `MCP_CLIENT_DOCUMENT_HOSTS`. The MCP hostname also serves `/oauth/`.
 - Limits (`MCP_*` in `.env.example`) cap lookups per tool a minute and records per tool an hour and per
   workspace a day. MCP calls make no model call, so they don't count against the AI allowance.
 
