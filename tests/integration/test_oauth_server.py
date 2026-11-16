@@ -201,6 +201,21 @@ async def test_a_refresh_token_works_once_and_a_copy_of_it_ends_the_connection(c
     assert (await client.get("/ai-tools", headers=bearer(alice))).json()["data"] == []
 
 
+async def test_signing_a_tool_in_again_replaces_its_earlier_sign_in_only_if_that_was_never_used(client):
+    alice = await user(client, "alice")
+    acme = await team(client, alice)
+    client_id = await registered(client)
+    abandoned = (await traded(client, client_id, await approved(client, alice, acme, client_id))).json()
+    used = (await traded(client, client_id, await approved(client, alice, acme, client_id))).json()
+    await rpc(client, used["access_token"], "tools/list")
+
+    latest = (await traded(client, client_id, await approved(client, alice, acme, client_id))).json()
+
+    answers = [(await rpc(client, issued["access_token"], "tools/list")).status_code for issued in (abandoned, used, latest)]
+    assert answers == [401, 200, 200]
+    assert len((await client.get("/ai-tools", headers=bearer(alice))).json()["data"]) == 2
+
+
 async def test_a_refresh_token_is_refused_to_another_client(client):
     alice = await user(client, "alice")
     acme = await team(client, alice)

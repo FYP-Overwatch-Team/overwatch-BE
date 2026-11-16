@@ -61,7 +61,7 @@ async def test_a_tool_without_a_valid_token_is_told_where_to_sign_in(client):
         assert refused.status_code == 401
         assert "/.well-known/oauth-protected-resource/mcp" in refused.headers["www-authenticate"]
     described = (await client.get("/.well-known/oauth-protected-resource/mcp")).json()
-    assert described["resource"].endswith("/mcp") and described["scopes_supported"] == ["decisions:read"]
+    assert described["resource"].endswith("/mcp") and described["scopes_supported"] == ["decisions:read", "decisions:record"]
 
 
 async def test_a_tool_is_given_the_rules_and_only_read_tools_change_nothing(client):
@@ -101,15 +101,19 @@ async def test_starting_a_task_shows_what_was_decided_and_what_is_still_open(cli
     assert started["accepted"][0]["url"].endswith(f"?w={headers['X-Workspace-Id']}")
 
 
-async def test_a_search_leaves_unreviewed_proposals_out_unless_asked_for(client):
+async def test_a_search_shows_unreviewed_proposals_marked_as_such(client):
     headers, raw = await connected(client)
     await decide(client, headers, title="Export format", statement="Admins export as CSV.", status="accepted")
     await decide(client, headers, title="Export limits", statement="Exports stop at 10k rows.", status="proposed")
 
     active = await call(client, raw, "search_decisions", query="export")
+    accepted = await call(client, raw, "search_decisions", query="export", status="accepted")
     proposed = await call(client, raw, "search_decisions", query="export", status="proposed")
+    started = await call(client, raw, "start_task", topic="export")
 
-    assert [d["title"] for d in active["decisions"]] == ["Export format"]
+    assert {(d["title"], d["unreviewed"]) for d in active["decisions"]} == {("Export format", False), ("Export limits", True)}
+    assert {d["title"] for d in started["about_topic"]} == {"Export format", "Export limits"}
+    assert [d["title"] for d in started["accepted"]] == [d["title"] for d in accepted["decisions"]] == ["Export format"]
     assert [(d["title"], d["unreviewed"]) for d in proposed["decisions"]] == [("Export limits", True)]
 
 
@@ -367,6 +371,17 @@ async def test_an_admin_can_turn_recording_off_for_the_workspace_and_reading_sti
     assert (by_member.status_code, by_admin.status_code) == (403, 200)
     assert "recording_disabled" in refused["error"] and started["can_record"] is False
     assert (await client.get("/ai-tools/recording", headers=headers)).json()["data"] == {"recording_enabled": False}
+
+
+async def test_a_tool_cannot_take_a_record_back_while_recording_is_off(client):
+    headers, raw = await connected(client)
+    await call(client, raw, "record_decision", **LOCKS, user_approved=True)
+    await client.put("/ai-tools/recording", json={"recording_enabled": False}, headers=headers)
+
+    refused = await call(client, raw, "withdraw_decision", key="D-1")
+
+    assert "recording_disabled" in refused["error"]
+    assert await mongo.decisions().count_documents({}) == 1
 
 
 async def test_an_admin_sees_and_disconnects_members_tools_in_their_workspace(client):

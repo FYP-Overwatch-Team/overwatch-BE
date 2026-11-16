@@ -188,6 +188,8 @@ def recording_enabled(workspace: dict) -> bool:
 
 async def withdraw(grant: dict, key: str) -> dict:
     """Take back a record nobody settled yet: one this person's tools made, in the last few days. Returns it as it was."""
+    if not recording_enabled(grant["workspace"]):
+        raise Refused("recording_disabled: an admin turned off recording by AI tools in this workspace. Reading still works.")
     try:
         decision = await decisions.found_by_key(grant["workspace_id"], key)
     except NotFoundError:

@@ -60,7 +60,14 @@ async def create_token(member: dict, label: str, *, read_only: bool, ask_first: 
 
 
 async def create_signed_in(member: dict, client: dict, *, read_only: bool, ask_first: bool) -> dict:
-    """A grant for a tool the member signed in to over OAuth, named after the tool; it lasts until revoked or left unused."""
+    """A grant for a tool the member signed in to over OAuth, named after the tool; it lasts until revoked or left unused.
+
+    An earlier sign-in of the same tool that was never used is dropped: it was abandoned or is being redone. Used
+    ones stay, since one client id may be the same tool on several of the member's machines.
+    """
+    await _revoke({
+        "user_id": member["user_id"], "workspace_id": member["workspace_id"], "client_id": client["_id"], "last_used_at": None,
+    })
     return await _new_grant(member, McpGrantKind.OAUTH, client["name"], read_only=read_only, ask_first=ask_first, client_id=client["_id"])
 
 
