@@ -97,6 +97,19 @@ verification, create an App Password, and set `SMTP_USERNAME` (the address), `SM
 and `EMAIL_FROM` (the same address or a verified "send as" alias). Gmail allows about 500 recipients a day;
 `INVITE_EMAIL_DAILY_LIMIT_*` keep invites well under it.
 
+### AI tools (MCP)
+
+AI tools (Claude, ChatGPT, Gemini, coding agents) connect to the MCP server at `<MCP_BASE_URL>/mcp`
+(`APP_BASE_URL` when unset) to read the workspace's decisions and record new ones for review. A
+member creates a personal token in Settings > AI tools; it is tied to that member and one workspace.
+
+- Locally: `claude mcp add --transport http bearings http://localhost:8000/mcp --header "Authorization: Bearer <token>"`.
+- In production set `MCP_BASE_URL=https://mcp.usebearings.app`. That hostname then serves only `/mcp`,
+  `/.well-known/` and `/health`; it must be on the origin certificate (see the hosting runbook).
+- The server only answers requests whose `Host` is the MCP or API address, and only `POST /mcp`.
+- Limits (`MCP_*` in `.env.example`) cap lookups per tool a minute and records per tool an hour and per
+  workspace a day. MCP calls make no model call, so they don't count against the AI allowance.
+
 ## API responses
 
 Every endpoint returns the same envelope. Routes just return their data and declare its type

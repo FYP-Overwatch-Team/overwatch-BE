@@ -33,6 +33,8 @@ from app.workspaces import repository as workspaces
 
 
 
+#: a decision's short id as people type it: "D-31", in any case
+KEY = re.compile(rf"{re.escape(DECISION_KEY_PREFIX)}(\d+)", re.IGNORECASE)
 DECIDED_STATUSES = [DecisionStatus.ACCEPTED, DecisionStatus.REJECTED, DecisionStatus.SUPERSEDED]
 #: evidence whose source no longer says what was quoted
 BROKEN_STATES = {EvidenceState.QUOTE_MISSING, EvidenceState.SOURCE_GONE}
@@ -175,6 +177,15 @@ async def found(workspace_id: str, decision_id: str) -> dict:
     return doc
 
 
+async def found_by_key(workspace_id: str, key: str) -> dict:
+    """The workspace's decision with that short id, as stored; 404 when it has none."""
+    numbered = KEY.fullmatch(key.strip())
+    doc = await mongo.decisions().find_one({"workspace_id": workspace_id, "number": int(numbered.group(1))}) if numbered else None
+    if doc is None:
+        raise NotFoundError("decision not found", error_code="decision_not_found")
+    return doc
+
+
 async def _evidence(workspace_id: str, user_id: str, new: list[NewEvidence], match: dict | None = None) -> list[dict]:
     """Stored evidence for `new`; each quote must be found in its source. `match` is why a check read it."""
     found = await sources(workspace_id, [(e.kind, e.ref_id) for e in new])
@@ -262,8 +273,10 @@ async def get(workspace_id: str, decision_id: str) -> dict:
 
 async def create(
     member: dict, body: CreateDecision, origin: DecisionOrigin = DecisionOrigin.MANUAL, *, cited: list[dict] | None = None,
+    capture: dict | None = None,
 ) -> dict:
-    """`cited` are sources the decision cites already (a suggestion's S1, S2...); its evidence's sources are added after."""
+    """`cited` are sources the decision cites already (a suggestion's S1, S2...); its evidence's sources are added after.
+    `capture` is how an AI tool came to record it."""
     workspace_id, user_id = member["workspace_id"], member["user_id"]
     if body.status == DecisionStatus.SUPERSEDED:
         raise FieldValidationError({"status": "A new decision can't start out replaced."})
@@ -273,7 +286,7 @@ async def create(
     doc = {
         "_id": uuid.uuid4().hex, "workspace_id": workspace_id, "number": await next_number(workspace_id),
         **_review_by(body.model_dump(exclude={"evidence"})),
-        "origin": origin, "superseded_by": None,
+        "origin": origin, "superseded_by": None, "capture": capture,
         "evidence": evidence, "sources": with_sources(cited or [], evidence),
         "history": [{"status": body.status, "by": user_id, "at": now, "note": None}],
         "created_by": user_id, "created_at": now, "updated_at": now,

@@ -19,7 +19,7 @@ import structlog
 from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
-from app.core.constants import DecisionOrigin, DecisionStatus, EmbeddingKind, EvidenceKind, UsageFeature
+from app.core.constants import CAPTURE_REF, DecisionOrigin, DecisionStatus, EmbeddingKind, EvidenceKind, UsageFeature
 from app.core.exceptions import ConflictError, ExternalServiceError, NotFoundError
 from app.core.time import utcnow
 from app.core.writing import WRITING_STYLE
@@ -236,11 +236,12 @@ async def _suggest(
 
 
 async def dismiss(member: dict, decision_id: str) -> None:
-    """"Not a decision": the suggestion goes, and its quote isn't suggested from that source again."""
+    """"Not a decision": the suggestion goes, and its quote isn't suggested from that source again.
+    One an AI tool recorded goes the same way, and that tool isn't let record it again."""
     workspace_id = member["workspace_id"]
     decision = await mongo.decisions().find_one_and_delete({
         "_id": decision_id, "workspace_id": workspace_id,
-        "origin": DecisionOrigin.SUGGESTED, "status": DecisionStatus.PROPOSED,
+        "origin": {"$in": [DecisionOrigin.SUGGESTED, DecisionOrigin.AGENT]}, "status": DecisionStatus.PROPOSED,
     })
     if decision is None:
         raise NotFoundError("no suggestion waiting to be reviewed", error_code="suggestion_not_found")
@@ -249,6 +250,11 @@ async def dismiss(member: dict, decision_id: str) -> None:
     topic = topics.name("decision", decision_id)
     get_hub().publish(topic, EventName.DECISION_DELETED, {"id": decision_id})
     get_hub().close_topic(topic, UnsubscribeReason.GONE)
+    if decision.get("capture"):
+        await mongo.decision_scans().update_one(
+            {"workspace_id": workspace_id, "ref_id": CAPTURE_REF},
+            {"$addToSet": {"dismissed_quotes": decision["capture"]["fingerprint"]}}, upsert=True,
+        )
     for evidence in decision["evidence"]:
         await mongo.decision_scans().update_one(
             {"workspace_id": workspace_id, "ref_id": evidence["ref_id"]},

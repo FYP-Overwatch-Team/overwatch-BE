@@ -50,9 +50,13 @@ def pkce_pair() -> tuple[str, str]:
     return verifier, base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
-def hash_refresh_token(raw: str) -> str:
-    """Refresh tokens are stored only as SHA-256 hashes; the raw value never touches Mongo."""
+def hash_token(raw: str) -> str:
+    """Opaque tokens are stored only as SHA-256 hashes; the raw value never touches Mongo."""
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def hash_refresh_token(raw: str) -> str:
+    return hash_token(raw)
 
 
 def _fernet() -> Fernet:

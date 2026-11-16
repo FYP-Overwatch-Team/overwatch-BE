@@ -220,7 +220,7 @@ class Workspace:
 
         query = {
             "workspace_id": self.workspace_id, **await work_items.visibility(self.workspace_id),
-            **_words(args, ("key", "title", "description_md")),
+            **words(args, ("key", "title", "description_md")),
         }
         if args.get("sprint") == CURRENT_SPRINT:
             query["sprint_id"] = {"$in": await sprints.active_ids(self.workspace_id)}
@@ -254,7 +254,7 @@ class Workspace:
     async def find_docs(self, args: dict) -> str:
         query = {
             "workspace_id": self.workspace_id, "kind": DocumentKind.PAGE, "archived_at": None,
-            **_words(args, ("title", "content_md")),
+            **words(args, ("title", "content_md")),
         }
         pages = await mongo.documents().find(query).sort("updated_at", -1).limit(MAX_RESULTS).to_list(None)
         if not pages:
@@ -267,7 +267,7 @@ class Workspace:
         return _fenced("\n".join(rows))
 
     async def find_decisions(self, args: dict) -> str:
-        query = {"workspace_id": self.workspace_id, **_words(args, ("title", "statement", "area", "context_md"))}
+        query = {"workspace_id": self.workspace_id, **words(args, ("title", "statement", "area", "context_md"))}
         if args.get("status") in DecisionStatus:
             query["status"] = args["status"]
         decisions = await mongo.decisions().find(query).sort("updated_at", -1).limit(MAX_RESULTS).to_list(None)
@@ -412,7 +412,7 @@ class Workspace:
         return ref
 
 
-def _words(args: dict, fields: tuple[str, ...]) -> dict:
+def words(args: dict, fields: tuple[str, ...]) -> dict:
     """Every word of the query in one of `fields`, case-insensitive; nothing when there's no query."""
     words = str(args.get("query") or "")[:MAX_QUERY_CHARS].split()
     if not words:

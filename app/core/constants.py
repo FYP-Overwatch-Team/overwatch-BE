@@ -294,6 +294,19 @@ class InboxTab(StrEnum):
 class DecisionOrigin(StrEnum):
     MANUAL = "manual"
     SUGGESTED = "suggested"
+    #: recorded by an AI tool connected over MCP, for the person using it
+    AGENT = "agent"
+
+
+class CaptureKind(StrEnum):
+    """What an AI tool records: something settled (a proposal to review), or a question still open."""
+
+    DECISION = "decision"
+    OPEN_QUESTION = "open_question"
+
+
+# where dismissed AI-tool records are remembered in `decision_scans`, next to each source's dismissed quotes
+CAPTURE_REF = "agent"
 
 
 class EvidenceKind(StrEnum):
@@ -425,6 +438,24 @@ class VectorSearch(StrEnum):
 
     ATLAS = "atlas"
     LOCAL = "local"
+
+
+class McpScope(StrEnum):
+    """What an AI tool connected over MCP may do in its workspace."""
+
+    READ = "decisions:read"
+    RECORD = "decisions:record"
+
+
+class McpGrantKind(StrEnum):
+    """How an AI tool was connected: a personal token pasted into it, or its own OAuth sign-in."""
+
+    TOKEN = "token"
+    OAUTH = "oauth"
+
+
+# what a personal MCP token starts with, so one pasted somewhere public can be recognised
+MCP_TOKEN_PREFIX = "bwp_"
 
 
 class DecisionCheckInterval(IntEnum):
