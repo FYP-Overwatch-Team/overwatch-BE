@@ -3,7 +3,7 @@ from datetime import date
 from fastapi import BackgroundTasks, Depends, Query
 
 from app.api.deps import workspace_member
-from app.core.constants import DecisionStatus, InboxTab
+from app.core.constants import DecisionOrigin, DecisionStatus, InboxTab
 from app.core.time import utcnow
 from app.core.responses import WithMeta, api_router
 from app.decisions import checks, overview, service, suggest
@@ -14,6 +14,8 @@ from app.decisions.schemas import (
     CheckSettings,
     CreateDecision,
     Decision,
+    Dismissed,
+    DismissMany,
     InboxCounts,
     NewEvidence,
     OverviewPage,
@@ -31,14 +33,16 @@ async def list_decisions(
     today: date | None = None,
     q: str | None = Query(default=None, max_length=200),
     ref_id: str | None = None,
+    origin: DecisionOrigin | None = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     member: dict = Depends(workspace_member()),
 ) -> WithMeta[list[Decision]]:
     """`tab` is an inbox tab for this member, `today` their date (UTC when not sent) for review dates;
-    `ref_id` narrows to the decisions quoting that board item or page."""
+    `ref_id` narrows to the decisions quoting that board item or page, `origin` to how they were drafted
+    (`agent`: recorded by a connected AI tool)."""
     decisions, total = await service.list_decisions(
-        member, tab=tab, today=today or utcnow().date(), q=q, ref_id=ref_id, offset=offset, limit=limit,
+        member, tab=tab, today=today or utcnow().date(), q=q, ref_id=ref_id, origin=origin, offset=offset, limit=limit,
     )
     return WithMeta(decisions, {"total": total, "offset": offset, "limit": limit})
 
@@ -68,6 +72,12 @@ async def create_decision(
 async def suggest_decisions(body: SuggestRequest, member: dict = Depends(workspace_member())) -> list[Decision]:
     """Ask the AI to draft the decisions a board item or page states; they're saved as proposals to review."""
     return await suggest.suggest(member, body.kind, body.ref_id)
+
+
+@router.post("/dismiss")
+async def dismiss_suggestions(body: DismissMany, member: dict = Depends(workspace_member())) -> Dismissed:
+    """"Not a decision" for several AI drafts at once; ones already settled or gone are skipped."""
+    return Dismissed(dismissed=await suggest.dismiss_many(member, body.ids))
 
 
 @router.get("/checks")

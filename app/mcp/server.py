@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from mcp.server import MCPServer
 from mcp.server.auth.provider import AccessToken, TokenVerifier
+from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import PlainTextResponse
@@ -96,4 +97,10 @@ def routes(server: MCPServer) -> list[Route]:
         json_response=True, stateless_http=True, max_request_body_size=MAX_BODY_BYTES,
         transport_security=TransportSecuritySettings(allowed_hosts=sorted(hosts)),
     )
-    return [Route(route.path, endpoint=app, methods=["POST"] if route.path == "/mcp" else ["GET"]) for route in app.routes]
+    # described here rather than by the SDK, which lists only the scope every call needs: a tool asks for
+    # what it reads here, so it must see that it may also record
+    auth = server.settings.auth
+    described = create_protected_resource_routes(
+        resource_url=auth.resource_server_url, authorization_servers=[auth.issuer_url], scopes_supported=list(McpScope),
+    )
+    return [Route("/mcp", endpoint=app, methods=["POST"]), *described]

@@ -60,7 +60,14 @@ async def create_token(member: dict, label: str, *, read_only: bool, ask_first: 
 
 
 async def create_signed_in(member: dict, client: dict, *, read_only: bool, ask_first: bool) -> dict:
-    """A grant for a tool the member signed in to over OAuth, named after the tool; it lasts until revoked or left unused."""
+    """A grant for a tool the member signed in to over OAuth, named after the tool; it lasts until revoked or left unused.
+
+    An earlier sign-in of the same tool that was never used is dropped: it was abandoned or is being redone. Used
+    ones stay, since one client id may be the same tool on several of the member's machines.
+    """
+    await _revoke({
+        "user_id": member["user_id"], "workspace_id": member["workspace_id"], "client_id": client["_id"], "last_used_at": None,
+    })
     return await _new_grant(member, McpGrantKind.OAUTH, client["name"], read_only=read_only, ask_first=ask_first, client_id=client["_id"])
 
 
@@ -117,6 +124,18 @@ async def change(user_id: str, grant_id: str, fields: dict) -> dict:
     if grant is None:
         raise NotFoundError("connection not found", error_code="connection_not_found")
     return (await _with_workspace([grant]))[0]
+
+
+async def list_for_workspace(workspace_id: str) -> list[dict]:
+    """Every member's connected AI tools in a workspace, for its admins, newest first."""
+    cursor = mongo.mcp_grants().find({"workspace_id": workspace_id, **LIVE}).sort([("created_at", -1), ("_id", 1)])
+    return await _with_workspace([grant async for grant in cursor])
+
+
+async def revoke_in_workspace(workspace_id: str, grant_id: str) -> None:
+    """An admin disconnects a member's tool from their workspace."""
+    if not await _revoke({"_id": grant_id, "workspace_id": workspace_id}):
+        raise NotFoundError("connection not found", error_code="connection_not_found")
 
 
 async def _revoke(query: dict) -> int:

@@ -173,6 +173,8 @@ class Settings(BaseSettings):
     mcp_client_document_hosts: str = "claude.ai,chatgpt.com"
     # OAuth clients one address may register a day
     mcp_registrations_per_ip_daily: int = 20
+    # how close in meaning (cosine) a record must be to an existing decision to be held as a likely duplicate
+    mcp_dedupe_similarity: float = 0.8
     # lookups one connected tool may make a minute
     mcp_reads_per_connection_minute: int = 60
     # decisions and questions one connected tool may record an hour, and all of a workspace's tools a day
